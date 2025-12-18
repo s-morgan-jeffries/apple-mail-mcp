@@ -205,17 +205,16 @@ class AppleMailConnector:
             status = "true" if read_status else "false"
             conditions.append(f"read status is {status}")
 
-        whose_clause = " and ".join(conditions) if conditions else "true"
-        limit_clause = f"items 1 thru {limit} of" if limit else ""
+        whose_filter = f" whose {' and '.join(conditions)}" if conditions else ""
 
         script = f"""
         tell application "Mail"
             set accountRef to account "{account_safe}"
             set mailboxRef to mailbox "{mailbox_safe}" of accountRef
-            set matchedMessages to {limit_clause} (messages of mailboxRef whose {whose_clause})
 
             set resultList to {{}}
-            repeat with msg in matchedMessages
+            set msgCount to 0
+            repeat with msg in (messages of mailboxRef{whose_filter})
                 set msgId to id of msg as text
                 set msgSubject to subject of msg
                 set msgSender to sender of msg
@@ -224,6 +223,8 @@ class AppleMailConnector:
 
                 set msgData to msgId & "|" & msgSubject & "|" & msgSender & "|" & msgDate & "|" & msgRead
                 set end of resultList to msgData
+                set msgCount to msgCount + 1
+                if {limit or 0} > 0 and msgCount >= {limit or 0} then exit repeat
             end repeat
 
             -- Join with newlines
