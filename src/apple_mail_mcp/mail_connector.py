@@ -211,7 +211,20 @@ class AppleMailConnector:
         script = f"""
         tell application "Mail"
             set accountRef to account "{account_safe}"
-            set mailboxRef to mailbox "{mailbox_safe}" of accountRef
+
+            -- Find mailbox by name (handles Gmail labels)
+            set mailboxRef to missing value
+            repeat with mb in mailboxes of accountRef
+                if name of mb is "{mailbox_safe}" then
+                    set mailboxRef to mb
+                    exit repeat
+                end if
+            end repeat
+
+            if mailboxRef is missing value then
+                error "Can't get mailbox \\"{mailbox_safe}\\"" number -1728
+            end if
+
             set matchedMessages to {limit_clause} (messages of mailboxRef whose {whose_clause})
 
             set resultList to {{}}
