@@ -36,6 +36,107 @@ mail = AppleMailConnector()
 
 
 @mcp.tool()
+def list_accounts() -> dict[str, Any]:
+    """
+    List all configured mail accounts.
+
+    Returns:
+        Dictionary containing list of accounts with names and email addresses
+
+    Example:
+        >>> list_accounts()
+        {"success": True, "accounts": [{"name": "Gmail", "emails": ["user@gmail.com"]}], "count": 2}
+    """
+    try:
+        logger.info("Listing mail accounts")
+
+        accounts = mail.list_accounts()
+
+        operation_logger.log_operation(
+            "list_accounts",
+            {},
+            "success"
+        )
+
+        return {
+            "success": True,
+            "accounts": accounts,
+            "count": len(accounts),
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing accounts: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
+def get_unread_messages(
+    account: str,
+    mailbox: str = "INBOX",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """
+    Get the most recent unread messages from a mailbox.
+
+    This is a convenience function that searches for unread messages.
+
+    Args:
+        account: Account name (e.g., "Gmail", "iCloud")
+        mailbox: Mailbox name (default: "INBOX")
+        limit: Maximum results to return (default: 20)
+
+    Returns:
+        Dictionary containing unread messages
+
+    Example:
+        >>> get_unread_messages("Gmail", limit=10)
+        {"success": True, "messages": [...], "count": 5}
+    """
+    try:
+        logger.info(f"Getting unread messages from {account}/{mailbox}")
+
+        messages = mail.search_messages(
+            account=account,
+            mailbox=mailbox,
+            read_status=False,
+            limit=limit,
+        )
+
+        operation_logger.log_operation(
+            "get_unread_messages",
+            {"account": account, "mailbox": mailbox, "limit": limit},
+            "success"
+        )
+
+        return {
+            "success": True,
+            "account": account,
+            "mailbox": mailbox,
+            "messages": messages,
+            "count": len(messages),
+        }
+
+    except (MailAccountNotFoundError, MailMailboxNotFoundError) as e:
+        logger.error(f"Not found error: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "not_found",
+        }
+    except Exception as e:
+        logger.error(f"Error getting unread messages: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
 def list_mailboxes(account: str) -> dict[str, Any]:
     """
     List all mailboxes for an account.
