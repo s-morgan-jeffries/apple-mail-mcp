@@ -10,6 +10,7 @@ A Model Context Protocol (MCP) server that provides programmatic access to Apple
 - 📬 **Read messages** with full content and metadata
 - 📂 **List mailboxes** and folder structure
 - ✅ **Mark as read/unread**
+- 🖱️ **Get selected messages** — retrieve whichever message(s) are currently highlighted in Mail
 
 ### Coming Soon
 - **Phase 2 (v0.2.0)**: Attachments, moving messages, flags, threads
@@ -94,6 +95,11 @@ List all my mailboxes and show unread counts
 Mark all newsletters from this week as read
 ```
 
+**Work with selected mail:**
+```
+Summarize the selected mail
+```
+
 ## Available Tools
 
 ### `search_messages`
@@ -140,6 +146,14 @@ Mark messages as read or unread.
 **Parameters:**
 - `message_ids` (required): List of message IDs
 - `read` (optional): true for read, false for unread (default: true)
+
+### `get_selected_messages`
+Get the message(s) currently selected/highlighted in Apple Mail.
+
+**Parameters:**
+- `include_content` (optional): Include message body text (default: true)
+
+**Returns:** List of message objects with full metadata and content.
 
 ## Security
 

@@ -212,6 +212,48 @@ def get_message(message_id: str, include_content: bool = True) -> dict[str, Any]
 
 
 @mcp.tool()
+def get_selected_messages(include_content: bool = True) -> dict[str, Any]:
+    """
+    Get messages currently selected in the Apple Mail application.
+
+    Returns the full details of whichever message(s) the user has highlighted
+    in Mail's message list at the time of the call.
+
+    Args:
+        include_content: Include message body text (default: true)
+
+    Returns:
+        Dictionary containing selected messages and count
+
+    Example:
+        >>> get_selected_messages()
+        {"success": True, "messages": [...], "count": 1}
+    """
+    try:
+        messages = mail.get_selected_messages(include_content=include_content)
+
+        operation_logger.log_operation(
+            "get_selected_messages",
+            {"include_content": include_content},
+            "success",
+        )
+
+        return {
+            "success": True,
+            "messages": messages,
+            "count": len(messages),
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting selected messages: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
 def send_email(
     subject: str,
     body: str,

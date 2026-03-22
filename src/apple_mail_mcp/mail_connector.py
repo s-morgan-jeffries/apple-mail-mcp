@@ -1118,3 +1118,46 @@ class AppleMailConnector:
 
         result = self._run_applescript(script)
         return result
+
+    def get_selected_messages(self, include_content: bool = True) -> list[dict[str, Any]]:
+        """
+        Get messages currently selected in Apple Mail.
+
+        Args:
+            include_content: Include message body (default: True)
+
+        Returns:
+            List of message dicts (same structure as get_message), empty if nothing selected
+
+        Raises:
+            MailAppleScriptError: If AppleScript execution fails
+        """
+        id_script = """
+        tell application "Mail"
+            set sel to selection
+            if (count of sel) is 0 then return ""
+            set idList to {}
+            repeat with msg in sel
+                set end of idList to (id of msg as rich text)
+            end repeat
+            set AppleScript's text item delimiters to ","
+            set result to idList as rich text
+            return result
+        end tell
+        """
+
+        raw_ids = self._run_applescript(id_script).strip()
+        if not raw_ids:
+            return []
+
+        message_ids = [mid.strip() for mid in raw_ids.split(",") if mid.strip()]
+
+        messages = []
+        for message_id in message_ids:
+            try:
+                msg = self.get_message(message_id, include_content=include_content)
+                messages.append(msg)
+            except MailMessageNotFoundError:
+                logger.warning(f"Selected message {message_id} could not be retrieved")
+
+        return messages
