@@ -1,0 +1,62 @@
+name: Release Hygiene Checks
+
+on:
+  push:
+    tags:
+      - 'v*-rc*'
+
+jobs:
+  hygiene-checks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+
+      - run: uv python install 3.10
+
+      - run: uv sync --dev
+
+      - name: Unit tests
+        run: uv run pytest tests/ -m "not integration and not e2e and not benchmark" -v --tb=short
+
+      - name: Version sync check
+        run: ./scripts/check_version_sync.sh
+
+      - name: Complexity check
+        run: ./scripts/check_complexity.sh
+
+      - name: Client-server parity check
+        run: ./scripts/check_client_server_parity.sh
+
+      - name: AppleScript safety check
+        run: ./scripts/check_applescript_safety.sh
+
+      - name: Verify milestone status
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG%-rc*}"
+          VERSION="${VERSION#v}"
+          MILESTONE=$(gh api repos/${{ github.repository }}/milestones --jq ".[] | select(.title == \"v$VERSION\" or .title == \"$VERSION\")" 2>/dev/null || echo "")
+          if [ -n "$MILESTONE" ]; then
+            OPEN=$(echo "$MILESTONE" | jq '.open_issues')
+            if [ "$OPEN" -gt 0 ]; then
+              echo "WARNING: Milestone v$VERSION has $OPEN open issue(s)"
+            else
+              echo "Milestone v$VERSION: all issues closed"
+            fi
+          else
+            echo "WARNING: No milestone found for v$VERSION"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Post results summary
+        if: always()
+        run: |
+          echo "## Release Hygiene Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag: \`$GITHUB_REF_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Tests: ${{ steps.unit-tests.outcome || 'completed' }}" >> $GITHUB_STEP_SUMMARY

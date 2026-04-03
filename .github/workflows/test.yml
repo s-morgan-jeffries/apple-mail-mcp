@@ -1,0 +1,52 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - run: uv python install 3.10
+
+      - run: uv sync --dev
+
+      - name: Lint
+        run: uv run ruff check src/ tests/
+
+      - name: Type check
+        run: uv run mypy src/
+        continue-on-error: true
+
+      - name: Unit tests
+        run: uv run pytest tests/ -m "not integration and not e2e and not benchmark" -v --cov=apple_mail_mcp --cov-report=term-missing --cov-fail-under=60
+        timeout-minutes: 5
+
+      - name: Complexity check
+        run: ./scripts/check_complexity.sh
+        continue-on-error: true
+
+      - name: Version sync check
+        run: ./scripts/check_version_sync.sh
+
+      - name: Client-server parity check
+        run: ./scripts/check_client_server_parity.sh
+
+  test-summary:
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.unit-tests.result }}" != "success" ]; then
+            echo "Unit tests failed"
+            exit 1
+          fi
