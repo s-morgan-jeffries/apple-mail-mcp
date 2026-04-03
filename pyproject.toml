@@ -52,12 +52,28 @@ packages = ["src/apple_mail_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
 asyncio_mode = "auto"
-addopts = [
-    "--cov=apple_mail_mcp",
-    "--cov-report=term-missing",
-    "--cov-report=html",
-    "--strict-markers",
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "asyncio: mark test as an async test",
+    "integration: mark test as integration test (requires --run-integration)",
+    "e2e: mark test as end-to-end test (full MCP stack)",
+    "benchmark: mark test as performance benchmark",
+    "slow: mark test as slow-running",
+]
+
+[tool.coverage.run]
+source = ["apple_mail_mcp"]
+
+[tool.coverage.report]
+fail_under = 60
+show_missing = true
+exclude_lines = [
+    "if __name__ == .__main__.:",
 ]
 
 [tool.black]
