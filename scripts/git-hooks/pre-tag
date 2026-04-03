@@ -1,0 +1,41 @@
+#!/bin/bash
+# Pre-tag hook: validate tag format and branch requirements.
+# Note: This hook is not natively supported by git. Use scripts/create_tag.sh instead.
+set -euo pipefail
+
+TAG="$1"
+
+# Validate tag format
+if ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$'; then
+    echo "ERROR: Invalid tag format '$TAG'. Expected: vX.Y.Z or vX.Y.Z-rcN"
+    exit 1
+fi
+
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+# RC tags must be on release/* branches
+if echo "$TAG" | grep -q 'rc'; then
+    if ! echo "$BRANCH" | grep -q '^release/'; then
+        echo "ERROR: RC tags must be created on release/* branches (current: $BRANCH)"
+        exit 1
+    fi
+fi
+
+# Final tags must be on main
+if ! echo "$TAG" | grep -q 'rc'; then
+    if [ "$BRANCH" != "main" ]; then
+        echo "ERROR: Final tags must be created on main (current: $BRANCH)"
+        exit 1
+    fi
+
+    # Check CHANGELOG date for final releases
+    if [ -f "CHANGELOG.md" ]; then
+        TODAY=$(date +%Y-%m-%d)
+        VERSION="${TAG#v}"
+        if ! grep -q "\[$VERSION\] - $TODAY" CHANGELOG.md; then
+            echo "WARNING: CHANGELOG.md entry for $VERSION doesn't have today's date ($TODAY)."
+        fi
+    fi
+fi
+
+echo "Tag validation passed for $TAG on $BRANCH."

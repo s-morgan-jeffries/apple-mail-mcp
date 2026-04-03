@@ -1,0 +1,27 @@
+#!/bin/bash
+# Pre-commit hook: block commits to main, warn on version bump without CHANGELOG.
+set -euo pipefail
+
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+# Block commits to main (allow release/* branches and hotfixes)
+if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+    COMMIT_MSG=$(cat .git/COMMIT_EDITMSG 2>/dev/null || echo "")
+    if echo "$COMMIT_MSG" | grep -qiE 'hotfix|emergency'; then
+        echo "Warning: Committing to $BRANCH (hotfix detected)."
+    else
+        echo "ERROR: Direct commits to $BRANCH are not allowed."
+        echo "Create a feature branch: git checkout -b feature/issue-N-description"
+        exit 1
+    fi
+fi
+
+# Warn if pyproject.toml version changed but CHANGELOG not staged
+if git diff --cached --name-only | grep -q 'pyproject.toml'; then
+    if git diff --cached pyproject.toml | grep -q '^+version'; then
+        if ! git diff --cached --name-only | grep -q 'CHANGELOG.md'; then
+            echo "WARNING: Version bumped in pyproject.toml but CHANGELOG.md not staged."
+            echo "This is OK for feature branches (CHANGELOG updated on release branches only)."
+        fi
+    fi
+fi

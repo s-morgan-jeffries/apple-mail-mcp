@@ -1,0 +1,19 @@
+#!/bin/bash
+# Pre-push hook: run unit tests before every push.
+set -euo pipefail
+
+echo "Running unit tests before push..."
+
+if command -v uv &> /dev/null; then
+    uv run pytest tests/unit/ -q --no-header 2>&1
+else
+    pytest tests/unit/ -q --no-header 2>&1
+fi
+
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "ERROR: Unit tests failed. Cannot push."
+    exit 1
+fi
+
+echo "Tests passed."
