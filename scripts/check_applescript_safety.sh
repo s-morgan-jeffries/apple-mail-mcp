@@ -44,13 +44,14 @@ fi
 # Check 4: Direct subprocess.run without going through _run_applescript
 echo ""
 echo "Check 4: Direct subprocess usage..."
-DIRECT_SUBPROCESS=$(grep -n 'subprocess.run' "$CONNECTOR" | grep -v '_run_applescript' | grep -v 'def _run' || true)
-if [ -n "$DIRECT_SUBPROCESS" ]; then
-    echo "  WARNING: Direct subprocess.run usage outside _run_applescript:"
-    echo "$DIRECT_SUBPROCESS" | sed 's/^/    /'
+# Count subprocess.run calls — there should be exactly 1 (inside _run_applescript)
+SUBPROCESS_COUNT=$(grep -c 'subprocess.run' "$CONNECTOR" || echo "0")
+if [ "$SUBPROCESS_COUNT" -gt 1 ]; then
+    echo "  WARNING: Multiple subprocess.run calls found ($SUBPROCESS_COUNT). Expected 1 (in _run_applescript):"
+    grep -n 'subprocess.run' "$CONNECTOR" | sed 's/^/    /'
     ERRORS=$((ERRORS + 1))
 else
-    echo "  OK: All subprocess calls go through _run_applescript."
+    echo "  OK: Single subprocess.run call (in _run_applescript)."
 fi
 
 # Check 5: Hardcoded paths in AppleScript

@@ -41,10 +41,10 @@ fi
 
 # Check CHANGELOG.md
 if [ -f "CHANGELOG.md" ]; then
-    CHANGELOG_VERSION=$(grep '^\## \[' CHANGELOG.md | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    CHANGELOG_VERSION=$(grep '^## \[' CHANGELOG.md | grep -v 'Unreleased' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
     if [ -n "$CHANGELOG_VERSION" ]; then
         echo "  CHANGELOG.md:   $CHANGELOG_VERSION (latest entry)"
-        if [ "$CHANGELOG_VERSION" != "$PYPROJECT_VERSION" ] && [ "$CHANGELOG_VERSION" != "Unreleased" ]; then
+        if [ "$CHANGELOG_VERSION" != "$PYPROJECT_VERSION" ]; then
             echo "  WARNING: CHANGELOG.md latest entry doesn't match (may be OK if unreleased changes exist)"
         fi
     fi

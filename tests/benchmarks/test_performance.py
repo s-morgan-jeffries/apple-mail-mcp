@@ -16,7 +16,6 @@ import time
 
 import pytest
 
-
 pytestmark = pytest.mark.benchmark
 
 

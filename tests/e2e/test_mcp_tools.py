@@ -9,7 +9,6 @@ Requires: MAIL_TEST_MODE=true and a configured Mail.app account.
 
 import pytest
 
-
 pytestmark = pytest.mark.e2e
 
 

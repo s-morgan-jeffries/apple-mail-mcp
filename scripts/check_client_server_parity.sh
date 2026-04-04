@@ -11,7 +11,7 @@ echo "Checking client-server parity..."
 CONNECTOR_METHODS=$(grep -E '^\s+def [a-z]' "$CONNECTOR" | grep -v '^\s+def _' | sed 's/.*def \([a-z_]*\)(.*/\1/' | sort)
 
 # Extract @mcp.tool() decorated functions from server
-SERVER_TOOLS=$(grep -B1 '@mcp.tool' "$SERVER" | grep 'def ' | sed 's/.*def \([a-z_]*\)(.*/\1/' | sort)
+SERVER_TOOLS=$(grep -A1 '@mcp.tool' "$SERVER" | grep 'def ' | sed 's/.*def \([a-z_]*\)(.*/\1/' | sort)
 
 echo ""
 echo "Connector public methods:"
