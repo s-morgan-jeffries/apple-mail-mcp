@@ -124,7 +124,7 @@ class TestAppleMailConnector:
         assert 'sender contains "john@example.com"' in call_args
         assert 'subject contains "meeting"' in call_args
         assert "read status is false" in call_args
-        assert "items 1 thru 10" in call_args
+        assert "if msgCount >= 10 then exit repeat" in call_args
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_message(
