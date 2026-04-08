@@ -1,21 +1,62 @@
 #!/bin/bash
-# Claude Code pre-bash hook: prevent dangerous operations.
-# Blocks: commits to main, direct git tag (use scripts/create_tag.sh).
+# PreToolUse hook for Bash commands
+# Checks: branch protection, tag creation enforcement
 
-COMMAND="$1"
+# Read JSON input from stdin
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command')
 
-# Block git commit on main/master
-if echo "$COMMAND" | grep -qE 'git commit' && ! echo "$COMMAND" | grep -q 'release/'; then
-    BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
-    if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
-        echo "BLOCKED: Cannot commit directly to $BRANCH."
-        echo "Create a feature branch first: git checkout -b feature/issue-N-description"
-        exit 1
+# ===================================================
+# CHECK: Prevent commits to main branch
+# ===================================================
+check_no_commits_to_main() {
+    if ! echo "$COMMAND" | grep -qE "^git commit"; then
+        return 0
     fi
-fi
 
-# Block direct git tag (enforce create_tag.sh)
-if echo "$COMMAND" | grep -qE '^git tag '; then
-    echo "BLOCKED: Use ./scripts/create_tag.sh vX.Y.Z instead of direct git tag."
-    exit 1
-fi
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+    # Allow release branches
+    if [[ "$CURRENT_BRANCH" =~ ^release/ ]]; then
+        return 0
+    fi
+
+    if [ "$CURRENT_BRANCH" = "main" ] || [ "$CURRENT_BRANCH" = "master" ]; then
+        if ! echo "$COMMAND" | grep -qiE "hotfix|emergency"; then
+            echo "Cannot commit directly to $CURRENT_BRANCH. Create a feature branch first." >&2
+            return 2
+        fi
+    fi
+
+    return 0
+}
+
+# ===================================================
+# CHECK: Enforce wrapper script for tag creation
+# ===================================================
+check_tag_creation_workflow() {
+    if ! echo "$COMMAND" | grep -qE "^git tag"; then
+        return 0
+    fi
+
+    echo "Use ./scripts/create_tag.sh <tag-name> instead of direct git tag commands." >&2
+    return 2
+}
+
+# ===================================================
+# Run all checks
+# ===================================================
+CHECKS=(
+    check_no_commits_to_main
+    check_tag_creation_workflow
+)
+
+for check in "${CHECKS[@]}"; do
+    $check
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -ne 0 ]; then
+        exit $EXIT_CODE
+    fi
+done
+
+exit 0

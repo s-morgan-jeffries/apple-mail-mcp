@@ -1,16 +1,39 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(make *)",
-      "Bash(uv run pytest*)",
-      "Bash(uv run ruff*)",
-      "Bash(uv run mypy*)",
-      "Bash(./scripts/check_*)",
-      "Bash(git status*)",
-      "Bash(git diff*)",
-      "Bash(git log*)",
-      "Bash(git branch*)",
-      "Bash(gh *)"
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/hooks/pre_bash.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/hooks/post_bash.sh",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/hooks/session_start.sh",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

@@ -84,6 +84,7 @@ Load these skills when working in their domains:
 - **applescript-mail** — Apple Mail AppleScript patterns, quirks, workarounds, pipe-delimited parsing
 - **api-design** — Tool design philosophy, decision tree for new tools
 - **integration-testing** — Real Mail.app testing, why mocks miss AppleScript bugs
+- **performance-patterns** — Operation timings, `whose` clause optimization, batch patterns, Gmail notes
 
 ## Key Files
 

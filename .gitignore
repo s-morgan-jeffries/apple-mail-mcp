@@ -42,6 +42,9 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
+# Claude Code local settings
+.claude/settings.local.json
+
 # IDEs
 .vscode/
 .idea/
