@@ -6,7 +6,6 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from .exceptions import MailOperationCancelledError
 from .utils import validate_email
 
 logger = logging.getLogger(__name__)
