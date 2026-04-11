@@ -281,7 +281,7 @@ def send_email(
             }
 
         # Send the email
-        result = mail.send_email(
+        mail.send_email(
             subject=subject,
             body=body,
             to=to,
@@ -462,7 +462,7 @@ def send_email_with_attachments(
             }
 
         # Send the email
-        result = mail.send_email_with_attachments(
+        mail.send_email_with_attachments(
             subject=subject,
             body=body,
             to=to,

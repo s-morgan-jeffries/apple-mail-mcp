@@ -8,7 +8,6 @@ from apple_mail_mcp.exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
     MailMailboxNotFoundError,
-    MailMessageNotFoundError,
 )
 from apple_mail_mcp.mail_connector import AppleMailConnector
 

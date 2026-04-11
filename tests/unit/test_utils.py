@@ -1,6 +1,5 @@
 """Unit tests for utility functions."""
 
-import pytest
 
 from apple_mail_mcp.utils import (
     escape_applescript_string,

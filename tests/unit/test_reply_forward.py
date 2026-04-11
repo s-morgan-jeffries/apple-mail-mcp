@@ -196,8 +196,8 @@ class TestForwardMessage:
         )
 
         assert result == "67890"
-        call_args = mock_run.call_args[0][0]
         # AppleScript forward should preserve attachments by default
+        mock_run.assert_called_once()
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_forward_without_attachments(

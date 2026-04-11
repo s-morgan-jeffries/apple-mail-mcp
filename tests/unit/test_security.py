@@ -1,6 +1,5 @@
 """Unit tests for security module."""
 
-import pytest
 
 from apple_mail_mcp.security import (
     OperationLogger,

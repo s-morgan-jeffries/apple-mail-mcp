@@ -2,7 +2,6 @@
 AppleScript-based connector for Apple Mail.
 """
 
-import json
 import logging
 import subprocess
 from pathlib import Path
@@ -76,13 +75,13 @@ class AppleMailConnector:
             logger.debug(f"AppleScript output: {output[:200]}...")
             return output
 
-        except subprocess.TimeoutExpired:
-            raise MailAppleScriptError(f"Script execution timeout after {self.timeout}s")
+        except subprocess.TimeoutExpired as e:
+            raise MailAppleScriptError(f"Script execution timeout after {self.timeout}s") from e
         except Exception as e:
             if isinstance(e, (MailAccountNotFoundError, MailMailboxNotFoundError,
                             MailMessageNotFoundError, MailAppleScriptError)):
                 raise
-            raise MailAppleScriptError(f"Unexpected error: {str(e)}")
+            raise MailAppleScriptError(f"Unexpected error: {str(e)}") from e
 
     def list_accounts(self) -> list[dict[str, Any]]:
         """
@@ -632,7 +631,7 @@ class AppleMailConnector:
             if ".." in str(save_directory):
                 raise ValueError("Path traversal detected")
         except (RuntimeError, OSError) as e:
-            raise ValueError(f"Invalid save directory: {e}")
+            raise ValueError(f"Invalid save directory: {e}") from e
 
         message_id_safe = escape_applescript_string(sanitize_input(message_id))
         dir_safe = escape_applescript_string(str(save_directory))
