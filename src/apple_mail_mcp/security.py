@@ -3,6 +3,8 @@ Security utilities for Apple Mail MCP.
 """
 
 import logging
+import time
+from collections import deque
 from datetime import datetime
 from typing import Any
 
@@ -145,29 +147,72 @@ def validate_bulk_operation(item_count: int, max_items: int = 100) -> tuple[bool
     return True, ""
 
 
-def rate_limit_check(operation: str, window_seconds: int = 60, max_operations: int = 10) -> bool:
+TIER_LIMITS: dict[str, tuple[int, float]] = {
+    "cheap_reads": (60, 60.0),
+    "expensive_ops": (20, 60.0),
+    "sends": (3, 60.0),
+}
+
+OPERATION_TIERS: dict[str, str] = {
+    "list_mailboxes": "cheap_reads",
+    "get_message": "cheap_reads",
+    "get_attachments": "cheap_reads",
+    "save_attachments": "cheap_reads",
+    "search_messages": "expensive_ops",
+    "mark_as_read": "expensive_ops",
+    "move_messages": "expensive_ops",
+    "flag_message": "expensive_ops",
+    "create_mailbox": "expensive_ops",
+    "delete_messages": "expensive_ops",
+    "reply_to_message": "expensive_ops",
+    "send_email": "sends",
+    "send_email_with_attachments": "sends",
+    "forward_message": "sends",
+}
+
+
+class RateLimiter:
+    """Sliding-window rate limiter with per-tier tracking."""
+
+    def __init__(self) -> None:
+        self._windows: dict[str, deque[float]] = {t: deque() for t in TIER_LIMITS}
+
+    def check(self, tier: str) -> bool:
+        """Return True if allowed, False if rate-limited."""
+        now = time.monotonic()
+        max_calls, window = TIER_LIMITS[tier]
+        q = self._windows[tier]
+        while q and q[0] <= now - window:
+            q.popleft()
+        if len(q) >= max_calls:
+            return False
+        q.append(now)
+        return True
+
+    def reset(self) -> None:
+        """Clear all tier windows."""
+        for q in self._windows.values():
+            q.clear()
+
+
+rate_limiter = RateLimiter()
+
+
+def check_rate_limit(operation: str, params: dict[str, Any]) -> dict[str, Any] | None:
     """
-    Check if operation should be rate limited.
-
-    Args:
-        operation: Operation name
-        window_seconds: Time window in seconds
-        max_operations: Maximum operations in window
-
-    Returns:
-        True if allowed, False if rate limited
+    Check rate limit for an operation. Returns None if allowed,
+    or a structured error dict if rate-limited.
     """
-    # TODO: Implement actual rate limiting with timing
-    # For now, just log and return True
-
-    recent_ops = [
-        op for op in operation_logger.operations if op["operation"] == operation
-    ]
-
-    if len(recent_ops) > max_operations:
-        logger.warning(f"Rate limit check for {operation}: {len(recent_ops)} recent operations")
-
-    return True
+    tier = OPERATION_TIERS[operation]
+    if rate_limiter.check(tier):
+        return None
+    operation_logger.log_operation(operation, params, "rate_limited")
+    max_calls, window = TIER_LIMITS[tier]
+    return {
+        "success": False,
+        "error": f"Rate limit exceeded: {max_calls} calls per {int(window)}s for {tier} operations",
+        "error_type": "rate_limited",
+    }
 
 
 def validate_attachment_type(filename: str, allow_executables: bool = False) -> bool:

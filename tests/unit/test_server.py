@@ -956,3 +956,90 @@ class TestForwardMessage:
 
         assert result["success"] is False
         assert result["error_type"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tight_limits() -> Any:
+    """Monkeypatch TIER_LIMITS down to 2 calls/60s so we can trip them easily."""
+    import apple_mail_mcp.security as sec
+    original = sec.TIER_LIMITS.copy()
+    sec.TIER_LIMITS.update({
+        "cheap_reads": (2, 60.0),
+        "expensive_ops": (2, 60.0),
+        "sends": (2, 60.0),
+    })
+    yield
+    sec.TIER_LIMITS.update(original)
+
+
+class TestRateLimitingIntegration:
+    """Verify rate limiting fires before connector calls in each tool."""
+
+    def test_cheap_read_rate_limited(
+        self, mock_mail: MagicMock, tight_limits: Any
+    ) -> None:
+        mock_mail.list_mailboxes.return_value = []
+
+        list_mailboxes("Gmail")
+        list_mailboxes("Gmail")
+        result = list_mailboxes("Gmail")
+
+        assert result["success"] is False
+        assert result["error_type"] == "rate_limited"
+        assert mock_mail.list_mailboxes.call_count == 2
+
+    def test_expensive_op_rate_limited(
+        self, mock_mail: MagicMock, tight_limits: Any
+    ) -> None:
+        mock_mail.search_messages.return_value = []
+
+        search_messages("Gmail")
+        search_messages("Gmail")
+        result = search_messages("Gmail")
+
+        assert result["success"] is False
+        assert result["error_type"] == "rate_limited"
+        assert mock_mail.search_messages.call_count == 2
+
+    def test_sends_rate_limited(
+        self, mock_mail: MagicMock, tight_limits: Any
+    ) -> None:
+        mock_mail.send_email.return_value = True
+        with patch("apple_mail_mcp.server.require_confirmation", return_value=True):
+            send_email(subject="a", body="b", to=["x@example.com"])
+            send_email(subject="a", body="b", to=["x@example.com"])
+            result = send_email(subject="a", body="b", to=["x@example.com"])
+
+        assert result["success"] is False
+        assert result["error_type"] == "rate_limited"
+        assert mock_mail.send_email.call_count == 2
+
+    def test_rate_limit_fires_before_connector(
+        self, mock_mail: MagicMock, tight_limits: Any
+    ) -> None:
+        """Prove the connector is never called once rate-limited."""
+        mock_mail.get_message.return_value = {"id": "1"}
+
+        get_message("1")
+        get_message("1")
+        result = get_message("1")
+
+        assert result["error_type"] == "rate_limited"
+        assert mock_mail.get_message.call_count == 2
+
+    def test_tiers_are_independent_in_server(
+        self, mock_mail: MagicMock, tight_limits: Any
+    ) -> None:
+        mock_mail.send_email.return_value = True
+        mock_mail.list_mailboxes.return_value = []
+        with patch("apple_mail_mcp.server.require_confirmation", return_value=True):
+            send_email(subject="a", body="b", to=["x@example.com"])
+            send_email(subject="a", body="b", to=["x@example.com"])
+
+        result = list_mailboxes("Gmail")
+        assert result["success"] is True
