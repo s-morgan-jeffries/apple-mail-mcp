@@ -15,6 +15,7 @@ from .exceptions import (
 )
 from .mail_connector import AppleMailConnector
 from .security import (
+    check_rate_limit,
     operation_logger,
     require_confirmation,
     validate_bulk_operation,
@@ -51,6 +52,10 @@ def list_mailboxes(account: str) -> dict[str, Any]:
         {"mailboxes": [{"name": "INBOX", "unread_count": 5}, ...]}
     """
     try:
+        rate_err = check_rate_limit("list_mailboxes", {"account": account})
+        if rate_err:
+            return rate_err
+
         logger.info(f"Listing mailboxes for account: {account}")
 
         mailboxes = mail.list_mailboxes(account)
@@ -111,6 +116,10 @@ def search_messages(
         {"success": True, "messages": [...], "count": 5}
     """
     try:
+        rate_err = check_rate_limit("search_messages", {"account": account, "mailbox": mailbox})
+        if rate_err:
+            return rate_err
+
         logger.info(
             f"Searching messages in {account}/{mailbox} with filters: "
             f"sender={sender_contains}, subject={subject_contains}, read={read_status}"
@@ -180,6 +189,10 @@ def get_message(message_id: str, include_content: bool = True) -> dict[str, Any]
         {"success": True, "message": {...}}
     """
     try:
+        rate_err = check_rate_limit("get_message", {"message_id": message_id})
+        if rate_err:
+            return rate_err
+
         logger.info(f"Getting message: {message_id}")
 
         message = mail.get_message(message_id, include_content=include_content)
@@ -244,6 +257,10 @@ def send_email(
         {"success": True, "message": "Email sent successfully"}
     """
     try:
+        rate_err = check_rate_limit("send_email", {"subject": subject, "to": to})
+        if rate_err:
+            return rate_err
+
         # Validate operation
         is_valid, error_msg = validate_send_operation(to, cc, bcc)
         if not is_valid:
@@ -342,6 +359,10 @@ def mark_as_read(message_ids: list[str], read: bool = True) -> dict[str, Any]:
         {"success": True, "updated": 2}
     """
     try:
+        rate_err = check_rate_limit("mark_as_read", {"count": len(message_ids)})
+        if rate_err:
+            return rate_err
+
         # Validate bulk operation
         is_valid, error_msg = validate_bulk_operation(len(message_ids), max_items=100)
         if not is_valid:
@@ -414,6 +435,10 @@ def send_email_with_attachments(
     from pathlib import Path
 
     try:
+        rate_err = check_rate_limit("send_email_with_attachments", {"subject": subject, "to": to})
+        if rate_err:
+            return rate_err
+
         # Convert string paths to Path objects
         attachment_paths = [Path(p) for p in attachments]
 
@@ -547,6 +572,10 @@ def get_attachments(message_id: str) -> dict[str, Any]:
         }
     """
     try:
+        rate_err = check_rate_limit("get_attachments", {"message_id": message_id})
+        if rate_err:
+            return rate_err
+
         logger.info(f"Getting attachments for message: {message_id}")
 
         attachments = mail.get_attachments(message_id)
@@ -606,6 +635,10 @@ def save_attachments(
     from pathlib import Path
 
     try:
+        rate_err = check_rate_limit("save_attachments", {"message_id": message_id})
+        if rate_err:
+            return rate_err
+
         save_path = Path(save_directory)
 
         # Validate directory
@@ -706,6 +739,10 @@ def move_messages(
                 "message": "No messages to move",
             }
 
+        rate_err = check_rate_limit("move_messages", {"count": len(message_ids)})
+        if rate_err:
+            return rate_err
+
         logger.info(
             f"Moving {len(message_ids)} message(s) to {destination_mailbox} in account {account}"
         )
@@ -777,6 +814,10 @@ def flag_message(
                 "message": "No messages to flag",
             }
 
+        rate_err = check_rate_limit("flag_message", {"count": len(message_ids)})
+        if rate_err:
+            return rate_err
+
         logger.info(f"Flagging {len(message_ids)} message(s) with color {flag_color}")
 
         # Flag the messages
@@ -845,6 +886,10 @@ def create_mailbox(
                 "error": "Mailbox name cannot be empty",
                 "error_type": "validation_error",
             }
+
+        rate_err = check_rate_limit("create_mailbox", {"account": account, "name": name})
+        if rate_err:
+            return rate_err
 
         logger.info(f"Creating mailbox '{name}' in account {account}")
 
@@ -925,6 +970,10 @@ def delete_messages(
                 "message": "No messages to delete",
             }
 
+        rate_err = check_rate_limit("delete_messages", {"count": len(message_ids)})
+        if rate_err:
+            return rate_err
+
         # Validate bulk operation limit
         if len(message_ids) > 100:
             return {
@@ -997,6 +1046,10 @@ def reply_to_message(
         )
     """
     try:
+        rate_err = check_rate_limit("reply_to_message", {"message_id": message_id})
+        if rate_err:
+            return rate_err
+
         logger.info(f"Creating reply to message {message_id}")
 
         # Reply to the message
@@ -1067,6 +1120,10 @@ def forward_message(
                 "error": "At least one recipient required",
                 "error_type": "validation_error",
             }
+
+        rate_err = check_rate_limit("forward_message", {"message_id": message_id, "to": to})
+        if rate_err:
+            return rate_err
 
         logger.info(f"Forwarding message {message_id} to {len(to)} recipient(s)")
 
