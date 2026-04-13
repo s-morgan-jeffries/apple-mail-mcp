@@ -5,7 +5,8 @@ FastMCP server for Apple Mail integration.
 import logging
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
+from fastmcp.server.elicitation import AcceptedElicitation
 
 from .exceptions import (
     MailAccountNotFoundError,
@@ -17,7 +18,6 @@ from .mail_connector import AppleMailConnector
 from .security import (
     check_rate_limit,
     operation_logger,
-    require_confirmation,
     validate_bulk_operation,
     validate_send_operation,
 )
@@ -34,6 +34,64 @@ mcp = FastMCP("apple-mail")
 
 # Initialize mail connector
 mail = AppleMailConnector()
+
+
+def _build_send_summary(
+    subject: str,
+    to: list[str],
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    body: str,
+) -> str:
+    """Build a human-readable confirmation summary for send operations."""
+    lines = [f"To: {', '.join(to)}"]
+    if cc:
+        lines.append(f"CC: {', '.join(cc)}")
+    if bcc:
+        lines.append(f"BCC: {', '.join(bcc)}")
+    lines.append(f"Subject: {subject}")
+    preview = body[:200] + "..." if len(body) > 200 else body
+    lines.append(f"\n{preview}")
+    return "Send this email?\n\n" + "\n".join(lines)
+
+
+def _build_forward_summary(
+    message_id: str,
+    to: list[str],
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    body: str,
+) -> str:
+    """Build a human-readable confirmation summary for forward operations."""
+    lines = [f"Forward message {message_id}", f"To: {', '.join(to)}"]
+    if cc:
+        lines.append(f"CC: {', '.join(cc)}")
+    if bcc:
+        lines.append(f"BCC: {', '.join(bcc)}")
+    if body:
+        preview = body[:200] + "..." if len(body) > 200 else body
+        lines.append(f"\n{preview}")
+    return "Forward this message?\n\n" + "\n".join(lines)
+
+
+async def _elicit_confirmation(
+    ctx: Context | None, summary: str, operation: str, params: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Elicit user confirmation via MCP. Returns error dict if declined, None if approved."""
+    if not ctx:
+        return None
+    try:
+        result = await ctx.elicit(summary, None)
+        if not isinstance(result, AcceptedElicitation):
+            operation_logger.log_operation(operation, params, "cancelled")
+            return {
+                "success": False,
+                "error": "User declined to send",
+                "error_type": "cancelled",
+            }
+    except Exception:
+        logger.warning("Elicitation not supported by client, proceeding without confirmation")
+    return None
 
 
 @mcp.tool()
@@ -225,17 +283,18 @@ def get_message(message_id: str, include_content: bool = True) -> dict[str, Any]
 
 
 @mcp.tool()
-def send_email(
+async def send_email(
     subject: str,
     body: str,
     to: list[str],
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Send an email via Apple Mail.
 
-    IMPORTANT: This operation requires user confirmation before sending.
+    Requires user confirmation via MCP elicitation before sending.
 
     Args:
         subject: Email subject
@@ -271,31 +330,13 @@ def send_email(
                 "error_type": "validation_error",
             }
 
-        # Require confirmation
-        confirmation_details = {
-            "subject": subject,
-            "to": to,
-            "cc": cc or [],
-            "bcc": bcc or [],
-            "body_preview": body[:100] + "..." if len(body) > 100 else body,
-        }
-
-        logger.info(f"Requesting confirmation to send email: {subject}")
-        logger.info(f"Recipients: {to}, CC: {cc}, BCC: {bcc}")
-
-        # In production, this should actually block and wait for user confirmation
-        # For now, we'll proceed but log the confirmation requirement
-        if not require_confirmation("send_email", confirmation_details):
-            operation_logger.log_operation(
-                "send_email",
-                confirmation_details,
-                "cancelled"
-            )
-            return {
-                "success": False,
-                "error": "User cancelled operation",
-                "error_type": "cancelled",
-            }
+        # Elicit user confirmation
+        summary = _build_send_summary(subject, to, cc, bcc, body)
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "send_email", {"subject": subject, "to": to}
+        )
+        if cancel_err:
+            return cancel_err
 
         # Send the email
         mail.send_email(
@@ -399,18 +440,19 @@ def mark_as_read(message_ids: list[str], read: bool = True) -> dict[str, Any]:
 
 
 @mcp.tool()
-def send_email_with_attachments(
+async def send_email_with_attachments(
     subject: str,
     body: str,
     to: list[str],
     attachments: list[str],
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Send an email with file attachments via Apple Mail.
 
-    IMPORTANT: This operation requires user confirmation before sending.
+    Requires user confirmation via MCP elicitation before sending.
 
     Args:
         subject: Email subject
@@ -461,30 +503,13 @@ def send_email_with_attachments(
                 "error_type": "file_not_found",
             }
 
-        # Require confirmation
-        confirmation_details = {
-            "subject": subject,
-            "to": to,
-            "cc": cc or [],
-            "bcc": bcc or [],
-            "attachments": [p.name for p in attachment_paths],
-            "body_preview": body[:100] + "..." if len(body) > 100 else body,
-        }
-
-        logger.info(f"Requesting confirmation to send email with attachments: {subject}")
-        logger.info(f"Recipients: {to}, Attachments: {len(attachments)}")
-
-        if not require_confirmation("send_email_with_attachments", confirmation_details):
-            operation_logger.log_operation(
-                "send_email_with_attachments",
-                confirmation_details,
-                "cancelled"
-            )
-            return {
-                "success": False,
-                "error": "User cancelled operation",
-                "error_type": "cancelled",
-            }
+        # Elicit user confirmation
+        summary = _build_send_summary(subject, to, cc, bcc, body)
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "send_email_with_attachments", {"subject": subject, "to": to}
+        )
+        if cancel_err:
+            return cancel_err
 
         # Send the email
         mail.send_email_with_attachments(
@@ -1083,15 +1108,18 @@ def reply_to_message(
 
 
 @mcp.tool()
-def forward_message(
+async def forward_message(
     message_id: str,
     to: list[str],
     body: str = "",
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Forward a message to recipients.
+
+    Requires user confirmation via MCP elicitation before forwarding.
 
     Args:
         message_id: ID of the message to forward
@@ -1124,6 +1152,14 @@ def forward_message(
         rate_err = check_rate_limit("forward_message", {"message_id": message_id, "to": to})
         if rate_err:
             return rate_err
+
+        # Elicit user confirmation
+        summary = _build_forward_summary(message_id, to, cc, bcc, body)
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "forward_message", {"message_id": message_id, "to": to}
+        )
+        if cancel_err:
+            return cancel_err
 
         logger.info(f"Forwarding message {message_id} to {len(to)} recipient(s)")
 
