@@ -11,9 +11,13 @@ operation_logger calls.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastmcp.server.elicitation import (
+    AcceptedElicitation,
+    DeclinedElicitation,
+)
 
 from apple_mail_mcp.exceptions import (
     MailAccountNotFoundError,
@@ -22,6 +26,8 @@ from apple_mail_mcp.exceptions import (
     MailMessageNotFoundError,
 )
 from apple_mail_mcp.server import (
+    _build_forward_summary,
+    _build_send_summary,
     create_mailbox,
     delete_messages,
     flag_message,
@@ -52,15 +58,19 @@ def mock_logger() -> Any:
 
 
 @pytest.fixture
-def mock_confirm_yes() -> Any:
-    with patch("apple_mail_mcp.server.require_confirmation", return_value=True) as m:
-        yield m
+def mock_ctx_accept() -> MagicMock:
+    """Mock MCP Context that accepts elicitation."""
+    ctx = MagicMock()
+    ctx.elicit = AsyncMock(return_value=AcceptedElicitation(data={}))
+    return ctx
 
 
 @pytest.fixture
-def mock_confirm_no() -> Any:
-    with patch("apple_mail_mcp.server.require_confirmation", return_value=False) as m:
-        yield m
+def mock_ctx_decline() -> MagicMock:
+    """Mock MCP Context that declines elicitation."""
+    ctx = MagicMock()
+    ctx.elicit = AsyncMock(return_value=DeclinedElicitation())
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -232,15 +242,14 @@ class TestGetMessage:
 
 
 class TestSendEmail:
-    def test_success_logs_and_returns_details(
+    async def test_success_logs_and_returns_details(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
     ) -> None:
         mock_mail.send_email.return_value = True
 
-        result = send_email(
+        result = await send_email(
             subject="Hi",
             body="hello",
             to=["a@example.com"],
@@ -249,50 +258,45 @@ class TestSendEmail:
 
         assert result["success"] is True
         assert result["details"]["recipients"] == 2
-        mock_confirm_yes.assert_called_once()
         mock_mail.send_email.assert_called_once()
         assert mock_logger.log_operation.call_args.args[2] == "success"
 
-    def test_validation_failure_no_confirmation_or_send(
+    async def test_validation_failure_no_send(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
     ) -> None:
-        result = send_email(subject="Hi", body="b", to=[])
+        result = await send_email(subject="Hi", body="b", to=[])
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
-        mock_confirm_yes.assert_not_called()
         mock_mail.send_email.assert_not_called()
         mock_logger.log_operation.assert_not_called()
 
-    def test_confirmation_denied_logs_cancelled(
+    async def test_elicitation_declined_logs_cancelled(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_no: MagicMock,
+        mock_ctx_decline: MagicMock,
     ) -> None:
-        result = send_email(
-            subject="Hi", body="b", to=["a@example.com"]
+        result = await send_email(
+            subject="Hi", body="b", to=["a@example.com"], ctx=mock_ctx_decline
         )
 
         assert result["success"] is False
         assert result["error_type"] == "cancelled"
         mock_mail.send_email.assert_not_called()
         mock_logger.log_operation.assert_called_once()
-        assert mock_logger.log_operation.call_args.args[0] == "send_email"
         assert mock_logger.log_operation.call_args.args[2] == "cancelled"
 
-    def test_applescript_error_maps_to_send_error(
+    async def test_applescript_error_maps_to_send_error(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
     ) -> None:
         mock_mail.send_email.side_effect = MailAppleScriptError("fail")
 
-        result = send_email(
+        result = await send_email(
             subject="Hi", body="b", to=["a@example.com"]
         )
 
@@ -301,15 +305,14 @@ class TestSendEmail:
         mock_logger.log_operation.assert_called_once()
         assert mock_logger.log_operation.call_args.args[2] == "failure"
 
-    def test_unexpected_exception_maps_to_unknown(
+    async def test_unexpected_exception_maps_to_unknown(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
     ) -> None:
         mock_mail.send_email.side_effect = RuntimeError("boom")
 
-        result = send_email(
+        result = await send_email(
             subject="Hi", body="b", to=["a@example.com"]
         )
 
@@ -371,18 +374,17 @@ class TestMarkAsRead:
 
 
 class TestSendEmailWithAttachments:
-    def test_success_returns_attachment_count(
+    async def test_success_returns_attachment_count(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
         tmp_path: Any,
     ) -> None:
         att = tmp_path / "report.pdf"
         att.write_bytes(b"pdf")
         mock_mail.send_email_with_attachments.return_value = True
 
-        result = send_email_with_attachments(
+        result = await send_email_with_attachments(
             subject="Hi",
             body="b",
             to=["a@example.com"],
@@ -394,31 +396,28 @@ class TestSendEmailWithAttachments:
         mock_mail.send_email_with_attachments.assert_called_once()
         assert mock_logger.log_operation.call_args.args[2] == "success"
 
-    def test_validation_failure_short_circuits(
+    async def test_validation_failure_short_circuits(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
     ) -> None:
-        result = send_email_with_attachments(
+        result = await send_email_with_attachments(
             subject="Hi", body="b", to=[], attachments=[]
         )
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
         mock_mail.send_email_with_attachments.assert_not_called()
-        mock_confirm_yes.assert_not_called()
 
-    def test_missing_attachment_file(
+    async def test_missing_attachment_file(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
         tmp_path: Any,
     ) -> None:
         missing = tmp_path / "nope.pdf"
 
-        result = send_email_with_attachments(
+        result = await send_email_with_attachments(
             subject="Hi",
             body="b",
             to=["a@example.com"],
@@ -428,23 +427,23 @@ class TestSendEmailWithAttachments:
         assert result["success"] is False
         assert result["error_type"] == "file_not_found"
         mock_mail.send_email_with_attachments.assert_not_called()
-        mock_confirm_yes.assert_not_called()
 
-    def test_confirmation_denied_logs_cancelled(
+    async def test_elicitation_declined_logs_cancelled(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_no: MagicMock,
+        mock_ctx_decline: MagicMock,
         tmp_path: Any,
     ) -> None:
         att = tmp_path / "r.pdf"
         att.write_bytes(b"x")
 
-        result = send_email_with_attachments(
+        result = await send_email_with_attachments(
             subject="Hi",
             body="b",
             to=["a@example.com"],
             attachments=[str(att)],
+            ctx=mock_ctx_decline,
         )
 
         assert result["success"] is False
@@ -453,18 +452,17 @@ class TestSendEmailWithAttachments:
         mock_logger.log_operation.assert_called_once()
         assert mock_logger.log_operation.call_args.args[2] == "cancelled"
 
-    def test_connector_value_error_maps_to_validation_error(
+    async def test_connector_value_error_maps_to_validation_error(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
         tmp_path: Any,
     ) -> None:
         att = tmp_path / "r.pdf"
         att.write_bytes(b"x")
         mock_mail.send_email_with_attachments.side_effect = ValueError("bad size")
 
-        result = send_email_with_attachments(
+        result = await send_email_with_attachments(
             subject="Hi",
             body="b",
             to=["a@example.com"],
@@ -475,18 +473,17 @@ class TestSendEmailWithAttachments:
         assert result["error_type"] == "validation_error"
         assert mock_logger.log_operation.call_args.args[2] == "failure"
 
-    def test_applescript_error_maps_to_send_error(
+    async def test_applescript_error_maps_to_send_error(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
         tmp_path: Any,
     ) -> None:
         att = tmp_path / "r.pdf"
         att.write_bytes(b"x")
         mock_mail.send_email_with_attachments.side_effect = MailAppleScriptError("fail")
 
-        result = send_email_with_attachments(
+        result = await send_email_with_attachments(
             subject="Hi",
             body="b",
             to=["a@example.com"],
@@ -497,18 +494,17 @@ class TestSendEmailWithAttachments:
         assert result["error_type"] == "send_error"
         assert mock_logger.log_operation.call_args.args[2] == "failure"
 
-    def test_unexpected_exception_maps_to_unknown(
+    async def test_unexpected_exception_maps_to_unknown(
         self,
         mock_mail: MagicMock,
         mock_logger: MagicMock,
-        mock_confirm_yes: MagicMock,
         tmp_path: Any,
     ) -> None:
         att = tmp_path / "r.pdf"
         att.write_bytes(b"x")
         mock_mail.send_email_with_attachments.side_effect = RuntimeError("boom")
 
-        result = send_email_with_attachments(
+        result = await send_email_with_attachments(
             subject="Hi",
             body="b",
             to=["a@example.com"],
@@ -910,10 +906,10 @@ class TestReplyToMessage:
 
 
 class TestForwardMessage:
-    def test_success(self, mock_mail: MagicMock) -> None:
+    async def test_success(self, mock_mail: MagicMock) -> None:
         mock_mail.forward_message.return_value = "fwd-7"
 
-        result = forward_message(
+        result = await forward_message(
             "1",
             to=["c@example.com"],
             body="fyi",
@@ -926,33 +922,42 @@ class TestForwardMessage:
         assert result["recipients"] == ["c@example.com"]
         assert result["cc"] == ["d@example.com"]
 
-    def test_empty_to_validation_error(self, mock_mail: MagicMock) -> None:
-        result = forward_message("1", to=[])
+    async def test_empty_to_validation_error(self, mock_mail: MagicMock) -> None:
+        result = await forward_message("1", to=[])
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
         mock_mail.forward_message.assert_not_called()
 
-    def test_message_not_found(self, mock_mail: MagicMock) -> None:
+    async def test_elicitation_declined_cancels(
+        self, mock_mail: MagicMock, mock_ctx_decline: MagicMock
+    ) -> None:
+        result = await forward_message("1", to=["c@example.com"], ctx=mock_ctx_decline)
+
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        mock_mail.forward_message.assert_not_called()
+
+    async def test_message_not_found(self, mock_mail: MagicMock) -> None:
         mock_mail.forward_message.side_effect = MailMessageNotFoundError("x")
 
-        result = forward_message("999", to=["c@example.com"])
+        result = await forward_message("999", to=["c@example.com"])
 
         assert result["success"] is False
         assert result["error_type"] == "message_not_found"
 
-    def test_value_error_from_connector(self, mock_mail: MagicMock) -> None:
+    async def test_value_error_from_connector(self, mock_mail: MagicMock) -> None:
         mock_mail.forward_message.side_effect = ValueError("bad")
 
-        result = forward_message("1", to=["c@example.com"])
+        result = await forward_message("1", to=["c@example.com"])
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
 
-    def test_unexpected_exception_maps_to_unknown(self, mock_mail: MagicMock) -> None:
+    async def test_unexpected_exception_maps_to_unknown(self, mock_mail: MagicMock) -> None:
         mock_mail.forward_message.side_effect = RuntimeError("boom")
 
-        result = forward_message("1", to=["c@example.com"])
+        result = await forward_message("1", to=["c@example.com"])
 
         assert result["success"] is False
         assert result["error_type"] == "unknown"
@@ -1006,14 +1011,14 @@ class TestRateLimitingIntegration:
         assert result["error_type"] == "rate_limited"
         assert mock_mail.search_messages.call_count == 2
 
-    def test_sends_rate_limited(
+    async def test_sends_rate_limited(
         self, mock_mail: MagicMock, tight_limits: Any
     ) -> None:
         mock_mail.send_email.return_value = True
-        with patch("apple_mail_mcp.server.require_confirmation", return_value=True):
-            send_email(subject="a", body="b", to=["x@example.com"])
-            send_email(subject="a", body="b", to=["x@example.com"])
-            result = send_email(subject="a", body="b", to=["x@example.com"])
+
+        await send_email(subject="a", body="b", to=["x@example.com"])
+        await send_email(subject="a", body="b", to=["x@example.com"])
+        result = await send_email(subject="a", body="b", to=["x@example.com"])
 
         assert result["success"] is False
         assert result["error_type"] == "rate_limited"
@@ -1032,14 +1037,103 @@ class TestRateLimitingIntegration:
         assert result["error_type"] == "rate_limited"
         assert mock_mail.get_message.call_count == 2
 
-    def test_tiers_are_independent_in_server(
+    async def test_tiers_are_independent_in_server(
         self, mock_mail: MagicMock, tight_limits: Any
     ) -> None:
         mock_mail.send_email.return_value = True
         mock_mail.list_mailboxes.return_value = []
-        with patch("apple_mail_mcp.server.require_confirmation", return_value=True):
-            send_email(subject="a", body="b", to=["x@example.com"])
-            send_email(subject="a", body="b", to=["x@example.com"])
+
+        await send_email(subject="a", body="b", to=["x@example.com"])
+        await send_email(subject="a", body="b", to=["x@example.com"])
 
         result = list_mailboxes("Gmail")
         assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Elicitation / confirmation tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildSendSummary:
+    def test_basic_summary(self) -> None:
+        result = _build_send_summary("Hi", ["a@example.com"], None, None, "body")
+        assert "Send this email?" in result
+        assert "To: a@example.com" in result
+        assert "Subject: Hi" in result
+        assert "body" in result
+
+    def test_includes_cc_bcc(self) -> None:
+        result = _build_send_summary(
+            "Hi", ["a@example.com"], ["b@example.com"], ["c@example.com"], "x"
+        )
+        assert "CC: b@example.com" in result
+        assert "BCC: c@example.com" in result
+
+    def test_truncates_long_body(self) -> None:
+        long_body = "x" * 300
+        result = _build_send_summary("Hi", ["a@example.com"], None, None, long_body)
+        assert "..." in result
+        assert len(result) < 400
+
+
+class TestBuildForwardSummary:
+    def test_basic_summary(self) -> None:
+        result = _build_forward_summary("msg-1", ["a@example.com"], None, None, "fyi")
+        assert "Forward this message?" in result
+        assert "msg-1" in result
+        assert "To: a@example.com" in result
+        assert "fyi" in result
+
+
+class TestElicitationFlow:
+    async def test_send_email_with_accepted_ctx(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.send_email.return_value = True
+
+        result = await send_email(
+            subject="Hi", body="b", to=["a@example.com"], ctx=mock_ctx_accept
+        )
+
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.send_email.assert_called_once()
+
+    async def test_send_email_without_ctx_skips_elicitation(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.send_email.return_value = True
+
+        result = await send_email(
+            subject="Hi", body="b", to=["a@example.com"], ctx=None
+        )
+
+        assert result["success"] is True
+        mock_mail.send_email.assert_called_once()
+
+    async def test_forward_with_accepted_ctx(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.forward_message.return_value = "fwd-1"
+
+        result = await forward_message(
+            "1", to=["a@example.com"], ctx=mock_ctx_accept
+        )
+
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_awaited_once()
+
+    async def test_elicitation_exception_falls_open(
+        self, mock_mail: MagicMock
+    ) -> None:
+        ctx = MagicMock()
+        ctx.elicit = AsyncMock(side_effect=RuntimeError("unsupported"))
+        mock_mail.send_email.return_value = True
+
+        result = await send_email(
+            subject="Hi", body="b", to=["a@example.com"], ctx=ctx
+        )
+
+        assert result["success"] is True
+        mock_mail.send_email.assert_called_once()

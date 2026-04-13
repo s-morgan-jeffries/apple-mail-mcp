@@ -56,43 +56,6 @@ class OperationLogger:
 operation_logger = OperationLogger()
 
 
-def require_confirmation(operation: str, details: dict[str, Any]) -> bool:
-    """
-    Request user confirmation for sensitive operations.
-
-    Args:
-        operation: Operation name
-        details: Operation details to show user
-
-    Returns:
-        True if confirmed, False otherwise
-
-    Raises:
-        MailOperationCancelledError: If user cancels
-    """
-    # In a real implementation, this would:
-    # 1. Show a confirmation dialog
-    # 2. Display operation details
-    # 3. Wait for user approval
-    #
-    # For MCP, this is typically handled by the client (Claude Desktop)
-    # by including operation details in the response and requiring
-    # explicit user action.
-    #
-    # For now, we'll log the request and return True for testing.
-    # Production should implement proper confirmation flow.
-
-    logger.warning(f"Confirmation requested for: {operation}")
-    logger.warning(f"Details: {details}")
-
-    # TODO: Implement proper confirmation mechanism
-    # This could be:
-    # - Return special MCP response that requires user confirmation
-    # - Show system dialog (osascript -e 'display dialog ...')
-    # - Use callback mechanism
-
-    return True
-
 
 def validate_send_operation(
     to: list[str], cc: list[str] | None = None, bcc: list[str] | None = None
