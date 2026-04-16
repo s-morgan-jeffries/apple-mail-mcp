@@ -17,6 +17,7 @@ from .exceptions import (
 from .mail_connector import AppleMailConnector
 from .security import (
     check_rate_limit,
+    check_test_mode_safety,
     operation_logger,
     validate_bulk_operation,
     validate_send_operation,
@@ -110,6 +111,10 @@ def list_mailboxes(account: str) -> dict[str, Any]:
         {"mailboxes": [{"name": "INBOX", "unread_count": 5}, ...]}
     """
     try:
+        safety_err = check_test_mode_safety("list_mailboxes", account=account)
+        if safety_err:
+            return safety_err
+
         rate_err = check_rate_limit("list_mailboxes", {"account": account})
         if rate_err:
             return rate_err
@@ -174,6 +179,10 @@ def search_messages(
         {"success": True, "messages": [...], "count": 5}
     """
     try:
+        safety_err = check_test_mode_safety("search_messages", account=account)
+        if safety_err:
+            return safety_err
+
         rate_err = check_rate_limit("search_messages", {"account": account, "mailbox": mailbox})
         if rate_err:
             return rate_err
@@ -316,6 +325,11 @@ async def send_email(
         {"success": True, "message": "Email sent successfully"}
     """
     try:
+        all_recipients = to + (cc or []) + (bcc or [])
+        safety_err = check_test_mode_safety("send_email", recipients=all_recipients)
+        if safety_err:
+            return safety_err
+
         rate_err = check_rate_limit("send_email", {"subject": subject, "to": to})
         if rate_err:
             return rate_err
@@ -477,6 +491,11 @@ async def send_email_with_attachments(
     from pathlib import Path
 
     try:
+        all_recipients = to + (cc or []) + (bcc or [])
+        safety_err = check_test_mode_safety("send_email_with_attachments", recipients=all_recipients)
+        if safety_err:
+            return safety_err
+
         rate_err = check_rate_limit("send_email_with_attachments", {"subject": subject, "to": to})
         if rate_err:
             return rate_err
@@ -757,6 +776,10 @@ def move_messages(
         )
     """
     try:
+        safety_err = check_test_mode_safety("move_messages", account=account)
+        if safety_err:
+            return safety_err
+
         if not message_ids:
             return {
                 "success": True,
@@ -905,6 +928,10 @@ def create_mailbox(
         )
     """
     try:
+        safety_err = check_test_mode_safety("create_mailbox", account=account)
+        if safety_err:
+            return safety_err
+
         if not name or not name.strip():
             return {
                 "success": False,
@@ -1071,6 +1098,10 @@ def reply_to_message(
         )
     """
     try:
+        safety_err = check_test_mode_safety("reply_to_message")
+        if safety_err:
+            return safety_err
+
         rate_err = check_rate_limit("reply_to_message", {"message_id": message_id})
         if rate_err:
             return rate_err
@@ -1148,6 +1179,11 @@ async def forward_message(
                 "error": "At least one recipient required",
                 "error_type": "validation_error",
             }
+
+        all_recipients = to + (cc or []) + (bcc or [])
+        safety_err = check_test_mode_safety("forward_message", recipients=all_recipients)
+        if safety_err:
+            return safety_err
 
         rate_err = check_rate_limit("forward_message", {"message_id": message_id, "to": to})
         if rate_err:

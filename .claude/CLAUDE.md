@@ -70,6 +70,8 @@ make coverage              # Coverage report
 
 **Hard rule:** If you wrote or modified AppleScript in the connector, integration tests must cover it before merge.
 
+**Integration test safety:** When running tests via `server.py` tools, set `MAIL_TEST_MODE=true` and `MAIL_TEST_ACCOUNT=<test account name>`. The safety gate blocks destructive operations on non-test accounts and blocks sends to non-reserved recipient domains (must be @example.com, .test, .invalid, .localhost, etc.). See `check_test_mode_safety` in [src/apple_mail_mcp/security.py](src/apple_mail_mcp/security.py).
+
 ## Branch Convention
 
 `{type}/issue-{num}-{description}` — e.g., `feature/issue-42-thread-support`, `fix/issue-99-timeout`

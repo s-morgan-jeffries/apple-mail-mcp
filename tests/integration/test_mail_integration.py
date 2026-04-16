@@ -5,8 +5,11 @@ These tests require:
 1. Apple Mail.app installed and running
 2. At least one configured mail account
 3. Permission granted for automation
+4. Environment variables for safety gate (when running tools via server.py):
+   - MAIL_TEST_MODE=true
+   - MAIL_TEST_ACCOUNT=<test account name>
 
-Run with: pytest tests/integration/ -v
+Run with: MAIL_TEST_MODE=true MAIL_TEST_ACCOUNT=TestAccount pytest --run-integration
 """
 
 import pytest
@@ -30,12 +33,12 @@ def connector() -> AppleMailConnector:
 @pytest.fixture
 def test_account() -> str:
     """
-    Return the test account name.
+    Return the test account name from MAIL_TEST_ACCOUNT env var.
 
-    Override this in conftest.py or via environment variable.
+    This matches the account name the server.py safety gate verifies.
     """
     import os
-    return os.getenv("TEST_MAIL_ACCOUNT", "Gmail")
+    return os.getenv("MAIL_TEST_ACCOUNT", "Gmail")
 
 
 class TestMailIntegration:

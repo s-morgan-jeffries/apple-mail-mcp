@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
 from apple_mail_mcp.security import (
@@ -9,7 +10,9 @@ from apple_mail_mcp.security import (
     TIER_LIMITS,
     OperationLogger,
     RateLimiter,
+    _is_reserved_test_domain,
     check_rate_limit,
+    check_test_mode_safety,
     operation_logger,
     rate_limiter,
     validate_bulk_operation,
@@ -230,3 +233,134 @@ class TestCheckRateLimit:
         for _tier, (max_calls, window) in TIER_LIMITS.items():
             assert max_calls > 0
             assert window > 0
+
+
+# ---------------------------------------------------------------------------
+# Test-mode safety
+# ---------------------------------------------------------------------------
+
+
+class TestIsReservedTestDomain:
+    """Tests for RFC 2606 reserved test domain detection."""
+
+    def test_example_dot_com_is_reserved(self) -> None:
+        assert _is_reserved_test_domain("a@example.com") is True
+
+    def test_example_org_and_net_reserved(self) -> None:
+        assert _is_reserved_test_domain("a@example.org") is True
+        assert _is_reserved_test_domain("a@example.net") is True
+
+    def test_dot_test_tld_reserved(self) -> None:
+        assert _is_reserved_test_domain("a@foo.test") is True
+
+    def test_dot_invalid_tld_reserved(self) -> None:
+        assert _is_reserved_test_domain("a@foo.invalid") is True
+
+    def test_dot_localhost_tld_reserved(self) -> None:
+        assert _is_reserved_test_domain("a@foo.localhost") is True
+
+    def test_dot_example_tld_reserved(self) -> None:
+        assert _is_reserved_test_domain("a@foo.example") is True
+
+    def test_real_domains_not_reserved(self) -> None:
+        assert _is_reserved_test_domain("a@gmail.com") is False
+        assert _is_reserved_test_domain("a@anthropic.com") is False
+
+    def test_malformed_email_not_reserved(self) -> None:
+        assert _is_reserved_test_domain("not-an-email") is False
+        assert _is_reserved_test_domain("") is False
+
+    def test_case_insensitive(self) -> None:
+        assert _is_reserved_test_domain("a@EXAMPLE.COM") is True
+        assert _is_reserved_test_domain("a@FOO.TEST") is True
+
+
+class TestCheckTestModeSafety:
+    """Tests for check_test_mode_safety helper."""
+
+    def setup_method(self) -> None:
+        operation_logger.operations.clear()
+
+    def test_no_test_mode_returns_none(self, monkeypatch: Any) -> None:
+        monkeypatch.delenv("MAIL_TEST_MODE", raising=False)
+        assert check_test_mode_safety("search_messages", account="Gmail") is None
+        assert (
+            check_test_mode_safety("send_email", recipients=["real@person.com"])
+            is None
+        )
+
+    def test_test_mode_without_test_account_fails_account_ops(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.delenv("MAIL_TEST_ACCOUNT", raising=False)
+
+        result = check_test_mode_safety("search_messages", account="Gmail")
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+        assert "MAIL_TEST_ACCOUNT" in result["error"]
+
+    def test_account_matches_returns_none(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        assert check_test_mode_safety("search_messages", account="TestAccount") is None
+
+    def test_account_mismatch_returns_error(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        result = check_test_mode_safety("search_messages", account="Gmail")
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+        assert "Gmail" in result["error"]
+        assert "TestAccount" in result["error"]
+
+    def test_send_all_reserved_recipients_ok(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+
+        assert (
+            check_test_mode_safety("send_email", recipients=["a@example.com"]) is None
+        )
+        assert (
+            check_test_mode_safety(
+                "send_email", recipients=["a@example.com", "b@foo.test"]
+            )
+            is None
+        )
+
+    def test_send_with_one_real_recipient_blocked(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+
+        result = check_test_mode_safety(
+            "send_email", recipients=["a@example.com", "real@person.com"]
+        )
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+        assert "real@person.com" in result["error"]
+
+    def test_non_gated_operation_returns_none(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        # get_message is not gated (no account param, not a send)
+        assert check_test_mode_safety("get_message") is None
+
+    def test_violation_logged_to_operation_logger(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        check_test_mode_safety("search_messages", account="Gmail")
+
+        recent = operation_logger.get_recent_operations(limit=5)
+        violations = [op for op in recent if op["result"] == "safety_violation"]
+        assert len(violations) == 1
+        assert violations[0]["operation"] == "search_messages"
+
+    def test_reply_to_message_in_test_mode_blocked(self, monkeypatch: Any) -> None:
+        """reply_to_message can't inspect recipients; blocked in test mode."""
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+
+        result = check_test_mode_safety("reply_to_message")
+        assert result is not None
+        assert result["error_type"] == "safety_violation"

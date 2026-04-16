@@ -1137,3 +1137,159 @@ class TestElicitationFlow:
 
         assert result["success"] is True
         mock_mail.send_email.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test-mode safety gate (MAIL_TEST_MODE)
+# ---------------------------------------------------------------------------
+
+
+class TestSafetyGate:
+    """Verify test-mode safety gate fires before other checks in each tool."""
+
+    async def test_send_email_blocked_by_real_recipient(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+
+        result = await send_email(
+            subject="Hi", body="b", to=["real@person.com"]
+        )
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.send_email.assert_not_called()
+
+    async def test_send_email_allowed_with_reserved_recipient(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        mock_mail.send_email.return_value = True
+
+        result = await send_email(
+            subject="Hi", body="b", to=["test@example.com"]
+        )
+
+        assert result["success"] is True
+
+    async def test_send_email_with_attachments_blocked_by_real_recipient(
+        self, mock_mail: MagicMock, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        att = tmp_path / "a.pdf"
+        att.write_bytes(b"x")
+
+        result = await send_email_with_attachments(
+            subject="Hi",
+            body="b",
+            to=["real@person.com"],
+            attachments=[str(att)],
+        )
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.send_email_with_attachments.assert_not_called()
+
+    async def test_forward_message_blocked_by_real_recipient(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+
+        result = await forward_message("1", to=["real@person.com"])
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.forward_message.assert_not_called()
+
+    def test_reply_to_message_blocked_entirely(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+
+        result = reply_to_message("1", "hi")
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.reply_to_message.assert_not_called()
+
+    def test_list_mailboxes_blocked_by_wrong_account(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        result = list_mailboxes("Gmail")
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.list_mailboxes.assert_not_called()
+
+    def test_list_mailboxes_allowed_with_test_account(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+        mock_mail.list_mailboxes.return_value = []
+
+        result = list_mailboxes("TestAccount")
+
+        assert result["success"] is True
+
+    def test_search_messages_blocked_by_wrong_account(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        result = search_messages("Gmail")
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.search_messages.assert_not_called()
+
+    def test_move_messages_blocked_by_wrong_account(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        result = move_messages(["1"], "Archive", "Gmail")
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.move_messages.assert_not_called()
+
+    def test_create_mailbox_blocked_by_wrong_account(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        result = create_mailbox("Gmail", "NewBox")
+
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_mail.create_mailbox.assert_not_called()
+
+    def test_safety_fires_before_rate_limit(
+        self, mock_mail: MagicMock, monkeypatch: Any, tight_limits: Any
+    ) -> None:
+        """When both tight rate limits and bad account, safety error wins."""
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        result = list_mailboxes("Gmail")
+
+        assert result["error_type"] == "safety_violation"
+        mock_mail.list_mailboxes.assert_not_called()
+
+    def test_non_test_mode_production_unaffected(
+        self, mock_mail: MagicMock, monkeypatch: Any
+    ) -> None:
+        """Without MAIL_TEST_MODE, all operations work normally."""
+        monkeypatch.delenv("MAIL_TEST_MODE", raising=False)
+        mock_mail.list_mailboxes.return_value = []
+
+        result = list_mailboxes("Gmail")
+
+        assert result["success"] is True
