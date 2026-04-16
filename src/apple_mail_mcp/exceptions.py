@@ -43,3 +43,9 @@ class MailOperationCancelledError(MailError):
     """User cancelled the operation."""
 
     pass
+
+
+class MailSafetyError(MailError):
+    """Safety check failed in test mode (wrong account or non-reserved recipient)."""
+
+    pass

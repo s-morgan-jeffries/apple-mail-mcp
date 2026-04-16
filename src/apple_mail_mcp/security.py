@@ -3,6 +3,7 @@ Security utilities for Apple Mail MCP.
 """
 
 import logging
+import os
 import time
 from collections import deque
 from datetime import datetime
@@ -233,3 +234,112 @@ def validate_attachment_size(size_bytes: int, max_size: int = 25 * 1024 * 1024) 
         False
     """
     return size_bytes <= max_size
+
+
+# ---------------------------------------------------------------------------
+# Test-mode safety system (MAIL_TEST_MODE)
+# ---------------------------------------------------------------------------
+
+RESERVED_TEST_DOMAINS = {"example.com", "example.net", "example.org"}
+RESERVED_TEST_TLDS = {".example", ".test", ".invalid", ".localhost"}
+
+ACCOUNT_GATED_OPERATIONS = {
+    "list_mailboxes",
+    "search_messages",
+    "move_messages",
+    "create_mailbox",
+}
+
+SEND_OPERATIONS = {
+    "send_email",
+    "send_email_with_attachments",
+    "reply_to_message",
+    "forward_message",
+}
+
+
+def _is_test_mode_enabled() -> bool:
+    return os.environ.get("MAIL_TEST_MODE", "").lower() == "true"
+
+
+def _get_test_account() -> str | None:
+    return os.environ.get("MAIL_TEST_ACCOUNT")
+
+
+def _is_reserved_test_domain(email: str) -> bool:
+    """True if email's domain is an RFC 2606 reserved test domain."""
+    if "@" not in email:
+        return False
+    domain = email.rsplit("@", 1)[1].lower()
+    if domain in RESERVED_TEST_DOMAINS:
+        return True
+    for tld in RESERVED_TEST_TLDS:
+        bare = tld.lstrip(".")
+        if domain == bare or domain.endswith(tld):
+            return True
+    return False
+
+
+def _safety_error(operation: str, message: str) -> dict[str, Any]:
+    operation_logger.log_operation(
+        operation, {"violation": message}, "safety_violation"
+    )
+    return {
+        "success": False,
+        "error": message,
+        "error_type": "safety_violation",
+    }
+
+
+def check_test_mode_safety(
+    operation: str,
+    account: str | None = None,
+    recipients: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Enforce test-mode safety checks. Returns None if allowed (or no test mode),
+    or a structured error dict on safety violation.
+
+    In test mode (MAIL_TEST_MODE=true):
+    - Account-gated operations must target MAIL_TEST_ACCOUNT.
+    - Send operations must send only to RFC 2606 reserved domains.
+    - reply_to_message is blocked (can't inspect original recipients here).
+    """
+    if not _is_test_mode_enabled():
+        return None
+
+    # reply_to_message has no recipient visibility at this layer; block it
+    if operation == "reply_to_message":
+        return _safety_error(
+            operation,
+            "Test mode: reply_to_message is blocked because recipients cannot "
+            "be verified without fetching the original message. Use forward_message "
+            "with explicit recipients instead.",
+        )
+
+    # Account-gated operations: verify target account matches MAIL_TEST_ACCOUNT
+    if operation in ACCOUNT_GATED_OPERATIONS and account is not None:
+        test_account = _get_test_account()
+        if test_account is None:
+            return _safety_error(
+                operation,
+                "MAIL_TEST_MODE is set but MAIL_TEST_ACCOUNT is not",
+            )
+        if account != test_account:
+            return _safety_error(
+                operation,
+                f"Test mode: account '{account}' does not match "
+                f"MAIL_TEST_ACCOUNT='{test_account}'",
+            )
+
+    # Send operations: verify every recipient is on a reserved test domain
+    if operation in SEND_OPERATIONS and recipients is not None:
+        bad = [r for r in recipients if not _is_reserved_test_domain(r)]
+        if bad:
+            return _safety_error(
+                operation,
+                f"Test mode: recipients must use RFC 2606 reserved domains "
+                f"(example.com/.test/.invalid/etc.). Violations: {', '.join(bad)}",
+            )
+
+    return None
