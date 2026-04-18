@@ -62,3 +62,14 @@ class TestToolRegistration:
         tools = await server.mcp.list_tools()
         names = {t.name for t in tools}
         assert names == EXPECTED_TOOLS
+
+    async def test_list_accounts_not_exposed_as_tool(self) -> None:
+        """list_accounts exists on the connector but is intentionally not an MCP tool.
+
+        This mirrors the known warning from scripts/check_client_server_parity.sh.
+        If list_accounts is ever exposed, update check_client_server_parity.sh
+        AND delete this test.
+        """
+        tools = await server.mcp.list_tools()
+        names = {t.name for t in tools}
+        assert "list_accounts" not in names
