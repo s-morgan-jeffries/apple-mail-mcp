@@ -78,14 +78,28 @@ class TestAppleMailConnector:
             connector._run_applescript("test script")
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_list_mailboxes(
+    def test_list_mailboxes_returns_structured_data(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Test listing mailboxes."""
-        mock_run.return_value = "mailbox data"
-
+        mock_run.return_value = (
+            '[{"name":"INBOX","unread_count":5},'
+            '{"name":"Sent","unread_count":0},'
+            '{"name":"Projects/Client A","unread_count":3}]'
+        )
         result = connector.list_mailboxes("Gmail")
-        assert len(result) > 0
+        assert result == [
+            {"name": "INBOX", "unread_count": 5},
+            {"name": "Sent", "unread_count": 0},
+            {"name": "Projects/Client A", "unread_count": 3},
+        ]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_mailboxes_propagates_account_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = MailAccountNotFoundError("Can't get account \"NoSuch\".")
+        with pytest.raises(MailAccountNotFoundError):
+            connector.list_mailboxes("NoSuch")
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_basic(

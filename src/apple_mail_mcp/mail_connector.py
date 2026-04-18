@@ -164,39 +164,34 @@ class AppleMailConnector:
         return accounts
 
     def list_mailboxes(self, account: str) -> list[dict[str, Any]]:
-        """
-        List all mailboxes for an account.
+        """List all mailboxes for an account.
 
         Args:
-            account: Account name
+            account: Account name.
 
         Returns:
-            List of mailbox dictionaries
+            List of dicts with keys: name, unread_count.
 
         Raises:
-            MailAccountNotFoundError: If account doesn't exist
+            MailAccountNotFoundError: If account doesn't exist.
         """
         account_safe = escape_applescript_string(sanitize_input(account))
 
-        script = f"""
+        tell_body = f'''
         tell application "Mail"
             set accountRef to account "{account_safe}"
-            set mailboxList to {{}}
+            set resultData to {{}}
 
             repeat with mb in mailboxes of accountRef
-                set mbInfo to {{mbName:(name of mb), unreadCount:(unread count of mb)}}
-                set end of mailboxList to mbInfo
+                set mbRecord to {{name:(name of mb), unread_count:(unread count of mb)}}
+                set end of resultData to mbRecord
             end repeat
-
-            return mailboxList
         end tell
-        """
+        '''
 
+        script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-
-        # TODO: Parse AppleScript records properly
-        # For now return raw
-        return [{"raw": result}]
+        return parse_applescript_json(result)
 
     def search_messages(
         self,
