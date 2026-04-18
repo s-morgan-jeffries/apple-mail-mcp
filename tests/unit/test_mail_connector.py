@@ -100,6 +100,31 @@ class TestAppleMailConnector:
         assert result == []
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_accounts_handles_empty_email_addresses(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """An account with no email addresses must return email_addresses as []."""
+        mock_run.return_value = '[{"name":"LocalOnly","email_addresses":[]}]'
+        result = connector.list_accounts()
+        assert result == [{"name": "LocalOnly", "email_addresses": []}]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_accounts_script_quotes_name_key(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """The AppleScript must use |name| (quoted) so NSJSONSerialization keeps it.
+
+        Unquoted `name:` in the record literal causes the key to be silently
+        dropped during ASObjC -> NSDictionary conversion because `name` collides
+        with NSObject's `name` property. Regression guard for real Mail.app bug.
+        """
+        mock_run.return_value = "[]"
+        connector.list_accounts()
+        script = mock_run.call_args[0][0]
+        assert "|name|:(name of acc)" in script
+        assert "{name:(name of acc)" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_mailboxes_returns_structured_data(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
@@ -122,6 +147,16 @@ class TestAppleMailConnector:
         mock_run.side_effect = MailAccountNotFoundError("Can't get account \"NoSuch\".")
         with pytest.raises(MailAccountNotFoundError):
             connector.list_mailboxes("NoSuch")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_mailboxes_script_quotes_name_key(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """The AppleScript must use |name| so NSJSONSerialization preserves it."""
+        mock_run.return_value = "[]"
+        connector.list_mailboxes("Gmail")
+        script = mock_run.call_args[0][0]
+        assert "|name|:(name of mb)" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_basic(

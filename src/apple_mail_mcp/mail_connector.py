@@ -133,7 +133,9 @@ class AppleMailConnector:
         tell application "Mail"
             set resultData to {}
             repeat with acc in accounts
-                set accRecord to {name:(name of acc), email_addresses:(email addresses of acc)}
+                set accEmails to email addresses of acc
+                if accEmails is missing value then set accEmails to {}
+                set accRecord to {|name|:(name of acc), email_addresses:accEmails}
                 set end of resultData to accRecord
             end repeat
         end tell
@@ -163,7 +165,9 @@ class AppleMailConnector:
             set resultData to {{}}
 
             repeat with mb in mailboxes of accountRef
-                set mbRecord to {{name:(name of mb), unread_count:(unread count of mb)}}
+                set mbUnread to unread count of mb
+                if mbUnread is missing value then set mbUnread to 0
+                set mbRecord to {{|name|:(name of mb), unread_count:mbUnread}}
                 set end of resultData to mbRecord
             end repeat
         end tell
@@ -525,7 +529,7 @@ class AppleMailConnector:
 
                         set resultData to {{}}
                         repeat with att in attList
-                            set attRecord to {{name:(name of att), mime_type:(MIME type of att), size:(file size of att), downloaded:(downloaded of att)}}
+                            set attRecord to {{|name|:(name of att), mime_type:(MIME type of att), size:(file size of att), downloaded:(downloaded of att)}}
                             set end of resultData to attRecord
                         end repeat
                         exit repeat

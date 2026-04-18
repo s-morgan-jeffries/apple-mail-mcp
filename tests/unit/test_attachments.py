@@ -161,6 +161,16 @@ class TestGetAttachments:
         with pytest.raises(MailMessageNotFoundError):
             connector.get_attachments("99999")
 
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_attachments_script_quotes_name_key(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """The AppleScript must use |name| so NSJSONSerialization preserves it."""
+        mock_run.return_value = "[]"
+        connector.get_attachments("12345")
+        script = mock_run.call_args[0][0]
+        assert "|name|:(name of att)" in script
+
 
 class TestSaveAttachments:
     """Tests for saving attachments."""
