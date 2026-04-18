@@ -539,58 +539,35 @@ class AppleMailConnector:
         """
         message_id_safe = escape_applescript_string(sanitize_input(message_id))
 
-        script = f"""
+        tell_body = f'''
         tell application "Mail"
-            -- Search all accounts for message
+            set resultData to missing value
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
                         set msg to first message of mb whose id is {message_id_safe}
                         set attList to mail attachments of msg
 
-                        set resultList to {{}}
+                        set resultData to {{}}
                         repeat with att in attList
-                            set attName to name of att
-                            set attType to MIME type of att
-                            set attSize to file size of att
-                            set attDownloaded to downloaded of att
-
-                            set attData to attName & "|" & attType & "|" & attSize & "|" & attDownloaded
-                            set end of resultList to attData
+                            set attRecord to {{name:(name of att), mime_type:(MIME type of att), size:(file size of att), downloaded:(downloaded of att)}}
+                            set end of resultData to attRecord
                         end repeat
-
-                        -- Join with newlines
-                        set AppleScript's text item delimiters to linefeed
-                        set output to resultList as text
-                        set AppleScript's text item delimiters to ""
-
-                        return output
+                        exit repeat
                     end try
                 end repeat
+                if resultData is not missing value then exit repeat
             end repeat
 
-            error "Message not found"
+            if resultData is missing value then
+                error "Can't get message: not found"
+            end if
         end tell
-        """
+        '''
 
+        script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-
-        # Parse results
-        attachments = []
-        if result:
-            for line in result.split("\n"):
-                if not line:
-                    continue
-                parts = line.split("|")
-                if len(parts) >= 4:
-                    attachments.append({
-                        "name": parts[0],
-                        "mime_type": parts[1],
-                        "size": int(parts[2]) if parts[2].isdigit() else 0,
-                        "downloaded": parts[3].lower() == "true",
-                    })
-
-        return attachments
+        return parse_applescript_json(result)
 
     def save_attachments(
         self,
