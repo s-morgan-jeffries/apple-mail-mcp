@@ -18,6 +18,40 @@ from .utils import escape_applescript_string, sanitize_input
 logger = logging.getLogger(__name__)
 
 
+def _wrap_as_json_script(body: str) -> str:
+    """Wrap a tell-block body with ASObjC imports and an NSJSONSerialization return.
+
+    The `body` must:
+      - Contain a `tell application "Mail" ... end tell` block.
+      - Assign the final result to an AppleScript variable named `resultData`
+        inside that tell block.
+      - Use `try/on error errMsg / return "ERROR: " & errMsg / end try` for
+        failure cases (the wrapper does not add a try/catch).
+
+    The wrapper:
+      - Prepends `use framework "Foundation"` and `use scripting additions`.
+      - After the tell block, serializes `resultData` via NSJSONSerialization
+        and returns the resulting NSString as text.
+
+    Args:
+        body: AppleScript tell-block source setting `resultData`.
+
+    Returns:
+        Full AppleScript source ready for osascript.
+    """
+    return (
+        'use framework "Foundation"\n'
+        "use scripting additions\n"
+        "\n"
+        f"{body}\n"
+        "\n"
+        "set jsonData to (current application's NSJSONSerialization's "
+        "dataWithJSONObject:resultData options:0 |error|:(missing value))\n"
+        "return (current application's NSString's alloc()'s "
+        "initWithData:jsonData encoding:4) as text\n"
+    )
+
+
 class AppleMailConnector:
     """Interface to Apple Mail via AppleScript."""
 

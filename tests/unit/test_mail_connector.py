@@ -9,7 +9,7 @@ from apple_mail_mcp.exceptions import (
     MailAppleScriptError,
     MailMailboxNotFoundError,
 )
-from apple_mail_mcp.mail_connector import AppleMailConnector
+from apple_mail_mcp.mail_connector import AppleMailConnector, _wrap_as_json_script
 
 
 class TestAppleMailConnector:
@@ -208,3 +208,28 @@ class TestAppleMailConnector:
         """Test marking with empty list."""
         result = connector.mark_as_read([])
         assert result == 0
+
+
+class TestWrapAsJsonScript:
+    def test_wrapper_contains_framework_directive(self) -> None:
+        script = _wrap_as_json_script('tell application "Mail"\n    set resultData to {}\nend tell')
+        assert 'use framework "Foundation"' in script
+        assert "use scripting additions" in script
+
+    def test_wrapper_appends_json_serialization(self) -> None:
+        script = _wrap_as_json_script('tell application "Mail"\n    set resultData to {}\nend tell')
+        assert "NSJSONSerialization" in script
+        assert "dataWithJSONObject:resultData" in script
+
+    def test_wrapper_preserves_body(self) -> None:
+        body = 'tell application "Mail"\n    set resultData to {name:"INBOX"}\nend tell'
+        script = _wrap_as_json_script(body)
+        assert body in script
+
+    def test_wrapper_orders_framework_before_body_before_epilogue(self) -> None:
+        body = 'tell application "Mail"\n    set resultData to {name:"INBOX"}\nend tell'
+        script = _wrap_as_json_script(body)
+        framework_idx = script.index('use framework "Foundation"')
+        body_idx = script.index(body)
+        epilogue_idx = script.index("NSJSONSerialization")
+        assert framework_idx < body_idx < epilogue_idx
