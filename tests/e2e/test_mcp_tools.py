@@ -1,29 +1,64 @@
-"""
-End-to-end tests for MCP tool registration and invocation.
+"""End-to-end tests for MCP tool registration and invocation.
 
-These tests verify the full MCP stack: tool registration, parameter passing,
-and response format through the FastMCP server layer.
+These tests exercise the full FastMCP dispatch layer in-process: they
+enumerate tools via mcp.list_tools() and invoke them via mcp.call_tool().
+The mail connector is mocked; no AppleScript runs.
 
-Requires: MAIL_TEST_MODE=true and a configured Mail.app account.
+MAIL_TEST_MODE is disabled per-test so the safety gate does not interfere
+with mocked dispatch. These tests verify MCP wiring, not safety behavior
+(safety is covered by tests/unit/test_security.py).
 """
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
+from apple_mail_mcp import server
+
 pytestmark = pytest.mark.e2e
+
+EXPECTED_TOOLS = {
+    "list_mailboxes",
+    "search_messages",
+    "get_message",
+    "send_email",
+    "mark_as_read",
+    "send_email_with_attachments",
+    "get_attachments",
+    "save_attachments",
+    "move_messages",
+    "flag_message",
+    "create_mailbox",
+    "delete_messages",
+    "reply_to_message",
+    "forward_message",
+}
+
+
+@pytest.fixture(autouse=True)
+def _disable_test_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable MAIL_TEST_MODE so the safety gate does not interfere.
+
+    The connector is mocked, so destructive operations cannot reach Mail.app.
+    """
+    monkeypatch.setenv("MAIL_TEST_MODE", "false")
+
+
+@pytest.fixture
+def mock_mail(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Replace the module-level mail connector with a MagicMock."""
+    mock = MagicMock()
+    monkeypatch.setattr(server, "mail", mock)
+    return mock
 
 
 class TestToolRegistration:
-    """Verify all expected tools are registered with the MCP server."""
+    """Verify tools are registered with correct names and schemas."""
 
-    def test_server_imports_without_error(self) -> None:
-        """Server module imports cleanly."""
-        from apple_mail_mcp.server import mcp  # noqa: F401
-
-    def test_expected_tool_count(self) -> None:
-        """Server exposes the expected number of tools."""
-        from apple_mail_mcp.server import mcp
-
-        # Phase 1 (5) + Phase 2 (7) + Phase 3 (2) = 14 tools
-        # Note: FastMCP tool access may vary by version
-        # This test should be updated as tools are added
-        assert mcp is not None
+    async def test_expected_tool_names_registered(self) -> None:
+        tools = await server.mcp.list_tools()
+        names = {t.name for t in tools}
+        assert names == EXPECTED_TOOLS
