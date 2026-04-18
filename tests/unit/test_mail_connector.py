@@ -92,7 +92,11 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         """Test basic message search."""
-        mock_run.return_value = "12345|Test Subject|sender@example.com|Mon Jan 1 2024|false"
+        mock_run.return_value = (
+            '[{"id":"12345","subject":"Test Subject",'
+            '"sender":"sender@example.com","date_received":"Mon Jan 1 2024",'
+            '"read_status":false}]'
+        )
 
         result = connector.search_messages("Gmail", "INBOX")
 
@@ -102,12 +106,51 @@ class TestAppleMailConnector:
         assert result[0]["sender"] == "sender@example.com"
         assert result[0]["read_status"] is False
 
+    # Note: validates the Python-side JSON parse. Real end-to-end correctness
+    # (AppleScript actually emitting valid JSON when the data contains '|')
+    # is proven by integration tests.
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_handles_pipe_in_subject(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Subject containing '|' must not break parsing (the bug this refactor fixes)."""
+        mock_run.return_value = (
+            '[{"id":"abc","subject":"Q3 Report | Draft",'
+            '"sender":"boss@example.com","date_received":"Wed Feb 5 2025",'
+            '"read_status":true}]'
+        )
+        result = connector.search_messages("Gmail", "INBOX")
+        assert len(result) == 1
+        assert result[0]["subject"] == "Q3 Report | Draft"
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_propagates_account_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """If _run_applescript raises MailAccountNotFoundError, search_messages must not swallow it.
+
+        Regression guard: a previous version wrapped the tell-block in try/on error,
+        which downgraded MailAccountNotFoundError to MailAppleScriptError.
+        """
+        mock_run.side_effect = MailAccountNotFoundError("Can't get account \"NoSuch\".")
+        with pytest.raises(MailAccountNotFoundError):
+            connector.search_messages("NoSuch", "INBOX")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_propagates_mailbox_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Similar regression guard for MailMailboxNotFoundError."""
+        mock_run.side_effect = MailMailboxNotFoundError("Can't get mailbox \"NoSuch\".")
+        with pytest.raises(MailMailboxNotFoundError):
+            connector.search_messages("Gmail", "NoSuch")
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_with_filters(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         """Test message search with filters."""
-        mock_run.return_value = ""
+        mock_run.return_value = "[]"
 
         connector.search_messages(
             "Gmail",

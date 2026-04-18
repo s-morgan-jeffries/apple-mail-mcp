@@ -13,7 +13,7 @@ from .exceptions import (
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
 )
-from .utils import escape_applescript_string, sanitize_input
+from .utils import escape_applescript_string, parse_applescript_json, sanitize_input
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,12 @@ def _wrap_as_json_script(body: str) -> str:
       - Contain a `tell application "Mail" ... end tell` block.
       - Assign the final result to an AppleScript variable named `resultData`
         inside that tell block.
-      - Use `try/on error errMsg / return "ERROR: " & errMsg / end try` for
-        failure cases (the wrapper does not add a try/catch).
+      - Handle failures EITHER by letting AppleScript errors propagate via
+        stderr (preserves _run_applescript's typed exception mapping, e.g.,
+        MailAccountNotFoundError) OR by catching them in a try block and
+        returning "ERROR: <message>" (surfaces as MailAppleScriptError on
+        the Python side). Use the stderr path when the caller relies on
+        typed exceptions; use the "ERROR:" path otherwise.
 
     The wrapper:
       - Prepends `use framework "Foundation"` and `use scripting additions`.
@@ -241,52 +245,23 @@ class AppleMailConnector:
         whose_clause = " and ".join(conditions) if conditions else "true"
         limit_clause = f"items 1 thru {limit} of" if limit else ""
 
-        script = f"""
+        tell_body = f'''
         tell application "Mail"
             set accountRef to account "{account_safe}"
             set mailboxRef to mailbox "{mailbox_safe}" of accountRef
             set matchedMessages to {limit_clause} (messages of mailboxRef whose {whose_clause})
 
-            set resultList to {{}}
+            set resultData to {{}}
             repeat with msg in matchedMessages
-                set msgId to id of msg as text
-                set msgSubject to subject of msg
-                set msgSender to sender of msg
-                set msgDate to date received of msg as text
-                set msgRead to read status of msg
-
-                set msgData to msgId & "|" & msgSubject & "|" & msgSender & "|" & msgDate & "|" & msgRead
-                set end of resultList to msgData
+                set msgRecord to {{id:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg)}}
+                set end of resultData to msgRecord
             end repeat
-
-            -- Join with newlines
-            set AppleScript's text item delimiters to linefeed
-            set output to resultList as text
-            set AppleScript's text item delimiters to ""
-
-            return output
         end tell
-        """
+        '''
 
+        script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-
-        # Parse results
-        messages = []
-        if result:
-            for line in result.split("\n"):
-                if not line:
-                    continue
-                parts = line.split("|")
-                if len(parts) >= 5:
-                    messages.append({
-                        "id": parts[0],
-                        "subject": parts[1],
-                        "sender": parts[2],
-                        "date_received": parts[3],
-                        "read_status": parts[4].lower() == "true",
-                    })
-
-        return messages
+        return parse_applescript_json(result)
 
     def get_message(self, message_id: str, include_content: bool = True) -> dict[str, Any]:
         """
