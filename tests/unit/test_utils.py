@@ -1,9 +1,14 @@
 """Unit tests for utility functions."""
 
+import json
 
+import pytest
+
+from apple_mail_mcp.exceptions import MailAppleScriptError
 from apple_mail_mcp.utils import (
     escape_applescript_string,
     format_applescript_list,
+    parse_applescript_json,
     parse_applescript_list,
     parse_date_filter,
     sanitize_input,
@@ -125,3 +130,45 @@ class TestSanitizeInput:
         long_string = "a" * 20000
         result = sanitize_input(long_string)
         assert len(result) == 10000
+
+
+class TestParseAppleScriptJson:
+    def test_parses_valid_json_list(self) -> None:
+        result = parse_applescript_json('[{"name": "INBOX", "unread_count": 5}]')
+        assert result == [{"name": "INBOX", "unread_count": 5}]
+
+    def test_parses_valid_json_object(self) -> None:
+        result = parse_applescript_json('{"id": "abc", "read_status": true}')
+        assert result == {"id": "abc", "read_status": True}
+
+    def test_parses_empty_list(self) -> None:
+        assert parse_applescript_json("[]") == []
+
+    def test_strips_whitespace(self) -> None:
+        assert parse_applescript_json("  [1,2,3]  \n") == [1, 2, 3]
+
+    def test_raises_on_error_prefix(self) -> None:
+        with pytest.raises(MailAppleScriptError, match="boom"):
+            parse_applescript_json("ERROR: boom")
+
+    def test_raises_on_error_prefix_with_whitespace(self) -> None:
+        with pytest.raises(MailAppleScriptError, match="something broke"):
+            parse_applescript_json("ERROR:   something broke  ")
+
+    def test_raises_on_malformed_json(self) -> None:
+        with pytest.raises(json.JSONDecodeError):
+            parse_applescript_json("{not valid")
+
+    def test_parses_null(self) -> None:
+        assert parse_applescript_json("null") is None
+
+    def test_parses_quoted_string(self) -> None:
+        assert parse_applescript_json('"hello"') == "hello"
+
+    def test_parses_integer(self) -> None:
+        assert parse_applescript_json("42") == 42
+
+    def test_raises_on_empty_error_message(self) -> None:
+        """'ERROR:' with no message still raises (edge case)."""
+        with pytest.raises(MailAppleScriptError):
+            parse_applescript_json("ERROR:")
