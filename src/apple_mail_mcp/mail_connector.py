@@ -5,7 +5,7 @@ AppleScript-based connector for Apple Mail.
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .exceptions import (
     MailAccountNotFoundError,
@@ -141,7 +141,7 @@ class AppleMailConnector:
 
         script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-        return parse_applescript_json(result)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))
 
     def list_mailboxes(self, account: str) -> list[dict[str, Any]]:
         """List all mailboxes for an account.
@@ -171,7 +171,7 @@ class AppleMailConnector:
 
         script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-        return parse_applescript_json(result)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))
 
     def search_messages(
         self,
@@ -236,7 +236,7 @@ class AppleMailConnector:
 
         script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-        return parse_applescript_json(result)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))
 
     def get_message(self, message_id: str, include_content: bool = True) -> dict[str, Any]:
         """
@@ -288,7 +288,7 @@ class AppleMailConnector:
 
         script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-        return parse_applescript_json(result)
+        return cast(dict[str, Any], parse_applescript_json(result))
 
     def send_email(
         self,
@@ -542,7 +542,7 @@ class AppleMailConnector:
 
         script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-        return parse_applescript_json(result)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))
 
     def save_attachments(
         self,
