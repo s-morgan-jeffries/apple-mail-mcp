@@ -11,6 +11,7 @@ with mocked dispatch. These tests verify MCP wiring, not safety behavior
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -103,6 +104,13 @@ class TestToolRegistration:
         )
 
 
+# Sentinels replaced at test-time with values derived from tmp_path. Needed
+# because parametrize is evaluated at collection time and cannot reference
+# per-test fixtures directly.
+_TMP_DIR = "__TMP_DIR__"
+_TMP_FILE = "__TMP_FILE__"
+
+
 # (tool_name, call_args, connector_method, connector_return_value)
 INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
     (
@@ -110,6 +118,93 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         {"account": "TestAccount"},
         "list_mailboxes",
         ["INBOX", "Sent"],
+    ),
+    (
+        "search_messages",
+        {"account": "TestAccount"},
+        "search_messages",
+        [],
+    ),
+    (
+        "get_message",
+        {"message_id": "msg-1"},
+        "get_message",
+        {"id": "msg-1", "subject": "s", "from": "a@example.com"},
+    ),
+    (
+        "send_email",
+        {"to": ["a@example.com"], "subject": "s", "body": "b"},
+        "send_email",
+        None,
+    ),
+    (
+        "mark_as_read",
+        {"message_ids": ["msg-1"]},
+        "mark_as_read",
+        1,
+    ),
+    (
+        "send_email_with_attachments",
+        {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+            "attachments": [_TMP_FILE],
+        },
+        "send_email_with_attachments",
+        None,
+    ),
+    (
+        "get_attachments",
+        {"message_id": "msg-1"},
+        "get_attachments",
+        [],
+    ),
+    (
+        "save_attachments",
+        {"message_id": "msg-1", "save_directory": _TMP_DIR},
+        "save_attachments",
+        0,
+    ),
+    (
+        "move_messages",
+        {
+            "message_ids": ["msg-1"],
+            "account": "TestAccount",
+            "destination_mailbox": "Archive",
+        },
+        "move_messages",
+        1,
+    ),
+    (
+        "flag_message",
+        {"message_ids": ["msg-1"], "flag_color": "red"},
+        "flag_message",
+        1,
+    ),
+    (
+        "create_mailbox",
+        {"account": "TestAccount", "name": "NewBox"},
+        "create_mailbox",
+        True,
+    ),
+    (
+        "delete_messages",
+        {"message_ids": ["msg-1"]},
+        "delete_messages",
+        1,
+    ),
+    (
+        "reply_to_message",
+        {"message_id": "msg-1", "body": "b"},
+        "reply_to_message",
+        "reply-1",
+    ),
+    (
+        "forward_message",
+        {"message_id": "msg-1", "to": ["a@example.com"]},
+        "forward_message",
+        "forward-1",
     ),
 ]
 
@@ -125,16 +220,33 @@ class TestToolInvocation:
     async def test_tool_invocation_happy_path(
         self,
         mock_mail: MagicMock,
+        tmp_path: Path,
         tool_name: str,
         call_args: dict[str, Any],
         connector_method: str,
         connector_return: Any,
     ) -> None:
+        # Materialize tmp_path-dependent sentinels. save_attachments requires
+        # the directory to exist; send_email_with_attachments requires each
+        # attachment path to exist on disk.
+        tmp_file = tmp_path / "attachment.txt"
+        resolved_args: dict[str, Any] = {}
+        for key, value in call_args.items():
+            if value == _TMP_DIR:
+                resolved_args[key] = str(tmp_path)
+            elif isinstance(value, list) and _TMP_FILE in value:
+                tmp_file.write_text("dummy")
+                resolved_args[key] = [
+                    str(tmp_file) if item == _TMP_FILE else item for item in value
+                ]
+            else:
+                resolved_args[key] = value
+
         getattr(mock_mail, connector_method).return_value = connector_return
 
-        result = await server.mcp.call_tool(tool_name, call_args)
+        result = await server.mcp.call_tool(tool_name, resolved_args)
 
         assert result.structured_content is not None
-        assert result.structured_content.get("success") is True
+        assert result.structured_content["success"] is True
         assert "error" not in result.structured_content
         getattr(mock_mail, connector_method).assert_called_once()
