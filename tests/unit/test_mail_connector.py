@@ -173,7 +173,11 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         """Test getting a message."""
-        mock_run.return_value = "12345|Subject|sender@example.com|Mon Jan 1 2024|true|false|Message body"
+        mock_run.return_value = (
+            '{"id":"12345","subject":"Subject","sender":"sender@example.com",'
+            '"date_received":"Mon Jan 1 2024","read_status":true,"flagged":false,'
+            '"content":"Message body"}'
+        )
 
         result = connector.get_message("12345", include_content=True)
 
@@ -182,6 +186,19 @@ class TestAppleMailConnector:
         assert result["content"] == "Message body"
         assert result["read_status"] is True
         assert result["flagged"] is False
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_message_handles_pipe_in_content(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Body containing '|' must not break parsing."""
+        mock_run.return_value = (
+            '{"id":"99","subject":"x","sender":"a@b.com",'
+            '"date_received":"Mon Jan 1 2024","read_status":false,"flagged":false,'
+            '"content":"col1|col2|col3"}'
+        )
+        result = connector.get_message("99", include_content=True)
+        assert result["content"] == "col1|col2|col3"
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_send_email_basic(

@@ -283,49 +283,37 @@ class AppleMailConnector:
         # We need to search through mailboxes
         # For now, we'll use a simplified approach
 
-        content_clause = 'set msgContent to content of msg' if include_content else 'set msgContent to ""'
+        content_clause = (
+            'set msgContent to content of msg'
+            if include_content
+            else 'set msgContent to ""'
+        )
 
-        script = f"""
+        tell_body = f'''
         tell application "Mail"
-            -- Search all accounts for message
+            set resultData to missing value
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
                         set msg to first message of mb whose id is {message_id_safe}
-
-                        set msgId to id of msg as text
-                        set msgSubject to subject of msg
-                        set msgSender to sender of msg
-                        set msgDate to date received of msg as text
-                        set msgRead to read status of msg
-                        set msgFlagged to flagged status of msg
                         {content_clause}
 
-                        return msgId & "|" & msgSubject & "|" & msgSender & "|" & msgDate & "|" & msgRead & "|" & msgFlagged & "|" & msgContent
+                        set resultData to {{id:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg), flagged:(flagged status of msg), content:msgContent}}
+                        exit repeat
                     end try
                 end repeat
+                if resultData is not missing value then exit repeat
             end repeat
 
-            error "Message not found"
+            if resultData is missing value then
+                error "Can't get message: not found"
+            end if
         end tell
-        """
+        '''
 
+        script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-
-        # Parse result
-        parts = result.split("|", 6)  # Max 7 parts
-        if len(parts) >= 6:
-            return {
-                "id": parts[0],
-                "subject": parts[1],
-                "sender": parts[2],
-                "date_received": parts[3],
-                "read_status": parts[4].lower() == "true",
-                "flagged": parts[5].lower() == "true",
-                "content": parts[6] if len(parts) > 6 else "",
-            }
-
-        raise MailMessageNotFoundError(f"Could not parse message: {message_id}")
+        return parse_applescript_json(result)
 
     def send_email(
         self,
