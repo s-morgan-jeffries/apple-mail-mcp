@@ -55,7 +55,7 @@ make test-integration  # Real Mail.app tests
 
 - Unit tests mock at `_run_applescript()` boundary
 - Integration tests run against real Mail.app (opt-in via `--run-integration`)
-- Coverage enforced: `fail_under = 60` (target: 90%)
+- Coverage enforced: `fail_under = 90`
 
 ## Release Process
 

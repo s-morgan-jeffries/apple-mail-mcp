@@ -72,7 +72,6 @@ Each test file follows:
 
 ## Coverage
 
-- Current: ~52%
 - Target: 90%
-- Enforced: `fail_under = 60` in pyproject.toml
-- Primary gap: `server.py` (0% — needs tool-level tests)
+- Enforced: `fail_under = 90` in pyproject.toml
+- Run `make coverage` for the current report.
