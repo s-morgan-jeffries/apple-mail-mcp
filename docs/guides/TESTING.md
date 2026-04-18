@@ -6,8 +6,14 @@
 |-------|---------|---------|
 | Unit | `make test` | Python logic with mocked AppleScript (~1s) |
 | Integration | `make test-integration` | Real Mail.app operations (~30s) |
-| E2E | `make test-e2e` | Full MCP tool stack |
+| E2E | `make test-e2e` | FastMCP dispatch layer in-process |
 | Benchmarks | `pytest tests/benchmarks/ -v` | Performance regression detection |
+
+### E2E Scope
+
+`make test-e2e` covers the FastMCP dispatch layer in-process: tool registration,
+schemas, and happy-path invocation for all 14 tools, with the connector mocked.
+It does NOT cover the stdio subprocess layer (tracked in issue #50).
 
 ## Running Tests
 
