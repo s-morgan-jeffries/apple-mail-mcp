@@ -101,3 +101,40 @@ class TestToolRegistration:
             f"{tool_name} missing required fields {missing}; "
             f"actual required: {required}"
         )
+
+
+# (tool_name, call_args, connector_method, connector_return_value)
+INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
+    (
+        "list_mailboxes",
+        {"account": "TestAccount"},
+        "list_mailboxes",
+        ["INBOX", "Sent"],
+    ),
+]
+
+
+class TestToolInvocation:
+    """Invoke each tool via mcp.call_tool and verify structured response shape."""
+
+    @pytest.mark.parametrize(
+        "tool_name,call_args,connector_method,connector_return",
+        INVOCATION_CASES,
+        ids=lambda p: p if isinstance(p, str) else None,
+    )
+    async def test_tool_invocation_happy_path(
+        self,
+        mock_mail: MagicMock,
+        tool_name: str,
+        call_args: dict[str, Any],
+        connector_method: str,
+        connector_return: Any,
+    ) -> None:
+        getattr(mock_mail, connector_method).return_value = connector_return
+
+        result = await server.mcp.call_tool(tool_name, call_args)
+
+        assert result.structured_content is not None
+        assert result.structured_content.get("success") is True
+        assert "error" not in result.structured_content
+        getattr(mock_mail, connector_method).assert_called_once()
