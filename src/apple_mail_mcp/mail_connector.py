@@ -122,46 +122,26 @@ class AppleMailConnector:
             raise MailAppleScriptError(f"Unexpected error: {str(e)}") from e
 
     def list_accounts(self) -> list[dict[str, Any]]:
-        """
-        List all mail accounts.
+        """List all mail accounts.
 
         Returns:
-            List of account dictionaries with name and email addresses
+            List of account dicts with keys:
+              - name: account display name
+              - email_addresses: list of associated email addresses
         """
-        script = """
+        tell_body = """
         tell application "Mail"
-            set accountList to {}
+            set resultData to {}
             repeat with acc in accounts
-                set accountInfo to {accountName:(name of acc), emailAddresses:(email addresses of acc)}
-                set end of accountList to accountInfo
+                set accRecord to {name:(name of acc), email_addresses:(email addresses of acc)}
+                set end of resultData to accRecord
             end repeat
-
-            -- Convert to JSON-like format
-            set output to ""
-            repeat with acc in accountList
-                set output to output & "{name:'" & accountName of acc & "',emails:["
-                repeat with addr in emailAddresses of acc
-                    set output to output & "'" & addr & "',"
-                end repeat
-                set output to output & "]}|"
-            end repeat
-
-            return output
         end tell
         """
 
+        script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
-
-        # Parse the result
-        accounts = []
-        for account_str in result.split("|"):
-            if not account_str:
-                continue
-            # Simple parsing - in production, use more robust parsing
-            # For now, we'll return raw result and handle in tools
-            accounts.append({"raw": account_str})
-
-        return accounts
+        return parse_applescript_json(result)
 
     def list_mailboxes(self, account: str) -> list[dict[str, Any]]:
         """List all mailboxes for an account.

@@ -78,6 +78,28 @@ class TestAppleMailConnector:
             connector._run_applescript("test script")
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_accounts_returns_structured_data(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = (
+            '[{"name":"Gmail","email_addresses":["me@gmail.com"]},'
+            '{"name":"Work","email_addresses":["me@work.com","alt@work.com"]}]'
+        )
+        result = connector.list_accounts()
+        assert result == [
+            {"name": "Gmail", "email_addresses": ["me@gmail.com"]},
+            {"name": "Work", "email_addresses": ["me@work.com", "alt@work.com"]},
+        ]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_accounts_empty(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "[]"
+        result = connector.list_accounts()
+        assert result == []
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_mailboxes_returns_structured_data(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
