@@ -78,3 +78,26 @@ class TestToolRegistration:
         tools = await server.mcp.list_tools()
         missing = [t.name for t in tools if not (t.description and t.description.strip())]
         assert not missing, f"tools missing description: {missing}"
+
+    @pytest.mark.parametrize(
+        "tool_name,expected_required",
+        [
+            ("send_email", {"to", "subject", "body"}),
+            ("search_messages", {"account"}),
+            ("move_messages", {"message_ids", "account", "destination_mailbox"}),
+        ],
+    )
+    async def test_tool_schema_required_fields(
+        self, tool_name: str, expected_required: set[str]
+    ) -> None:
+        tool = await server.mcp.get_tool(tool_name)
+        schema = tool.parameters
+        assert schema["type"] == "object"
+        required = set(schema.get("required", []))
+        # Tool may have additional required fields beyond what we check; we
+        # only assert the subset that must always be required.
+        missing = expected_required - required
+        assert not missing, (
+            f"{tool_name} missing required fields {missing}; "
+            f"actual required: {required}"
+        )
