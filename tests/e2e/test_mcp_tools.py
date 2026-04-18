@@ -73,3 +73,8 @@ class TestToolRegistration:
         tools = await server.mcp.list_tools()
         names = {t.name for t in tools}
         assert "list_accounts" not in names
+
+    async def test_every_tool_has_description(self) -> None:
+        tools = await server.mcp.list_tools()
+        missing = [t.name for t in tools if not (t.description and t.description.strip())]
+        assert not missing, f"tools missing description: {missing}"
