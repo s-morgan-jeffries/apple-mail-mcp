@@ -1,7 +1,9 @@
 #!/bin/bash
-# Pre-commit hook: block commits to main, warn on version bump without CHANGELOG.
+# Pre-commit hook: block commits to main, verify version sync, warn on version
+# bump without CHANGELOG.
 set -euo pipefail
 
+REPO_ROOT=$(git rev-parse --show-toplevel)
 BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
 
 # Block commits to main (allow release/* branches and hotfixes)
@@ -14,6 +16,14 @@ if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
         echo "Create a feature branch: git checkout -b feature/issue-N-description"
         exit 1
     fi
+fi
+
+# Verify version string is consistent across pyproject.toml, __init__.py,
+# CLAUDE.md, and CHANGELOG.md. Fast (<100ms); worth running on every commit.
+if ! "$REPO_ROOT/scripts/check_version_sync.sh" > /dev/null 2>&1; then
+    echo "ERROR: Version strings are out of sync. Run the check manually:"
+    echo "  ./scripts/check_version_sync.sh"
+    exit 1
 fi
 
 # Warn if pyproject.toml version changed but CHANGELOG not staged
