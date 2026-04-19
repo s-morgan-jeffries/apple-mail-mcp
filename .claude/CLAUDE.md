@@ -83,7 +83,7 @@ CHANGELOG.md is only updated on release branches, never on feature branches.
 Load these skills when working in their domains:
 
 - **release** — Full release workflow: milestone check, version bump, changelog, validation, tagging, PR
-- **applescript-mail** — Apple Mail AppleScript patterns, quirks, workarounds, pipe-delimited parsing
+- **applescript-mail** — Apple Mail AppleScript patterns, quirks, workarounds, JSON emission via ASObjC
 - **api-design** — Tool design philosophy, decision tree for new tools
 - **integration-testing** — Real Mail.app testing, why mocks miss AppleScript bugs
 - **performance-patterns** — Operation timings, `whose` clause optimization, batch patterns, Gmail notes

@@ -11,7 +11,7 @@ Unit tests mock `_run_applescript()` and test Python logic only. They CANNOT cat
 - AppleScript syntax errors
 - Variable naming conflicts in AppleScript
 - Mail.app API behavior differences between versions
-- Pipe-delimited parsing issues with real email content
+- Silently-dropped record keys from NSJSONSerialization (e.g., `name`, `id`, `size` selector collisions)
 - Gmail-specific behavior differences
 - Timeout issues with real mailbox sizes
 
