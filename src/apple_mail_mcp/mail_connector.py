@@ -99,12 +99,16 @@ class AppleMailConnector:
                 error_msg = result.stderr.strip()
                 logger.error(f"AppleScript error: {error_msg}")
 
+                # macOS stderr uses curly apostrophes (Can't) that won't match a
+                # straight-apostrophe substring. Normalize before dispatching.
+                normalized = error_msg.replace("\u2019", "'")
+
                 # Parse error and raise appropriate exception
-                if "Can't get account" in error_msg:
+                if "Can't get account" in normalized:
                     raise MailAccountNotFoundError(error_msg)
-                elif "Can't get mailbox" in error_msg:
+                elif "Can't get mailbox" in normalized:
                     raise MailMailboxNotFoundError(error_msg)
-                elif "Can't get message" in error_msg:
+                elif "Can't get message" in normalized:
                     raise MailMessageNotFoundError(error_msg)
                 else:
                     raise MailAppleScriptError(error_msg)
@@ -135,7 +139,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 set accEmails to email addresses of acc
                 if accEmails is missing value then set accEmails to {}
-                set accRecord to {|name|:(name of acc), email_addresses:accEmails}
+                set accRecord to {|name|:(name of acc), |email_addresses|:accEmails}
                 set end of resultData to accRecord
             end repeat
         end tell
@@ -167,7 +171,7 @@ class AppleMailConnector:
             repeat with mb in mailboxes of accountRef
                 set mbUnread to unread count of mb
                 if mbUnread is missing value then set mbUnread to 0
-                set mbRecord to {{|name|:(name of mb), unread_count:mbUnread}}
+                set mbRecord to {{|name|:(name of mb), |unread_count|:mbUnread}}
                 set end of resultData to mbRecord
             end repeat
         end tell
@@ -221,18 +225,30 @@ class AppleMailConnector:
             status = "true" if read_status else "false"
             conditions.append(f"read status is {status}")
 
-        whose_clause = " and ".join(conditions) if conditions else "true"
-        limit_clause = f"items 1 thru {limit} of" if limit else ""
+        # AppleScript rejects `whose true` ("Illegal comparison or logical").
+        # When no filters are supplied, drop the `whose` clause entirely.
+        whose_part = f" whose {' and '.join(conditions)}" if conditions else ""
+
+        # `items 1 thru N of (messages of mailboxRef ...)` is rejected by Mail
+        # with error -1728 — you can't slice a live message collection reference.
+        # Use `count of` + `item i of` inside a repeat instead; both work on
+        # references and fetch one message at a time.
+        limit_clamp = (
+            f"if maxI > {limit} then set maxI to {limit}" if limit else ""
+        )
 
         tell_body = f'''
         tell application "Mail"
             set accountRef to account "{account_safe}"
             set mailboxRef to mailbox "{mailbox_safe}" of accountRef
-            set matchedMessages to {limit_clause} (messages of mailboxRef whose {whose_clause})
+            set allMatches to messages of mailboxRef{whose_part}
+            set maxI to count of allMatches
+            {limit_clamp}
 
             set resultData to {{}}
-            repeat with msg in matchedMessages
-                set msgRecord to {{|id|:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg)}}
+            repeat with i from 1 to maxI
+                set msg to item i of allMatches
+                set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg)}}
                 set end of resultData to msgRecord
             end repeat
         end tell
@@ -277,7 +293,7 @@ class AppleMailConnector:
                         set msg to first message of mb whose id is {message_id_safe}
                         {content_clause}
 
-                        set resultData to {{|id|:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg), flagged:(flagged status of msg), content:msgContent}}
+                        set resultData to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent}}
                         exit repeat
                     end try
                 end repeat
@@ -529,7 +545,7 @@ class AppleMailConnector:
 
                         set resultData to {{}}
                         repeat with att in attList
-                            set attRecord to {{|name|:(name of att), mime_type:(MIME type of att), |size|:(file size of att), downloaded:(downloaded of att)}}
+                            set attRecord to {{|name|:(name of att), |mime_type|:(MIME type of att), |size|:(file size of att), |downloaded|:(downloaded of att)}}
                             set end of resultData to attRecord
                         end repeat
                         exit repeat
