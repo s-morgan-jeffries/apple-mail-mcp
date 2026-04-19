@@ -11,9 +11,10 @@
 
 ### E2E Scope
 
-`make test-e2e` covers the FastMCP dispatch layer in-process: tool registration,
-schemas, and happy-path invocation for all 14 tools, with the connector mocked.
-It does NOT cover the stdio subprocess layer (tracked in issue #50).
+`make test-e2e` covers two layers:
+
+1. **In-process FastMCP dispatch** ([tests/e2e/test_mcp_tools.py](../../tests/e2e/test_mcp_tools.py)) — tool registration, schemas, and happy-path invocation for all 14 tools, with the connector mocked.
+2. **Real stdio transport** ([tests/e2e/test_stdio_transport.py](../../tests/e2e/test_stdio_transport.py)) — spawns the server as a subprocess, completes the MCP handshake over stdio, and asserts `list_tools` returns the expected 14 tools. Catches startup errors, banner/stdout contamination, and JSON-RPC framing bugs that the in-process layer cannot surface.
 
 ## Running Tests
 
