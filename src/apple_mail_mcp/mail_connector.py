@@ -232,7 +232,7 @@ class AppleMailConnector:
 
             set resultData to {{}}
             repeat with msg in matchedMessages
-                set msgRecord to {{id:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg)}}
+                set msgRecord to {{|id|:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg)}}
                 set end of resultData to msgRecord
             end repeat
         end tell
@@ -277,7 +277,7 @@ class AppleMailConnector:
                         set msg to first message of mb whose id is {message_id_safe}
                         {content_clause}
 
-                        set resultData to {{id:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg), flagged:(flagged status of msg), content:msgContent}}
+                        set resultData to {{|id|:(id of msg as text), subject:(subject of msg), sender:(sender of msg), date_received:(date received of msg as text), read_status:(read status of msg), flagged:(flagged status of msg), content:msgContent}}
                         exit repeat
                     end try
                 end repeat
@@ -529,7 +529,7 @@ class AppleMailConnector:
 
                         set resultData to {{}}
                         repeat with att in attList
-                            set attRecord to {{|name|:(name of att), mime_type:(MIME type of att), size:(file size of att), downloaded:(downloaded of att)}}
+                            set attRecord to {{|name|:(name of att), mime_type:(MIME type of att), |size|:(file size of att), downloaded:(downloaded of att)}}
                             set end of resultData to attRecord
                         end repeat
                         exit repeat

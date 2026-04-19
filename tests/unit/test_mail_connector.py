@@ -240,6 +240,22 @@ class TestAppleMailConnector:
         assert "items 1 thru 10" in call_args
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_script_quotes_id_key(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Guard against NSJSONSerialization silently dropping the 'id' key.
+
+        AppleScript record key `id:` collides with NSObject's id selector and
+        gets stripped during NSDictionary conversion. Must be quoted as `|id|:`.
+        """
+        mock_run.return_value = "[]"
+        connector.search_messages("Gmail", "INBOX")
+        script = mock_run.call_args[0][0]
+        assert "|id|:(id of msg as text)" in script
+        # The bare form must not appear in the msgRecord literal — it would collide.
+        assert ", id:(id of msg" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_message(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
@@ -270,6 +286,16 @@ class TestAppleMailConnector:
         )
         result = connector.get_message("99", include_content=True)
         assert result["content"] == "col1|col2|col3"
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_message_script_quotes_id_key(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Same guard as test_search_messages_script_quotes_id_key, for get_message."""
+        mock_run.return_value = '{"id":"x","subject":"","sender":"","date_received":"","read_status":false,"flagged":false,"content":""}'
+        connector.get_message("x")
+        script = mock_run.call_args[0][0]
+        assert "|id|:(id of msg as text)" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_send_email_basic(
