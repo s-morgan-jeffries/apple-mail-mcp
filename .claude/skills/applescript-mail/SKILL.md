@@ -1,28 +1,25 @@
 ---
 name: applescript-mail
-description: Use when writing, modifying, or debugging ANY AppleScript that interacts with Apple Mail. Also use when encountering AppleScript errors, unexpected Mail.app behavior, when adding new connector methods, or when debugging pipe-delimited output parsing. Covers string escaping, attachment handling, Gmail compatibility, message ID lookup patterns, and known Mail.app automation limitations.
+description: Use when writing, modifying, or debugging ANY AppleScript that interacts with Apple Mail. Also use when encountering AppleScript errors, unexpected Mail.app behavior, when adding new connector methods, or when debugging JSON output from ASObjC. Covers string escaping, attachment handling, Gmail compatibility, message ID lookup patterns, NSJSONSerialization gotchas, and known Mail.app automation limitations.
 ---
 
 # AppleScript + Apple Mail Patterns
 
-## Critical: Pipe-Delimited Output Parsing
+## Emitting JSON from AppleScript
 
-Apple Mail MCP returns AppleScript results as pipe-delimited strings with newline-separated records:
+Scripts emit JSON via ASObjC + `NSJSONSerialization` (not pipe-delimited text). Use the `_wrap_as_json_script(body)` helper in `mail_connector.py` and parse responses with `parse_applescript_json(result)` from `utils.py`.
 
+**Tell-block contract:** the body passed to `_wrap_as_json_script` must contain a `tell application "Mail" ... end tell` block and assign the final value to a variable named `resultData` (list, record, or scalar).
+
+**Record key gotcha — always quote `name`:** Use `|name|:(name of acc)`, never `name:(name of acc)`. The bare form collides with NSObject's `name` selector and the key is silently dropped during NSDictionary conversion, leaving records without their name field.
+
+**`missing value` gotcha:** `NSJSONSerialization` rejects `missing value`. For optional properties (e.g., `email addresses` of an account with none, `unread count` on some mailboxes), coerce before building the record:
 ```applescript
--- AppleScript returns:
--- "12345|Subject Here|sender@example.com|Mon Jan 1 2024|false"
-
--- Python parses:
-parts = line.split("|")
-# parts[0] = message_id, parts[1] = subject, etc.
+set accEmails to email addresses of acc
+if accEmails is missing value then set accEmails to {}
 ```
 
-**Known fragility:** If ANY field contains a `|` character (common in email subjects), parsing breaks silently. There is no escaping mechanism. This is the project's biggest technical debt.
-
-**Workaround:** Fields are positional. Always check `len(parts) >= expected_count` before accessing. Log warnings on unexpected field counts.
-
-**Future fix:** Migrate to JSON output with inline helpers (duplicated per script — AppleScript has no modules, same pattern as OmniFocus MCP).
+**Error propagation:** Do NOT wrap the tell-body in `try / on error` when you want typed exceptions (`MailAccountNotFoundError`, `MailMessageNotFoundError`, etc.). Let AppleScript errors bubble via stderr — `_run_applescript` maps them to the right exception type.
 
 ## Gmail Label-Based System
 

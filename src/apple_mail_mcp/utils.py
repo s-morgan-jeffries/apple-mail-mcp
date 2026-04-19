@@ -2,6 +2,7 @@
 Utility functions for Apple Mail MCP.
 """
 
+import json
 import re
 from typing import Any
 
@@ -290,3 +291,32 @@ def get_flag_index(color: str) -> int:
         )
 
     return color_map[color_lower]
+
+
+def parse_applescript_json(result: str) -> Any:
+    """Parse JSON emitted by an AppleScript helper, or raise on ERROR: prefix.
+
+    AppleScript scripts wrapped with _wrap_as_json_script return either:
+    - A JSON-serialized string (list, dict, or scalar), or
+    - "ERROR: <message>" when the tell-block catches an error.
+
+    Note: the "ERROR:" prefix is a sentinel only valid because _wrap_as_json_script
+    returns list/dict payloads — a bare JSON string starting with "ERROR:" would be
+    misread. Wrapped scripts must never return a bare-string top-level value.
+
+    Args:
+        result: Raw stdout from _run_applescript().
+
+    Returns:
+        Deserialized JSON (list, dict, str, int, bool, or None).
+
+    Raises:
+        MailAppleScriptError: If the result starts with "ERROR:".
+        json.JSONDecodeError: If the result is neither an error nor valid JSON.
+    """
+    from .exceptions import MailAppleScriptError
+
+    stripped = result.strip()
+    if stripped.startswith("ERROR:"):
+        raise MailAppleScriptError(stripped[len("ERROR:"):].strip())
+    return json.loads(stripped)

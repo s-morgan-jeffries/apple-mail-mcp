@@ -117,7 +117,10 @@ class TestGetAttachments:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         """Test listing attachments from a message."""
-        mock_run.return_value = "document.pdf|application/pdf|524288|true\nimage.jpg|image/jpeg|102400|true"
+        mock_run.return_value = (
+            '[{"name":"document.pdf","mime_type":"application/pdf","size":524288,"downloaded":true},'
+            '{"name":"image.jpg","mime_type":"image/jpeg","size":102400,"downloaded":true}]'
+        )
 
         result = connector.get_attachments("12345")
 
@@ -132,11 +135,21 @@ class TestGetAttachments:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         """Test getting attachments from message with none."""
-        mock_run.return_value = ""
+        mock_run.return_value = "[]"
 
         result = connector.get_attachments("12345")
 
         assert result == []
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_attachments_handles_pipe_in_name(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = (
+            '[{"name":"q1|q2.pdf","mime_type":"application/pdf","size":1000,"downloaded":true}]'
+        )
+        result = connector.get_attachments("12345")
+        assert result[0]["name"] == "q1|q2.pdf"
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_attachments_message_not_found(
@@ -147,6 +160,31 @@ class TestGetAttachments:
 
         with pytest.raises(MailMessageNotFoundError):
             connector.get_attachments("99999")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_attachments_script_quotes_name_key(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """The AppleScript must use |name| so NSJSONSerialization preserves it."""
+        mock_run.return_value = "[]"
+        connector.get_attachments("12345")
+        script = mock_run.call_args[0][0]
+        assert "|name|:(name of att)" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_attachments_script_quotes_size_key(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Guard against NSJSONSerialization silently dropping the 'size' key.
+
+        AppleScript record key `size:` collides with NSSize/NSObject selectors
+        and gets stripped during NSDictionary conversion. Must be `|size|:`.
+        """
+        mock_run.return_value = "[]"
+        connector.get_attachments("msg-1")
+        script = mock_run.call_args[0][0]
+        assert "|size|:(file size of att)" in script
+        assert ", size:(file size of att)" not in script
 
 
 class TestSaveAttachments:

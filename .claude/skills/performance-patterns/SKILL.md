@@ -65,7 +65,7 @@ Message ID lookup is O(accounts x mailboxes) when searching globally. Always acc
 ## Anti-Patterns
 
 - **Repeated subprocess calls in loops** — Build one script, execute once
-- **Fetching all properties when only some are needed** — The pipe-delimited format fetches a fixed set; future JSON migration should fetch selectively
+- **Fetching all properties when only some are needed** — Scripts currently fetch a fixed set of fields; when adding a new field, consider whether every caller needs it
 - **Not using `whose` clauses** — Manual filtering in Python transfers all data first
 - **Default timeout too low for large operations** — Increase from 60s for bulk operations on large mailboxes
 

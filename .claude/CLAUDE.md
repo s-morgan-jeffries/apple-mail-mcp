@@ -40,7 +40,7 @@ make coverage              # Coverage report
 
 ## AppleScript Gotchas
 
-**Pipe-delimited output parsing:** AppleScript returns results as `field1|field2|field3` with newline-separated records. Fragile — breaks if any field contains `|`. Known limitation, documented in issue tracker.
+**JSON output from AppleScript:** Scripts emit JSON via ASObjC + `NSJSONSerialization` (wrap with `_wrap_as_json_script`, parse with `parse_applescript_json`). Always quote the `name` record key as `|name|:` — the bare form is silently dropped during NSDictionary conversion. Coerce `missing value` to safe defaults (`{}` / `0`) before serializing. See applescript-mail skill for details.
 
 **Gmail mode:** Gmail's label-based system doesn't support standard IMAP move. The `move_messages` tool has a `gmail_mode` parameter that uses copy+delete instead of move.
 
@@ -83,7 +83,7 @@ CHANGELOG.md is only updated on release branches, never on feature branches.
 Load these skills when working in their domains:
 
 - **release** — Full release workflow: milestone check, version bump, changelog, validation, tagging, PR
-- **applescript-mail** — Apple Mail AppleScript patterns, quirks, workarounds, pipe-delimited parsing
+- **applescript-mail** — Apple Mail AppleScript patterns, quirks, workarounds, JSON emission via ASObjC
 - **api-design** — Tool design philosophy, decision tree for new tools
 - **integration-testing** — Real Mail.app testing, why mocks miss AppleScript bugs
 - **performance-patterns** — Operation timings, `whose` clause optimization, batch patterns, Gmail notes
