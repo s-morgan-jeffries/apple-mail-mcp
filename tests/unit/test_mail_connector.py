@@ -77,6 +77,33 @@ class TestAppleMailConnector:
         with pytest.raises(MailAppleScriptError, match="timeout"):
             connector._run_applescript("test script")
 
+    @patch("subprocess.run")
+    def test_run_applescript_curly_apostrophe_still_maps_to_typed_error(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Real macOS stderr uses curly apostrophes — must still dispatch typed errors.
+
+        Regression guard for a bug where `Can\u2019t get account "X"` (curly
+        apostrophe, as emitted by Mail.app) bypassed the typed-exception
+        mapping and surfaced as a generic MailAppleScriptError, defeating the
+        server-layer not-found routing.
+        """
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Can\u2019t get account \"NonExistent\"",
+        )
+        with pytest.raises(MailAccountNotFoundError):
+            connector._run_applescript("test script")
+
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Can\u2019t get mailbox \"NonExistent\"",
+        )
+        with pytest.raises(MailMailboxNotFoundError):
+            connector._run_applescript("test script")
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_returns_structured_data(
         self, mock_run: MagicMock, connector: AppleMailConnector
@@ -237,7 +264,42 @@ class TestAppleMailConnector:
         assert 'sender contains "john@example.com"' in call_args
         assert 'subject contains "meeting"' in call_args
         assert "read status is false" in call_args
-        assert "items 1 thru 10" in call_args
+        # Limit is enforced via a count-clamp, not `items 1 thru N of` (which
+        # Mail rejects for live message collection references).
+        assert "if maxI > 10 then set maxI to 10" in call_args
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_without_filters_omits_whose_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """AppleScript rejects `whose true` — no-filter searches must drop `whose`.
+
+        Regression guard for a bug where `search_messages("X", "INBOX")` with no
+        filters emitted `messages of mailboxRef whose true`, which Mail.app
+        rejects with `Illegal comparison or logical (-1726)`.
+        """
+        mock_run.return_value = "[]"
+        connector.search_messages("Gmail", "INBOX")
+        script = mock_run.call_args[0][0]
+        assert "whose true" not in script
+        # With NO filters, the generated source must reference `mailboxRef`
+        # without a `whose` clause.
+        assert "messages of mailboxRef\n" in script or "messages of mailboxRef " in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_does_not_slice_message_reference(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Mail rejects `items 1 thru N of (messages ...)` with error -1728.
+
+        The limit must be enforced via `count of` + indexed `item i of`, not
+        by slicing the live message collection reference.
+        """
+        mock_run.return_value = "[]"
+        connector.search_messages("Gmail", "INBOX", limit=5)
+        script = mock_run.call_args[0][0]
+        assert "items 1 thru" not in script
+        assert "if maxI > 5 then set maxI to 5" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_script_quotes_id_key(
