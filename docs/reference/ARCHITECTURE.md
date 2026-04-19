@@ -17,7 +17,7 @@ server.py (FastMCP)
 mail_connector.py (AppleMailConnector)
   |-- AppleScript generation
   |-- subprocess.run(["osascript", "-"])
-  |-- Output parsing (pipe-delimited)
+  |-- Output parsing (JSON via ASObjC NSJSONSerialization)
   |-- Error routing (stderr -> typed exceptions)
         |
         v
