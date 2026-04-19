@@ -1,0 +1,4 @@
+# Raw and scored outputs (machine-generated, re-runnable)
+results/raw_*.json
+results/scored_*.json
+__pycache__/
