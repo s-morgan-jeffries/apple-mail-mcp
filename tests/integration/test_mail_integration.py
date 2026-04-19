@@ -77,6 +77,76 @@ class TestMailIntegration:
         for msg in result:
             assert msg["read_status"] is False
 
+    def test_list_accounts(self, connector: AppleMailConnector) -> None:
+        """Real list_accounts returns structured account records.
+
+        Guards against the pre-0.4.0 `[{"raw": str}]` placeholder shape and
+        the NSJSONSerialization `|name|` selector-collision bug fixed in #23.
+        """
+        result = connector.list_accounts()
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        for acct in result:
+            assert set(acct.keys()) >= {"name", "email_addresses"}
+            assert isinstance(acct["name"], str)
+            assert acct["name"]  # non-empty
+            assert isinstance(acct["email_addresses"], list)
+            # No "raw" key left over from the old placeholder
+            assert "raw" not in acct
+
+    def test_get_message(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """Real get_message returns a full structured message.
+
+        Chains off search_messages for a real ID. Guards against the
+        NSJSONSerialization `|id|` selector-collision bug fixed in #23.
+        """
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not matches:
+            pytest.skip("test inbox has no messages")
+
+        target_id = matches[0]["id"]
+        result = connector.get_message(target_id)
+
+        assert set(result.keys()) >= {
+            "id", "subject", "sender", "date_received",
+            "read_status", "flagged", "content",
+        }
+        assert result["id"] == target_id
+        assert isinstance(result["subject"], str)
+        assert isinstance(result["sender"], str)
+        assert isinstance(result["date_received"], str)
+        assert isinstance(result["read_status"], bool)
+        assert isinstance(result["flagged"], bool)
+        assert isinstance(result["content"], str)
+
+    def test_get_attachments(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """Real get_attachments returns a structured list (possibly empty).
+
+        Chains off search_messages for a real ID. Guards against the
+        NSJSONSerialization `|size|` selector-collision bug fixed in #23.
+        Empty list is a valid pass — most messages have no attachments.
+        """
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not matches:
+            pytest.skip("test inbox has no messages")
+
+        result = connector.get_attachments(matches[0]["id"])
+        assert isinstance(result, list)
+        for att in result:
+            assert set(att.keys()) >= {"name", "mime_type", "size", "downloaded"}
+            assert isinstance(att["name"], str)
+            assert isinstance(att["mime_type"], str)
+            assert isinstance(att["size"], int)
+            assert isinstance(att["downloaded"], bool)
+
 
 class TestMailSendIntegration:
     """
