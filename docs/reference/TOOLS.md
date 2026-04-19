@@ -4,7 +4,7 @@ Complete reference for all MCP tools provided by the Apple Mail MCP server.
 
 ## Overview
 
-**Current Version:** v0.4.0 (Phase 3)
+**Current Version:** v0.4.1 (Phase 3)
 **Total Tools:** 14 (5 from Phase 1 + 7 from Phase 2 + 2 from Phase 3)
 
 ## Phase 1 Tools (v0.1.0) - Core Foundation

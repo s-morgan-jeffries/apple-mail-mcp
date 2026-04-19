@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-19
+
+Patch release: dep hygiene and v0.4.0 follow-ups. Four connector bugs that unit tests couldn't catch were surfaced by running the three new integration tests against real Mail.app.
+
+### Added
+- Integration tests for `list_accounts`, `get_message`, and `get_attachments` against real Mail.app, fulfilling the #23 design doc commitment (#57)
+
+### Changed
+- Bumped transitive deps to clear `pip-audit` findings from the v0.4.0 release: `authlib` 1.6.9 → 1.7.0, `cryptography` 46.0.6 → 46.0.7, `pytest` 9.0.2 → 9.0.3, `python-multipart` 0.0.22 → 0.0.26. `fastmcp`/`mcp`/`pydantic`/`starlette`/`uvicorn` unchanged (#57)
+
+### Fixed
+- `search_messages` with no filter conditions emitted `messages of mailboxRef whose true` — Mail rejected with error -1726. The `whose` clause is now dropped entirely when no filters are supplied (#57)
+- `search_messages` with a `limit` emitted `items 1 thru N of (messages of mailboxRef …)` — Mail rejected with error -1728. Replaced with a `count of` + indexed `item i of` repeat loop (#57)
+- `_run_applescript` error-substring matcher checked for straight-apostrophe `Can't`, but macOS stderr uses curly `Can’t`. `MailAccountNotFoundError` and `MailMailboxNotFoundError` were silently degraded to generic errors. Curly apostrophes are now normalized before dispatch (#57)
+- Several AppleScript record keys (`subject`, `sender`, `content`, `date_received`, `read_status`, `flagged`, `mime_type`, `downloaded`, `email_addresses`, `unread_count`) were silently dropped by NSJSONSerialization when values came from live Mail objects. Extended the prior `|name|` / `|id|` / `|size|` quoting to **every** record key across all 5 JSON-emitting methods (#57)
+
 ## [0.4.0] - 2026-04-19
 
 Quality and infrastructure milestone. No new MCP tools; focus on test coverage, safety, and parsing robustness.
