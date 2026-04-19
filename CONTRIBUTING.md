@@ -50,6 +50,7 @@ make test-integration  # Real Mail.app tests
 - **ruff** for linting and formatting (line length: 100)
 - **Structured responses**: `{"success": bool, "error": str, "error_type": str}`
 - **Security checklist** for every new feature (see `.claude/CLAUDE.md`)
+- **Cyclomatic complexity** ceiling of CC ≤ 20 per function (see [`docs/guides/COMPLEXITY.md`](docs/guides/COMPLEXITY.md))
 
 ## Testing Requirements
 
