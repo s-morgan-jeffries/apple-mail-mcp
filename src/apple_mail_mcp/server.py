@@ -96,6 +96,51 @@ async def _elicit_confirmation(
 
 
 @mcp.tool()
+def list_accounts() -> dict[str, Any]:
+    """
+    List all configured email accounts in Apple Mail.
+
+    Returns each account's id (UUID), display name, email addresses,
+    account type, and enabled state. Account ids are stable across name
+    changes; prefer them over names for identifying accounts.
+
+    Returns:
+        Dictionary containing the accounts list.
+
+    Example:
+        >>> list_accounts()
+        {"success": True, "accounts": [
+            {"id": "B21B254B-...", "name": "Gmail", "email_addresses": ["me@gmail.com"],
+             "account_type": "imap", "enabled": True}, ...
+        ]}
+    """
+    try:
+        rate_err = check_rate_limit("list_accounts", {})
+        if rate_err:
+            return rate_err
+
+        logger.info("Listing accounts")
+
+        accounts = mail.list_accounts()
+
+        operation_logger.log_operation("list_accounts", {}, "success")
+
+        return {
+            "success": True,
+            "accounts": accounts,
+            "count": len(accounts),
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing accounts: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
 def list_mailboxes(account: str) -> dict[str, Any]:
     """
     List all mailboxes for an account.

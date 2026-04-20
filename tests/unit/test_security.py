@@ -220,9 +220,9 @@ class TestCheckRateLimit:
 
     def test_all_operations_have_tier_assigned(self) -> None:
         expected_ops = {
-            "list_mailboxes", "get_message", "get_attachments", "save_attachments",
-            "search_messages", "mark_as_read", "move_messages", "flag_message",
-            "create_mailbox", "delete_messages", "reply_to_message",
+            "list_accounts", "list_mailboxes", "get_message", "get_attachments",
+            "save_attachments", "search_messages", "mark_as_read", "move_messages",
+            "flag_message", "create_mailbox", "delete_messages", "reply_to_message",
             "send_email", "send_email_with_attachments", "forward_message",
         }
         assert set(OPERATION_TIERS.keys()) == expected_ops

@@ -34,6 +34,7 @@ from apple_mail_mcp.server import (
     forward_message,
     get_attachments,
     get_message,
+    list_accounts,
     list_mailboxes,
     mark_as_read,
     move_messages,
@@ -71,6 +72,58 @@ def mock_ctx_decline() -> MagicMock:
     ctx = MagicMock()
     ctx.elicit = AsyncMock(return_value=DeclinedElicitation())
     return ctx
+
+
+# ---------------------------------------------------------------------------
+# 0. list_accounts
+# ---------------------------------------------------------------------------
+
+
+class TestListAccounts:
+    def test_success_returns_accounts_and_logs(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_accounts.return_value = [
+            {"id": "UUID-1", "name": "Gmail",
+             "email_addresses": ["me@gmail.com"],
+             "account_type": "imap", "enabled": True},
+            {"id": "UUID-2", "name": "iCloud",
+             "email_addresses": ["me@icloud.com"],
+             "account_type": "iCloud", "enabled": True},
+        ]
+
+        result = list_accounts()
+
+        assert result["success"] is True
+        assert result["count"] == 2
+        assert len(result["accounts"]) == 2
+        assert result["accounts"][0]["id"] == "UUID-1"
+        mock_mail.list_accounts.assert_called_once_with()
+        mock_logger.log_operation.assert_called_once_with(
+            "list_accounts", {}, "success"
+        )
+
+    def test_empty_returns_empty_list(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_accounts.return_value = []
+
+        result = list_accounts()
+
+        assert result["success"] is True
+        assert result["count"] == 0
+        assert result["accounts"] == []
+
+    def test_unexpected_exception_maps_to_unknown(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_accounts.side_effect = RuntimeError("boom")
+
+        result = list_accounts()
+
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
 
 
 # ---------------------------------------------------------------------------
