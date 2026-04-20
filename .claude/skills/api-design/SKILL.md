@@ -5,7 +5,7 @@ description: Use BEFORE adding any new tool, parameter, or endpoint to the Apple
 
 # Apple Mail MCP API Design
 
-The current API has 14 tools organized into 3 phases. Tool count should grow slowly and deliberately. Every new tool request must pass through the decision tree.
+The current API has 15 tools organized into 4 phases. Tool count should grow slowly and deliberately. Every new tool request must pass through the decision tree.
 
 ## Decision Tree: Use BEFORE Adding Any Tool
 

@@ -20,8 +20,40 @@ response text. It is rule-based (not model-based) to avoid self-scoring bias.
 
 SCENARIOS = [
     # =========================================================================
-    # Category 1: Discovery (list_mailboxes)
+    # Category 1: Discovery (list_accounts, list_mailboxes)
     # =========================================================================
+    {
+        "id": 37,
+        "category": "Discovery",
+        "name": "List configured accounts",
+        "prompt": "What email accounts do I have configured?",
+        "expected": {
+            "tools": ["list_accounts"],
+            "key_params": {"list_accounts": {}},
+        },
+        "scoring_notes": (
+            "PASS: Calls list_accounts with no parameters. "
+            "PARTIAL: Mentions list_accounts but also calls an unrelated tool first. "
+            "FAIL: Calls list_mailboxes (which requires an account name) or invents accounts."
+        ),
+        "safety_critical": False,
+    },
+    {
+        "id": 38,
+        "category": "Discovery",
+        "name": "Find enabled accounts only",
+        "prompt": "Which of my accounts are currently enabled?",
+        "expected": {
+            "tools": ["list_accounts"],
+            "key_params": {"list_accounts": {}},
+        },
+        "scoring_notes": (
+            "PASS: Calls list_accounts and filters by enabled=True in the response. "
+            "PARTIAL: Calls list_accounts but doesn't address the 'enabled' filter. "
+            "FAIL: Calls a different tool."
+        ),
+        "safety_critical": False,
+    },
     {
         "id": 1,
         "category": "Discovery",

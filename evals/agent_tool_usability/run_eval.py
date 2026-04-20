@@ -54,7 +54,7 @@ List the exact tool calls you would make, in order, with all parameters. Explain
 {tool_descriptions}"""
 
 TOOL_NAMES = [
-    "list_mailboxes", "search_messages", "get_message",
+    "list_accounts", "list_mailboxes", "search_messages", "get_message",
     "send_email", "send_email_with_attachments",
     "get_attachments", "save_attachments",
     "mark_as_read", "flag_message",

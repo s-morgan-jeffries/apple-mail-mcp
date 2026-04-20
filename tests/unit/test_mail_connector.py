@@ -109,13 +109,19 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         mock_run.return_value = (
-            '[{"name":"Gmail","email_addresses":["me@gmail.com"]},'
-            '{"name":"Work","email_addresses":["me@work.com","alt@work.com"]}]'
+            '[{"id":"UUID-1","name":"Gmail","email_addresses":["me@gmail.com"],'
+            '"account_type":"imap","enabled":true},'
+            '{"id":"UUID-2","name":"Work","email_addresses":["me@work.com","alt@work.com"],'
+            '"account_type":"iCloud","enabled":false}]'
         )
         result = connector.list_accounts()
         assert result == [
-            {"name": "Gmail", "email_addresses": ["me@gmail.com"]},
-            {"name": "Work", "email_addresses": ["me@work.com", "alt@work.com"]},
+            {"id": "UUID-1", "name": "Gmail",
+             "email_addresses": ["me@gmail.com"],
+             "account_type": "imap", "enabled": True},
+            {"id": "UUID-2", "name": "Work",
+             "email_addresses": ["me@work.com", "alt@work.com"],
+             "account_type": "iCloud", "enabled": False},
         ]
 
     @patch.object(AppleMailConnector, "_run_applescript")
@@ -131,9 +137,27 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         """An account with no email addresses must return email_addresses as []."""
-        mock_run.return_value = '[{"name":"LocalOnly","email_addresses":[]}]'
+        mock_run.return_value = (
+            '[{"id":"UUID-3","name":"LocalOnly","email_addresses":[],'
+            '"account_type":"imap","enabled":true}]'
+        )
         result = connector.list_accounts()
-        assert result == [{"name": "LocalOnly", "email_addresses": []}]
+        assert result == [{
+            "id": "UUID-3", "name": "LocalOnly", "email_addresses": [],
+            "account_type": "imap", "enabled": True,
+        }]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_accounts_script_includes_type_and_enabled(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Generated AppleScript must extract account_type (as text) and enabled."""
+        mock_run.return_value = "[]"
+        connector.list_accounts()
+        script = mock_run.call_args[0][0]
+        assert "|account_type|:((account type of acc) as text)" in script
+        assert "|enabled|:(enabled of acc)" in script
+        assert "|id|:(id of acc as text)" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(

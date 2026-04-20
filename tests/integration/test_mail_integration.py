@@ -82,15 +82,20 @@ class TestMailIntegration:
 
         Guards against the pre-0.4.0 `[{"raw": str}]` placeholder shape and
         the NSJSONSerialization `|name|` selector-collision bug fixed in #23.
+        Exercises the v0.5.0 fields added in #26: id, account_type, enabled.
         """
         result = connector.list_accounts()
         assert isinstance(result, list)
         assert len(result) >= 1
         for acct in result:
-            assert set(acct.keys()) >= {"name", "email_addresses"}
-            assert isinstance(acct["name"], str)
-            assert acct["name"]  # non-empty
+            assert set(acct.keys()) >= {
+                "id", "name", "email_addresses", "account_type", "enabled",
+            }
+            assert isinstance(acct["id"], str) and acct["id"]
+            assert isinstance(acct["name"], str) and acct["name"]
             assert isinstance(acct["email_addresses"], list)
+            assert isinstance(acct["account_type"], str) and acct["account_type"]
+            assert isinstance(acct["enabled"], bool)
             # No "raw" key left over from the old placeholder
             assert "raw" not in acct
 

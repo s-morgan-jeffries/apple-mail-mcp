@@ -83,6 +83,14 @@ Get full details of a specific message.
 
 ---
 
+### list_accounts
+
+List all configured email accounts. Returns each account's id (UUID), name, email_addresses, account_type (`imap`, `pop`, `iCloud`, etc.), and enabled state. Call first to discover accounts before any other tool that needs an account name.
+
+**Parameters:** None.
+
+---
+
 ### list_mailboxes
 
 List all mailboxes for an account. Returns each mailbox's name and unread_count. Call once per account to discover mailbox names — there is no cross-account listing.

@@ -25,6 +25,7 @@ from mcp.client.stdio import stdio_client
 pytestmark = pytest.mark.e2e
 
 EXPECTED_TOOLS = {
+    "list_accounts",
     "list_mailboxes",
     "search_messages",
     "get_message",

@@ -22,6 +22,7 @@ from apple_mail_mcp import server
 pytestmark = pytest.mark.e2e
 
 EXPECTED_TOOLS = {
+    "list_accounts",
     "list_mailboxes",
     "search_messages",
     "get_message",
@@ -64,17 +65,6 @@ class TestToolRegistration:
         names = {t.name for t in tools}
         assert names == EXPECTED_TOOLS
 
-    async def test_list_accounts_not_exposed_as_tool(self) -> None:
-        """list_accounts exists on the connector but is intentionally not an MCP tool.
-
-        This mirrors the known warning from scripts/check_client_server_parity.sh.
-        If list_accounts is ever exposed, update check_client_server_parity.sh
-        AND delete this test.
-        """
-        tools = await server.mcp.list_tools()
-        names = {t.name for t in tools}
-        assert "list_accounts" not in names
-
     async def test_every_tool_has_description(self) -> None:
         tools = await server.mcp.list_tools()
         missing = [t.name for t in tools if not (t.description and t.description.strip())]
@@ -113,6 +103,14 @@ _TMP_FILE = "__TMP_FILE__"
 
 # (tool_name, call_args, connector_method, connector_return_value)
 INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
+    (
+        "list_accounts",
+        {},
+        "list_accounts",
+        [{"id": "UUID-1", "name": "Gmail",
+          "email_addresses": ["me@gmail.com"],
+          "account_type": "imap", "enabled": True}],
+    ),
     (
         "list_mailboxes",
         {"account": "TestAccount"},

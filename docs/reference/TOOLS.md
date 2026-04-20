@@ -4,8 +4,8 @@ Complete reference for all MCP tools provided by the Apple Mail MCP server.
 
 ## Overview
 
-**Current Version:** v0.4.1 (Phase 3)
-**Total Tools:** 14 (5 from Phase 1 + 7 from Phase 2 + 2 from Phase 3)
+**Current Version:** v0.5.0 (Phase 4)
+**Total Tools:** 15 (5 from Phase 1 + 7 from Phase 2 + 2 from Phase 3 + 1 from Phase 4)
 
 ## Phase 1 Tools (v0.1.0) - Core Foundation
 
@@ -977,10 +977,55 @@ send_email(
 
 ---
 
+## Phase 4 Tools (v0.5.0)
+
+### list_accounts
+
+List all configured email accounts in Apple Mail, with identity, type, and enabled state. Account ids are stable across name changes — prefer them over names when chaining into other tools.
+
+**Parameters:** None.
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "accounts": [
+    {
+      "id": "B21B254B-CC54-4DA4-B3D9-793E57A8E908",
+      "name": "Gmail",
+      "email_addresses": ["me@gmail.com"],
+      "account_type": "imap",
+      "enabled": true
+    }
+  ],
+  "count": 1
+}
+```
+
+**Field notes:**
+
+- `id`: Account UUID. Stable across display-name changes; future tools may accept this in place of `name`.
+- `account_type`: One of `imap`, `pop`, `iCloud`, `hotmail`, `iCal`, `smtp`. Derived from Mail's internal type constant.
+- `enabled`: `false` for accounts the user has disabled in Mail.app preferences.
+
+**Examples:**
+
+```python
+# Discover accounts before chaining into a mailbox listing
+accounts = list_accounts()
+first_enabled = next(a for a in accounts["accounts"] if a["enabled"])
+list_mailboxes(first_enabled["name"])
+```
+
+---
+
 ## API Stability
 
-- **Phase 1 (v0.1.x)**: Current tools are stable
-- **Phase 2 (v0.2.x)**: New tools will be added, existing tools unchanged
-- **Phase 3+ (v0.3.x+)**: Advanced features, backward compatible
+- **Phase 1 (v0.1.x)**: Core tools stable
+- **Phase 2 (v0.2.x)**: Attachments + management
+- **Phase 3 (v0.3.x)**: Reply/forward
+- **Phase 4 (v0.5.x)**: Discovery (list_accounts)
+- **Phase 5+**: Further enhancements, backward compatible
 
 Breaking changes will only occur in major versions (1.0.0, 2.0.0, etc.).

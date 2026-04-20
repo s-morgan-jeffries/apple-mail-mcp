@@ -130,8 +130,11 @@ class AppleMailConnector:
 
         Returns:
             List of account dicts with keys:
+              - id: account UUID (stable across name changes)
               - name: account display name
               - email_addresses: list of associated email addresses
+              - account_type: lowercase Mail type (e.g., "imap", "pop", "iCloud")
+              - enabled: whether the account is currently enabled in Mail.app
         """
         tell_body = """
         tell application "Mail"
@@ -139,7 +142,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 set accEmails to email addresses of acc
                 if accEmails is missing value then set accEmails to {}
-                set accRecord to {|name|:(name of acc), |email_addresses|:accEmails}
+                set accRecord to {|id|:(id of acc as text), |name|:(name of acc), |email_addresses|:accEmails, |account_type|:((account type of acc) as text), |enabled|:(enabled of acc)}
                 set end of resultData to accRecord
             end repeat
         end tell
