@@ -13,8 +13,8 @@
 
 `make test-e2e` covers two layers:
 
-1. **In-process FastMCP dispatch** ([tests/e2e/test_mcp_tools.py](../../tests/e2e/test_mcp_tools.py)) — tool registration, schemas, and happy-path invocation for all 15 tools, with the connector mocked.
-2. **Real stdio transport** ([tests/e2e/test_stdio_transport.py](../../tests/e2e/test_stdio_transport.py)) — spawns the server as a subprocess, completes the MCP handshake over stdio, and asserts `list_tools` returns the expected 15 tools. Catches startup errors, banner/stdout contamination, and JSON-RPC framing bugs that the in-process layer cannot surface.
+1. **In-process FastMCP dispatch** ([tests/e2e/test_mcp_tools.py](../../tests/e2e/test_mcp_tools.py)) — tool registration, schemas, and happy-path invocation for all 16 tools, with the connector mocked.
+2. **Real stdio transport** ([tests/e2e/test_stdio_transport.py](../../tests/e2e/test_stdio_transport.py)) — spawns the server as a subprocess, completes the MCP handshake over stdio, and asserts `list_tools` returns the expected 16 tools. Catches startup errors, banner/stdout contamination, and JSON-RPC framing bugs that the in-process layer cannot surface.
 
 ## Running Tests
 

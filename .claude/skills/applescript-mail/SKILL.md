@@ -121,7 +121,7 @@ messages whose sender contains "user" and subject contains "report"
 
 1. **No scheduled sending** — Mail.app has no AppleScript support for delayed/scheduled sends
 2. **No thread/conversation access** — Messages are individual objects; no thread grouping in AppleScript API
-3. **No rule management** — Mail rules cannot be read or modified via AppleScript
+3. **Rule management is partial** — Rules are *readable* (`rules` collection, `name`, `enabled`, conditions/actions), but have no stable `id` and must be addressed positionally or by non-unique name. Mutation paths (creating, updating, deleting) are more complex and not yet implemented.
 4. **No smart mailbox access** — Smart mailboxes are not exposed to AppleScript
 5. **Rich text body** — `content of message` returns plain text; HTML body requires alternate approach
 6. **Read receipt** — Cannot request or detect read receipts

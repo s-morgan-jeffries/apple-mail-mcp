@@ -141,6 +141,52 @@ def list_accounts() -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_rules() -> dict[str, Any]:
+    """
+    List all Mail.app rules (read-only).
+
+    Returns each rule's display name and enabled state. Rule names are NOT
+    guaranteed unique — Mail allows duplicates — and rules have no stable
+    id via AppleScript. This tool is read-only; mutation (enable/disable,
+    create, delete) is tracked as a separate enhancement.
+
+    Returns:
+        Dictionary containing the rules list.
+
+    Example:
+        >>> list_rules()
+        {"success": True, "rules": [
+            {"name": "Junk filter", "enabled": True},
+            {"name": "News From Apple", "enabled": False}, ...
+        ], "count": 2}
+    """
+    try:
+        rate_err = check_rate_limit("list_rules", {})
+        if rate_err:
+            return rate_err
+
+        logger.info("Listing rules")
+
+        rules = mail.list_rules()
+
+        operation_logger.log_operation("list_rules", {}, "success")
+
+        return {
+            "success": True,
+            "rules": rules,
+            "count": len(rules),
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing rules: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
 def list_mailboxes(account: str) -> dict[str, Any]:
     """
     List all mailboxes for an account.

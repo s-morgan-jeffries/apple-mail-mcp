@@ -99,6 +99,20 @@ class TestMailIntegration:
             # No "raw" key left over from the old placeholder
             assert "raw" not in acct
 
+    def test_list_rules(self, connector: AppleMailConnector) -> None:
+        """Real list_rules returns structured rule records.
+
+        Rules list may be empty for a user who has never configured any. Empty
+        is a valid pass. Non-empty entries must have name + enabled with the
+        right types.
+        """
+        result = connector.list_rules()
+        assert isinstance(result, list)
+        for rule in result:
+            assert set(rule.keys()) >= {"name", "enabled"}
+            assert isinstance(rule["name"], str) and rule["name"]
+            assert isinstance(rule["enabled"], bool)
+
     def test_get_message(
         self, connector: AppleMailConnector, test_account: str
     ) -> None:

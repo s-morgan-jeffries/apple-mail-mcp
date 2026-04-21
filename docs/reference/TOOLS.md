@@ -5,7 +5,7 @@ Complete reference for all MCP tools provided by the Apple Mail MCP server.
 ## Overview
 
 **Current Version:** v0.5.0 (Phase 4)
-**Total Tools:** 15 (5 from Phase 1 + 7 from Phase 2 + 2 from Phase 3 + 1 from Phase 4)
+**Total Tools:** 16 (5 from Phase 1 + 7 from Phase 2 + 2 from Phase 3 + 2 from Phase 4)
 
 ## Phase 1 Tools (v0.1.0) - Core Foundation
 
@@ -978,6 +978,37 @@ send_email(
 ---
 
 ## Phase 4 Tools (v0.5.0)
+
+### list_rules
+
+List all Mail.app rules (read-only). Returns each rule's name and enabled state.
+
+**Parameters:** None.
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "rules": [
+    {"name": "Junk filter", "enabled": true},
+    {"name": "News From Apple", "enabled": false}
+  ],
+  "count": 2
+}
+```
+
+**Field notes:**
+
+- `name`: Rule display name. **Not guaranteed unique** — Mail.app allows multiple rules with the same name.
+- `enabled`: Reflects the rule's toggle in Mail.app's Rules preferences.
+
+**Limitations:**
+
+- Read-only. Mutation (enable/disable, create, update, delete) is tracked as a separate enhancement.
+- Rules have no stable id via AppleScript. Addressing a specific rule for future mutation would require positional (index) or name-based (ambiguous) handles.
+
+---
 
 ### list_accounts
 
