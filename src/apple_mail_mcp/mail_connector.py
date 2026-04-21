@@ -651,6 +651,176 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
+    def get_thread(self, message_id: str) -> list[dict[str, Any]]:
+        """Return all messages in the thread containing ``message_id``.
+
+        Uses Mail.app's indexed ``whose subject contains "..."`` filter as a
+        pre-filter, then reconstructs the thread by walking RFC 5322
+        Message-ID / In-Reply-To / References headers across the candidate
+        set. Members whose subject was rewritten mid-thread are not found
+        (documented limitation).
+
+        Args:
+            message_id: Internal Mail.app id of any message in the thread
+                (the anchor). Typically obtained from search_messages or
+                get_message results.
+
+        Returns:
+            List of message dicts sorted by date_received ascending. Each
+            dict has the search_messages shape: id, subject, sender,
+            date_received, read_status, flagged. A thread of 1 is valid
+            (anchor with no threading headers).
+
+        Raises:
+            MailMessageNotFoundError: If no message with the given id exists.
+        """
+        from .utils import (
+            normalize_subject,
+            parse_rfc822_ids,
+            walk_thread_graph,
+        )
+
+        message_id_safe = escape_applescript_string(sanitize_input(message_id))
+
+        # ---- Call 1: resolve anchor ----
+        anchor_body = f'''
+        tell application "Mail"
+            set anchorResult to missing value
+            repeat with acc in accounts
+                repeat with mb in mailboxes of acc
+                    try
+                        set msg to first message of mb whose id is {message_id_safe}
+                        set anchorInReplyTo to ""
+                        set anchorRefs to ""
+                        try
+                            repeat with h in headers of msg
+                                set hname to name of h
+                                if hname is "in-reply-to" then set anchorInReplyTo to (content of h)
+                                if hname is "references" then set anchorRefs to (content of h)
+                            end repeat
+                        end try
+                        set resultData to {{|account|:(name of acc), |rfc_message_id|:(message id of msg), |subject|:(subject of msg), |in_reply_to|:anchorInReplyTo, |references_raw|:anchorRefs}}
+                        set anchorResult to resultData
+                        exit repeat
+                    end try
+                end repeat
+                if anchorResult is not missing value then exit repeat
+            end repeat
+
+            if anchorResult is missing value then
+                error "Can't get message: not found"
+            end if
+        end tell
+        '''
+
+        anchor_script = _wrap_as_json_script(anchor_body)
+        anchor_raw = self._run_applescript(anchor_script)
+        anchor = cast(dict[str, Any], parse_applescript_json(anchor_raw))
+
+        # ---- Call 2: collect subject-prefiltered candidates across the
+        # anchor's account (all mailboxes) with their threading headers ----
+        account_name = anchor["account"]
+        base_subject = normalize_subject(anchor["subject"])
+        account_safe = escape_applescript_string(sanitize_input(account_name))
+        subject_safe = escape_applescript_string(sanitize_input(base_subject))
+
+        candidates_body = f'''
+        tell application "Mail"
+            set acctRef to account "{account_safe}"
+            set resultData to {{}}
+            repeat with mbRef in mailboxes of acctRef
+                try
+                    set hits to (messages of mbRef whose subject contains "{subject_safe}")
+                    repeat with m in hits
+                        set inReplyTo to ""
+                        set refs to ""
+                        try
+                            repeat with h in headers of m
+                                set hname to name of h
+                                if hname is "in-reply-to" then set inReplyTo to (content of h)
+                                if hname is "references" then set refs to (content of h)
+                            end repeat
+                        end try
+                        set candRecord to {{|id|:(id of m as text), |rfc_message_id|:(message id of m), |in_reply_to|:inReplyTo, |references_raw|:refs, |subject|:(subject of m), |sender|:(sender of m), |date_received|:(date received of m as text), |read_status|:(read status of m), |flagged|:(flagged status of m)}}
+                        set end of resultData to candRecord
+                    end repeat
+                on error
+                    -- Some mailboxes (e.g. Gmail smart labels) reject whose clauses; skip
+                end try
+            end repeat
+        end tell
+        '''
+
+        candidates_script = _wrap_as_json_script(candidates_body)
+        candidates_raw = self._run_applescript(candidates_script)
+        candidates = cast(
+            list[dict[str, Any]],
+            parse_applescript_json(candidates_raw),
+        )
+
+        # Enrich candidates with parsed references (Python-side).
+        for cand in candidates:
+            cand["references_parsed"] = parse_rfc822_ids(
+                cand.get("references_raw", "")
+            )
+
+        # Seed the known-id frontier: anchor + its own references.
+        anchor_rfc = anchor["rfc_message_id"]
+        known_ids: set[str] = {anchor_rfc}
+        if anchor["in_reply_to"]:
+            known_ids.add(anchor["in_reply_to"])
+        known_ids.update(parse_rfc822_ids(anchor["references_raw"]))
+
+        # Separate the anchor's own candidate row (when present) from the
+        # rest. The graph walk operates on the non-anchor candidates; the
+        # anchor itself always belongs in the result.
+        anchor_candidate: dict[str, Any] | None = None
+        non_anchor_candidates: list[dict[str, Any]] = []
+        for cand in candidates:
+            if cand["rfc_message_id"] == anchor_rfc and anchor_candidate is None:
+                anchor_candidate = cand
+            else:
+                non_anchor_candidates.append(cand)
+
+        accepted = walk_thread_graph(
+            known_ids=known_ids,
+            candidates=non_anchor_candidates,
+        )
+
+        # Assemble final thread: anchor (from candidates or a minimal row
+        # if the anchor's own row didn't surface in the candidate set).
+        thread: list[dict[str, Any]] = []
+        if anchor_candidate is not None:
+            thread.append(anchor_candidate)
+        else:
+            logger.warning(
+                "get_thread: anchor (rfc=%s) not in candidate set; "
+                "result row will be incomplete",
+                anchor_rfc,
+            )
+            thread.append({
+                "id": message_id,
+                "subject": anchor["subject"],
+                "sender": "",
+                "date_received": "",
+                "read_status": False,
+                "flagged": False,
+            })
+        thread.extend(accepted)
+
+        # Sort by date_received ascending. AppleScript emits locale-formatted
+        # strings; lexicographic sort is a close-enough proxy within a thread.
+        thread.sort(key=lambda m: m.get("date_received") or "")
+
+        # Drop threading internals from output rows (search-shape only).
+        for m in thread:
+            m.pop("rfc_message_id", None)
+            m.pop("in_reply_to", None)
+            m.pop("references_raw", None)
+            m.pop("references_parsed", None)
+
+        return thread
+
     def save_attachments(
         self,
         message_id: str,

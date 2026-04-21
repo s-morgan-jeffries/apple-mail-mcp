@@ -8,6 +8,7 @@ from apple_mail_mcp.exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
     MailMailboxNotFoundError,
+    MailMessageNotFoundError,
 )
 from apple_mail_mcp.mail_connector import AppleMailConnector, _wrap_as_json_script
 
@@ -605,6 +606,116 @@ class TestAppleMailConnector:
         """Test marking with empty list."""
         result = connector.mark_as_read([])
         assert result == 0
+
+    # ---- get_thread ----
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_thread_anchor_resolution_script_shape(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Anchor-resolution AppleScript must query by internal id and quote keys."""
+        mock_run.side_effect = [
+            '{"account":"Gmail","rfc_message_id":"<anchor@x>","subject":"Q3",'
+            '"in_reply_to":"","references_raw":""}',
+            "[]",
+        ]
+        connector.get_thread("12345")
+        anchor_script = mock_run.call_args_list[0][0][0]
+        # All record keys must be |quoted| per the v0.4.1 selector-collision rule.
+        assert "|rfc_message_id|:(message id of msg)" in anchor_script
+        assert "|subject|:(subject of msg)" in anchor_script
+        # Anchor lookup iterates by internal id.
+        assert "whose id is 12345" in anchor_script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_thread_anchor_not_found_raises(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Anchor lookup failure propagates MailMessageNotFoundError."""
+        mock_run.side_effect = MailMessageNotFoundError("Can't get message")
+        with pytest.raises(MailMessageNotFoundError):
+            connector.get_thread("99999")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_thread_returns_anchor_plus_replies_sorted(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Anchor + 2 replies in candidates → all 3 sorted by date_received."""
+        mock_run.side_effect = [
+            '{"account":"Gmail","rfc_message_id":"<anchor@x>",'
+            '"subject":"Re: Q3","in_reply_to":"","references_raw":""}',
+            '['
+            '{"id":"100","rfc_message_id":"<anchor@x>","in_reply_to":"",'
+            '"references_raw":"","subject":"Q3","sender":"a@x",'
+            '"date_received":"Mon Jan 1 2024","read_status":true,"flagged":false},'
+            '{"id":"101","rfc_message_id":"<r1@x>","in_reply_to":"<anchor@x>",'
+            '"references_raw":"<anchor@x>","subject":"Re: Q3","sender":"b@x",'
+            '"date_received":"Tue Jan 2 2024","read_status":true,"flagged":false},'
+            '{"id":"102","rfc_message_id":"<r2@x>","in_reply_to":"<r1@x>",'
+            '"references_raw":"<anchor@x> <r1@x>","subject":"Re: Q3","sender":"a@x",'
+            '"date_received":"Wed Jan 3 2024","read_status":false,"flagged":false}'
+            ']'
+        ]
+        result = connector.get_thread("100")
+        assert len(result) == 3
+        assert [m["id"] for m in result] == ["100", "101", "102"]
+        # Response rows match search_messages shape (6 fields).
+        for m in result:
+            assert set(m.keys()) == {
+                "id", "subject", "sender", "date_received", "read_status", "flagged",
+            }
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_thread_drops_threading_internals_from_output(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Response rows must NOT leak rfc_message_id / in_reply_to / references_raw."""
+        mock_run.side_effect = [
+            '{"account":"Gmail","rfc_message_id":"<anchor@x>",'
+            '"subject":"Q3","in_reply_to":"","references_raw":""}',
+            '[{"id":"100","rfc_message_id":"<anchor@x>","in_reply_to":"",'
+            '"references_raw":"","subject":"Q3","sender":"a@x",'
+            '"date_received":"Mon","read_status":false,"flagged":false}]'
+        ]
+        result = connector.get_thread("100")
+        for m in result:
+            assert "rfc_message_id" not in m
+            assert "in_reply_to" not in m
+            assert "references_raw" not in m
+            assert "references_parsed" not in m
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_thread_orphan_anchor_returns_single_message(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Anchor with no threading headers → thread = [anchor] only."""
+        mock_run.side_effect = [
+            '{"account":"Gmail","rfc_message_id":"<orphan@x>","subject":"Standalone",'
+            '"in_reply_to":"","references_raw":""}',
+            '[{"id":"500","rfc_message_id":"<orphan@x>","in_reply_to":"",'
+            '"references_raw":"","subject":"Standalone","sender":"a@x",'
+            '"date_received":"Mon","read_status":false,"flagged":false}]'
+        ]
+        result = connector.get_thread("500")
+        assert len(result) == 1
+        assert result[0]["id"] == "500"
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_thread_candidate_script_uses_base_subject_and_account(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Candidate script must use normalized subject and scope to anchor's account."""
+        mock_run.side_effect = [
+            '{"account":"Gmail","rfc_message_id":"<a@x>",'
+            '"subject":"Re: Re: Q3 Report","in_reply_to":"","references_raw":""}',
+            '[]',
+        ]
+        connector.get_thread("1")
+        candidate_script = mock_run.call_args_list[1][0][0]
+        assert 'account "Gmail"' in candidate_script
+        # Base subject strips all Re: prefixes.
+        assert 'subject contains "Q3 Report"' in candidate_script
+        assert 'subject contains "Re:' not in candidate_script
 
 
 class TestWrapAsJsonScript:
