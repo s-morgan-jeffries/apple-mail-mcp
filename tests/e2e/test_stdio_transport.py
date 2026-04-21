@@ -30,6 +30,7 @@ EXPECTED_TOOLS = {
     "list_mailboxes",
     "search_messages",
     "get_message",
+    "get_thread",
     "send_email",
     "mark_as_read",
     "send_email_with_attachments",
