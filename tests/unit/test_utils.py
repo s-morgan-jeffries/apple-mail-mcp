@@ -15,6 +15,7 @@ from apple_mail_mcp.utils import (
     parse_rfc822_ids,
     sanitize_input,
     validate_email,
+    walk_thread_graph,
 )
 
 
@@ -233,3 +234,86 @@ class TestParseRfc822Ids:
     def test_malformed_trailing_angle(self) -> None:
         """Lenient: strip stray brackets around otherwise-valid ids."""
         assert parse_rfc822_ids("<a@x.com> <malformed") == ["a@x.com", "malformed"]
+
+
+class TestWalkThreadGraph:
+    def test_single_anchor_no_candidates(self) -> None:
+        """Thread of one message returns just that message."""
+        accepted = walk_thread_graph(
+            known_ids={"rfc-anchor"},
+            candidates=[],
+        )
+        assert accepted == []
+
+    def test_direct_reply_found(self) -> None:
+        """A candidate whose in_reply_to matches the anchor joins the thread."""
+        cand = {
+            "id": "reply-1",
+            "rfc_message_id": "rfc-reply-1",
+            "in_reply_to": "rfc-anchor",
+            "references_parsed": [],
+        }
+        accepted = walk_thread_graph(
+            known_ids={"rfc-anchor"},
+            candidates=[cand],
+        )
+        assert accepted == [cand]
+
+    def test_nested_reply_discovered_in_second_pass(self) -> None:
+        """A reply-to-the-reply is added after its parent is added."""
+        c1 = {
+            "id": "reply-1",
+            "rfc_message_id": "rfc-1",
+            "in_reply_to": "rfc-anchor",
+            "references_parsed": [],
+        }
+        c2 = {
+            "id": "reply-2",
+            "rfc_message_id": "rfc-2",
+            "in_reply_to": "rfc-1",
+            "references_parsed": [],
+        }
+        accepted = walk_thread_graph(
+            known_ids={"rfc-anchor"},
+            candidates=[c2, c1],  # c2 first — requires iteration to stability
+        )
+        ids = {c["id"] for c in accepted}
+        assert ids == {"reply-1", "reply-2"}
+
+    def test_references_chain_expands_known_set(self) -> None:
+        """A candidate whose references list overlaps known_ids joins."""
+        cand = {
+            "id": "branch",
+            "rfc_message_id": "rfc-branch",
+            "in_reply_to": "",
+            "references_parsed": ["rfc-ancient", "rfc-anchor"],
+        }
+        accepted = walk_thread_graph(
+            known_ids={"rfc-anchor"},
+            candidates=[cand],
+        )
+        assert accepted == [cand]
+
+    def test_unrelated_candidate_rejected(self) -> None:
+        cand = {
+            "id": "unrelated",
+            "rfc_message_id": "rfc-other",
+            "in_reply_to": "rfc-completely-different",
+            "references_parsed": [],
+        }
+        accepted = walk_thread_graph(
+            known_ids={"rfc-anchor"},
+            candidates=[cand],
+        )
+        assert accepted == []
+
+    def test_cycle_terminates(self) -> None:
+        """Malformed client references that form a cycle don't loop forever."""
+        c1 = {"id": "a", "rfc_message_id": "rfc-a", "in_reply_to": "rfc-b", "references_parsed": []}
+        c2 = {"id": "b", "rfc_message_id": "rfc-b", "in_reply_to": "rfc-a", "references_parsed": []}
+        accepted = walk_thread_graph(
+            known_ids={"rfc-a"},
+            candidates=[c1, c2],
+        )
+        ids = {c["id"] for c in accepted}
+        assert ids == {"a", "b"}

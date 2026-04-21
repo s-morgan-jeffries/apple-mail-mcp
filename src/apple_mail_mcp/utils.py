@@ -373,3 +373,52 @@ def parse_rfc822_ids(raw: str) -> list[str]:
         if cleaned and cleaned not in out:
             out.append(cleaned)
     return out
+
+
+def walk_thread_graph(
+    known_ids: set[str],
+    candidates: list[dict[str, Any]],
+    max_iterations: int = 100,
+) -> list[dict[str, Any]]:
+    """Graph-walk a candidate set, accepting members whose references
+    transitively connect to known_ids.
+
+    Iterates until stable. Each pass may add candidates whose rfc_message_id,
+    in_reply_to, or any parsed references overlap the known-id frontier.
+    Accepted candidates contribute their own ids back into the frontier.
+
+    Args:
+        known_ids: Seed set of RFC 822 Message-IDs known to belong to the
+            thread (typically {anchor.rfc_message_id} plus the anchor's own
+            in_reply_to and references).
+        candidates: List of dicts with keys ``id``, ``rfc_message_id``,
+            ``in_reply_to``, ``references_parsed`` (list[str]). Anchor
+            itself should NOT appear in this list.
+        max_iterations: Cycle-safety cap. Real threads stabilize in 1-2
+            passes; the cap only matters for malformed header chains.
+
+    Returns:
+        Accepted candidates in their original order.
+    """
+    accepted: list[dict[str, Any]] = []
+    accepted_ids: set[str] = set()
+    frontier = set(known_ids)
+
+    for _ in range(max_iterations):
+        changed = False
+        for cand in candidates:
+            if cand["id"] in accepted_ids:
+                continue
+            refs = {cand["rfc_message_id"]}
+            if cand["in_reply_to"]:
+                refs.add(cand["in_reply_to"])
+            refs.update(cand["references_parsed"])
+            if refs & frontier:
+                accepted.append(cand)
+                accepted_ids.add(cand["id"])
+                frontier |= refs
+                changed = True
+        if not changed:
+            break
+
+    return accepted
