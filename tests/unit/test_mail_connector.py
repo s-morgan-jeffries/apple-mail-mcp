@@ -160,6 +160,53 @@ class TestAppleMailConnector:
         assert "|id|:(id of acc as text)" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_rules_returns_structured_data(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = (
+            '[{"name":"News From Apple","enabled":false},'
+            '{"name":"Junk filter","enabled":true}]'
+        )
+        result = connector.list_rules()
+        assert result == [
+            {"name": "News From Apple", "enabled": False},
+            {"name": "Junk filter", "enabled": True},
+        ]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_rules_empty(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "[]"
+        result = connector.list_rules()
+        assert result == []
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_rules_allows_duplicate_names(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Mail allows multiple rules with the same name — connector returns both."""
+        mock_run.return_value = (
+            '[{"name":"Send to OmniFocus","enabled":false},'
+            '{"name":"Send to OmniFocus","enabled":true}]'
+        )
+        result = connector.list_rules()
+        assert len(result) == 2
+        assert result[0]["name"] == result[1]["name"]
+        assert result[0]["enabled"] != result[1]["enabled"]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_rules_script_quotes_keys(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Record keys must be |quoted| per the v0.4.1 selector-collision rule."""
+        mock_run.return_value = "[]"
+        connector.list_rules()
+        script = mock_run.call_args[0][0]
+        assert "|name|:(name of r)" in script
+        assert "|enabled|:(enabled of r)" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:

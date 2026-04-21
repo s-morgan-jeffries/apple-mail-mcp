@@ -152,6 +152,33 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
+    def list_rules(self) -> list[dict[str, Any]]:
+        """List all Mail.app rules.
+
+        Returns:
+            List of rule dicts with keys:
+              - name: rule display name (NOT guaranteed unique — Mail allows duplicates)
+              - enabled: whether the rule is currently enabled
+
+        Note:
+            Mail.app does not expose a stable rule id via AppleScript, so rules
+            can only be addressed positionally or by name (with duplicate-name
+            ambiguity). Read-only for now; see the CRUD follow-up issue.
+        """
+        tell_body = """
+        tell application "Mail"
+            set resultData to {}
+            repeat with r in rules
+                set ruleRecord to {|name|:(name of r), |enabled|:(enabled of r)}
+                set end of resultData to ruleRecord
+            end repeat
+        end tell
+        """
+
+        script = _wrap_as_json_script(tell_body)
+        result = self._run_applescript(script)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))
+
     def list_mailboxes(self, account: str) -> list[dict[str, Any]]:
         """List all mailboxes for an account.
 

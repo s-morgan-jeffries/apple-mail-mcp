@@ -23,6 +23,7 @@ pytestmark = pytest.mark.e2e
 
 EXPECTED_TOOLS = {
     "list_accounts",
+    "list_rules",
     "list_mailboxes",
     "search_messages",
     "get_message",
@@ -110,6 +111,12 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         [{"id": "UUID-1", "name": "Gmail",
           "email_addresses": ["me@gmail.com"],
           "account_type": "imap", "enabled": True}],
+    ),
+    (
+        "list_rules",
+        {},
+        "list_rules",
+        [{"name": "Junk filter", "enabled": True}],
     ),
     (
         "list_mailboxes",

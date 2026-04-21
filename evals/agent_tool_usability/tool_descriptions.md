@@ -100,6 +100,14 @@ List all mailboxes for an account. Returns each mailbox's name and unread_count.
 
 ---
 
+### list_rules
+
+List all Mail.app rules (read-only). Returns each rule's name and enabled state. Rule names are not guaranteed unique and rules have no stable id — address them carefully if you plan to act on a specific one.
+
+**Parameters:** None.
+
+---
+
 ### mark_as_read
 
 Mark messages as read or unread.

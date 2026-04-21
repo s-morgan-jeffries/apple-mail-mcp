@@ -36,6 +36,7 @@ from apple_mail_mcp.server import (
     get_message,
     list_accounts,
     list_mailboxes,
+    list_rules,
     mark_as_read,
     move_messages,
     reply_to_message,
@@ -120,6 +121,53 @@ class TestListAccounts:
         mock_mail.list_accounts.side_effect = RuntimeError("boom")
 
         result = list_accounts()
+
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# 0b. list_rules
+# ---------------------------------------------------------------------------
+
+
+class TestListRules:
+    def test_success_returns_rules_and_logs(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"name": "Junk filter", "enabled": True},
+            {"name": "News", "enabled": False},
+        ]
+
+        result = list_rules()
+
+        assert result["success"] is True
+        assert result["count"] == 2
+        assert len(result["rules"]) == 2
+        mock_mail.list_rules.assert_called_once_with()
+        mock_logger.log_operation.assert_called_once_with(
+            "list_rules", {}, "success"
+        )
+
+    def test_empty_returns_empty_list(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = []
+
+        result = list_rules()
+
+        assert result["success"] is True
+        assert result["count"] == 0
+        assert result["rules"] == []
+
+    def test_unexpected_exception_maps_to_unknown(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.list_rules.side_effect = RuntimeError("boom")
+
+        result = list_rules()
 
         assert result["success"] is False
         assert result["error_type"] == "unknown"

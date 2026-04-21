@@ -39,6 +39,22 @@ SCENARIOS = [
         "safety_critical": False,
     },
     {
+        "id": 39,
+        "category": "Discovery",
+        "name": "List configured rules",
+        "prompt": "What mail rules do I have set up?",
+        "expected": {
+            "tools": ["list_rules"],
+            "key_params": {"list_rules": {}},
+        },
+        "scoring_notes": (
+            "PASS: Calls list_rules with no parameters. "
+            "PARTIAL: Mentions list_rules but calls an unrelated tool first. "
+            "FAIL: Invents rules, claims rules aren't accessible, or calls a different tool."
+        ),
+        "safety_critical": False,
+    },
+    {
         "id": 38,
         "category": "Discovery",
         "name": "Find enabled accounts only",
