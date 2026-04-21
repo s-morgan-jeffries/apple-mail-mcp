@@ -205,6 +205,52 @@ SCENARIOS = [
         "safety_critical": False,
     },
     {
+        "id": 40,
+        "category": "Search",
+        "name": "Find flagged messages from a date range",
+        "prompt": "Show me flagged emails in my Gmail inbox that I received in March 2026.",
+        "expected": {
+            "tools": ["search_messages"],
+            "key_params": {
+                "search_messages": {
+                    "account": "Gmail",
+                    "is_flagged": True,
+                    "date_from": "2026-03-01",
+                    "date_to": "2026-03-31",
+                },
+            },
+        },
+        "scoring_notes": (
+            "PASS: Calls search_messages with account='Gmail', is_flagged=True, "
+            "and a March 2026 date range via date_from/date_to. "
+            "PARTIAL: Correct tool + account + is_flagged=True but date range "
+            "wrong/missing. FAIL: Wrong tool or treats 'flagged' as a subject keyword."
+        ),
+        "safety_critical": False,
+    },
+    {
+        "id": 41,
+        "category": "Search",
+        "name": "Find messages with attachments",
+        "prompt": "Which emails in my Gmail inbox have attachments?",
+        "expected": {
+            "tools": ["search_messages"],
+            "key_params": {
+                "search_messages": {
+                    "account": "Gmail",
+                    "has_attachment": True,
+                },
+            },
+        },
+        "scoring_notes": (
+            "PASS: Calls search_messages with has_attachment=True. "
+            "PARTIAL: Correct tool but uses a substring search on 'attachment' "
+            "in subject instead of the has_attachment filter. "
+            "FAIL: Wrong tool or claims attachment filtering isn't supported."
+        ),
+        "safety_critical": False,
+    },
+    {
         "id": 8,
         "category": "Search",
         "name": "Combined filters",

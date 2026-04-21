@@ -77,6 +77,56 @@ class TestMailIntegration:
         for msg in result:
             assert msg["read_status"] is False
 
+    def test_search_flagged_messages(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """New in #28: is_flagged pushes a flagged-status whose clause."""
+        result = connector.search_messages(
+            account=test_account,
+            mailbox="INBOX",
+            is_flagged=True,
+            limit=5,
+        )
+        assert isinstance(result, list)
+        for msg in result:
+            assert msg["flagged"] is True
+
+    def test_search_with_date_range(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """New in #28: date_from + date_to stack in the whose clause.
+
+        Uses a wide range so the query is guaranteed to return something on
+        any realistic test mailbox with recent activity.
+        """
+        from datetime import date, timedelta
+
+        today = date.today()
+        range_start = (today - timedelta(days=365)).isoformat()
+        range_end = today.isoformat()
+
+        result = connector.search_messages(
+            account=test_account,
+            mailbox="INBOX",
+            date_from=range_start,
+            date_to=range_end,
+            limit=5,
+        )
+        assert isinstance(result, list)
+        # Non-empty only validates that a stacked date whose clause survives
+        # round-trip to Mail. Empty inbox or no recent messages is a valid pass.
+
+    def test_search_rejects_malformed_date(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """Malformed date raises ValueError before any AppleScript runs."""
+        with pytest.raises(ValueError):
+            connector.search_messages(
+                account=test_account,
+                mailbox="INBOX",
+                date_from="not-a-date",
+            )
+
     def test_list_accounts(self, connector: AppleMailConnector) -> None:
         """Real list_accounts returns structured account records.
 

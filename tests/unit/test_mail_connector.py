@@ -335,9 +335,10 @@ class TestAppleMailConnector:
         assert 'sender contains "john@example.com"' in call_args
         assert 'subject contains "meeting"' in call_args
         assert "read status is false" in call_args
-        # Limit is enforced via a count-clamp, not `items 1 thru N of` (which
-        # Mail rejects for live message collection references).
-        assert "if maxI > 10 then set maxI to 10" in call_args
+        # Limit is enforced by accumulating matches and exiting the repeat
+        # when count of resultData reaches the bound. `items 1 thru N of`
+        # is avoided — Mail rejects it on live message collection references.
+        assert "if (count of resultData) >= 10 then exit repeat" in call_args
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_without_filters_omits_whose_clause(
@@ -370,7 +371,113 @@ class TestAppleMailConnector:
         connector.search_messages("Gmail", "INBOX", limit=5)
         script = mock_run.call_args[0][0]
         assert "items 1 thru" not in script
-        assert "if maxI > 5 then set maxI to 5" in script
+        assert "if (count of resultData) >= 5 then exit repeat" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_is_flagged_in_whose_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "[]"
+        connector.search_messages("Gmail", "INBOX", is_flagged=True)
+        script = mock_run.call_args[0][0]
+        assert "flagged status is true" in script
+
+        connector.search_messages("Gmail", "INBOX", is_flagged=False)
+        script = mock_run.call_args[0][0]
+        assert "flagged status is false" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_date_range_in_whose_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "[]"
+        connector.search_messages(
+            "Gmail", "INBOX", date_from="2026-04-01", date_to="2026-04-15"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'date received >= (date "2026-04-01")' in script
+        # date_to gets +1 day so the full day is inclusive
+        assert 'date received < (date "2026-04-16")' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_rejects_malformed_date_from(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Malformed dates must raise ValueError, not be sent to AppleScript.
+
+        Prevents AppleScript injection via unescaped date strings.
+        """
+        with pytest.raises(ValueError, match="date_from"):
+            connector.search_messages(
+                "Gmail", "INBOX",
+                date_from='2024-01-01", delete mailbox',
+            )
+        mock_run.assert_not_called()
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_rejects_malformed_date_to(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="date_to"):
+            connector.search_messages("Gmail", "INBOX", date_to="not-a-date")
+        mock_run.assert_not_called()
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_has_attachment_true_post_filters(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """has_attachment=True can't go in whose — applied inside the loop."""
+        mock_run.return_value = "[]"
+        # Combine with a read_status filter so the whose clause exists and the
+        # "count attachments not in whose" assertion is meaningful.
+        connector.search_messages(
+            "Gmail", "INBOX", read_status=True, has_attachment=True
+        )
+        script = mock_run.call_args[0][0]
+        # The attachment check MUST NOT appear in the whose clause line.
+        whose_line = [
+            ln for ln in script.splitlines() if "whose" in ln and "messages of" in ln
+        ][0]
+        assert "mail attachments" not in whose_line
+        # But it MUST appear as a post-filter inside the loop.
+        assert (
+            "if (count of mail attachments of msg) = 0 then set includeThis to false"
+            in script
+        )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_has_attachment_false_post_filters(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "[]"
+        connector.search_messages("Gmail", "INBOX", has_attachment=False)
+        script = mock_run.call_args[0][0]
+        assert (
+            "if (count of mail attachments of msg) > 0 then set includeThis to false"
+            in script
+        )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_no_attachment_filter_has_no_check(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """When has_attachment is None, no attachment post-filter code appears."""
+        mock_run.return_value = "[]"
+        connector.search_messages("Gmail", "INBOX")
+        script = mock_run.call_args[0][0]
+        assert "mail attachments of msg" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_result_includes_flagged(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """New in #28: result rows include the flagged status."""
+        mock_run.return_value = (
+            '[{"id":"1","subject":"s","sender":"a@b.c",'
+            '"date_received":"Mon","read_status":false,"flagged":true}]'
+        )
+        result = connector.search_messages("Gmail", "INBOX")
+        assert result[0]["flagged"] is True
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_script_quotes_id_key(

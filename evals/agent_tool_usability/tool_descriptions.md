@@ -162,6 +162,10 @@ Search for messages matching criteria. All filters are optional; at minimum the 
 - `sender_contains` (str, optional): Filter by sender email/domain substring.
 - `subject_contains` (str, optional): Filter by subject keyword substring.
 - `read_status` (bool, optional): Filter by read status (True=read, False=unread).
+- `is_flagged` (bool, optional): Filter by flagged status.
+- `date_from` (str, optional): Inclusive lower bound on date_received. ISO 8601 YYYY-MM-DD only.
+- `date_to` (str, optional): Inclusive upper bound on date_received (full day included). ISO 8601 YYYY-MM-DD only.
+- `has_attachment` (bool, optional): Filter for messages with (True) or without (False) attachments.
 - `limit` (int, optional, default: 50): Maximum results to return.
 
 ---
