@@ -8,6 +8,7 @@ from apple_mail_mcp.exceptions import MailAppleScriptError
 from apple_mail_mcp.utils import (
     escape_applescript_string,
     format_applescript_list,
+    normalize_subject,
     parse_applescript_json,
     parse_applescript_list,
     parse_date_filter,
@@ -172,3 +173,34 @@ class TestParseAppleScriptJson:
         """'ERROR:' with no message still raises (edge case)."""
         with pytest.raises(MailAppleScriptError):
             parse_applescript_json("ERROR:")
+
+
+class TestNormalizeSubject:
+    def test_strips_leading_re(self) -> None:
+        assert normalize_subject("Re: Q3 Report") == "Q3 Report"
+
+    def test_strips_leading_fwd(self) -> None:
+        assert normalize_subject("Fwd: Budget update") == "Budget update"
+
+    def test_strips_leading_fw(self) -> None:
+        assert normalize_subject("Fw: heads up") == "heads up"
+
+    def test_strips_nested_prefixes(self) -> None:
+        assert normalize_subject("Re: Re: Fwd: Re: Q3") == "Q3"
+
+    def test_case_insensitive(self) -> None:
+        assert normalize_subject("RE: hello") == "hello"
+        assert normalize_subject("FWD: hi") == "hi"
+        assert normalize_subject("re: yo") == "yo"
+
+    def test_preserves_subject_without_prefix(self) -> None:
+        assert normalize_subject("Q3 Report") == "Q3 Report"
+
+    def test_handles_empty_string(self) -> None:
+        assert normalize_subject("") == ""
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        assert normalize_subject("  Re:   Q3 Report  ") == "Q3 Report"
+
+    def test_preserves_internal_whitespace(self) -> None:
+        assert normalize_subject("Re: Q3   Report") == "Q3   Report"

@@ -320,3 +320,33 @@ def parse_applescript_json(result: str) -> Any:
     if stripped.startswith("ERROR:"):
         raise MailAppleScriptError(stripped[len("ERROR:"):].strip())
     return json.loads(stripped)
+
+
+# Subject prefixes that indicate a reply or forward, case-insensitive.
+# Order doesn't matter; we strip the first match each pass and repeat.
+_REPLY_PREFIXES = ("re:", "fwd:", "fw:")
+
+
+def normalize_subject(subject: str) -> str:
+    """Strip reply/forward prefixes from a subject for thread matching.
+
+    Iteratively removes leading "Re:", "Fwd:", "Fw:" (case-insensitive) and
+    surrounding whitespace so that all messages in a thread share one base
+    key regardless of how many times the subject has been Re:'d.
+
+    Args:
+        subject: Raw subject line.
+
+    Returns:
+        Normalized subject. Empty input returns empty output.
+    """
+    s = subject.strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _REPLY_PREFIXES:
+            if s.lower().startswith(prefix):
+                s = s[len(prefix):].lstrip()
+                changed = True
+                break
+    return s
