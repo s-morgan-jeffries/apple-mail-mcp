@@ -12,6 +12,7 @@ from apple_mail_mcp.utils import (
     parse_applescript_json,
     parse_applescript_list,
     parse_date_filter,
+    parse_rfc822_ids,
     sanitize_input,
     validate_email,
 )
@@ -204,3 +205,31 @@ class TestNormalizeSubject:
 
     def test_preserves_internal_whitespace(self) -> None:
         assert normalize_subject("Re: Q3   Report") == "Q3   Report"
+
+
+class TestParseRfc822Ids:
+    def test_single_angle_wrapped_id(self) -> None:
+        assert parse_rfc822_ids("<abc@example.com>") == ["abc@example.com"]
+
+    def test_multiple_space_separated(self) -> None:
+        assert parse_rfc822_ids("<a@x.com> <b@x.com> <c@x.com>") == [
+            "a@x.com", "b@x.com", "c@x.com",
+        ]
+
+    def test_multiline_references(self) -> None:
+        raw = "<a@x.com>\n <b@x.com>\n <c@x.com>"
+        assert parse_rfc822_ids(raw) == ["a@x.com", "b@x.com", "c@x.com"]
+
+    def test_preserves_bare_ids(self) -> None:
+        """Some clients emit ids without angle brackets."""
+        assert parse_rfc822_ids("bare@example.com") == ["bare@example.com"]
+
+    def test_empty_string_returns_empty_list(self) -> None:
+        assert parse_rfc822_ids("") == []
+
+    def test_whitespace_only_returns_empty_list(self) -> None:
+        assert parse_rfc822_ids("   \n  ") == []
+
+    def test_malformed_trailing_angle(self) -> None:
+        """Lenient: strip stray brackets around otherwise-valid ids."""
+        assert parse_rfc822_ids("<a@x.com> <malformed") == ["a@x.com", "malformed"]

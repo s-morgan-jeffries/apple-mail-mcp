@@ -350,3 +350,26 @@ def normalize_subject(subject: str) -> str:
                 changed = True
                 break
     return s
+
+
+def parse_rfc822_ids(raw: str) -> list[str]:
+    """Parse an In-Reply-To or References header into a list of Message-IDs.
+
+    RFC 5322 canonical form is `<id@domain>` separated by whitespace or
+    folded newlines. Some clients emit bare ids without angle brackets —
+    we accept both. Returns ids without angle brackets, order preserved,
+    duplicates removed.
+
+    Args:
+        raw: Header content (e.g., "<a@x> <b@x>").
+
+    Returns:
+        List of cleaned message-id strings. Empty input returns empty list.
+    """
+    tokens = raw.split()
+    out: list[str] = []
+    for tok in tokens:
+        cleaned = tok.strip().lstrip("<").rstrip(">").strip()
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
