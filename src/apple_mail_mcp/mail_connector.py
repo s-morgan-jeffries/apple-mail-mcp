@@ -3,7 +3,10 @@ AppleScript-based connector for Apple Mail.
 """
 
 import logging
+import re
 import subprocess
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +19,10 @@ from .exceptions import (
 from .utils import escape_applescript_string, parse_applescript_json, sanitize_input
 
 logger = logging.getLogger(__name__)
+
+# Strict ISO 8601 YYYY-MM-DD — search_messages's date_from/date_to filters
+# reject anything else to prevent AppleScript injection via the date clause.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _wrap_as_json_script(body: str) -> str:
@@ -218,31 +225,42 @@ class AppleMailConnector:
         sender_contains: str | None = None,
         subject_contains: str | None = None,
         read_status: bool | None = None,
+        is_flagged: bool | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachment: bool | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search for messages matching criteria.
 
         Args:
-            account: Account name
-            mailbox: Mailbox name
-            sender_contains: Filter by sender
-            subject_contains: Filter by subject
-            read_status: Filter by read status (True=read, False=unread)
-            limit: Maximum results
+            account: Account name.
+            mailbox: Mailbox name.
+            sender_contains: Substring match on sender (server-side).
+            subject_contains: Substring match on subject (server-side).
+            read_status: Filter by read status (True=read, False=unread).
+            is_flagged: Filter by flagged status (True=flagged, False=not).
+            date_from: Inclusive lower bound on date received. ISO 8601 YYYY-MM-DD.
+            date_to: Inclusive upper bound on date received (full day included).
+                ISO 8601 YYYY-MM-DD.
+            has_attachment: Filter messages with/without attachments. Applied
+                post-whose because Mail rejects it inside a whose clause.
+            limit: Maximum results.
 
         Returns:
-            List of message dictionaries
+            List of message dictionaries.
 
         Raises:
-            MailAccountNotFoundError: If account doesn't exist
-            MailMailboxNotFoundError: If mailbox doesn't exist
+            ValueError: If date_from or date_to is not ISO 8601 YYYY-MM-DD.
+            MailAccountNotFoundError: If account doesn't exist.
+            MailMailboxNotFoundError: If mailbox doesn't exist.
         """
         account_safe = escape_applescript_string(sanitize_input(account))
         mailbox_safe = escape_applescript_string(sanitize_input(mailbox))
 
-        # Build whose clause
-        conditions = []
+        # Build whose clause (server-side filters)
+        conditions: list[str] = []
         if sender_contains:
             sender_safe = escape_applescript_string(sanitize_input(sender_contains))
             conditions.append(f'sender contains "{sender_safe}"')
@@ -255,31 +273,70 @@ class AppleMailConnector:
             status = "true" if read_status else "false"
             conditions.append(f"read status is {status}")
 
+        if is_flagged is not None:
+            status = "true" if is_flagged else "false"
+            conditions.append(f"flagged status is {status}")
+
+        if date_from is not None:
+            if not _ISO_DATE_RE.match(date_from):
+                raise ValueError(
+                    f"date_from must be ISO 8601 YYYY-MM-DD, got: {date_from!r}"
+                )
+            conditions.append(f'date received >= (date "{date_from}")')
+
+        if date_to is not None:
+            if not _ISO_DATE_RE.match(date_to):
+                raise ValueError(
+                    f"date_to must be ISO 8601 YYYY-MM-DD, got: {date_to!r}"
+                )
+            # Upper bound is exclusive of the day AFTER date_to, so the full
+            # day of date_to is included.
+            next_day = (
+                _date.fromisoformat(date_to) + _timedelta(days=1)
+            ).isoformat()
+            conditions.append(f'date received < (date "{next_day}")')
+
         # AppleScript rejects `whose true` ("Illegal comparison or logical").
         # When no filters are supplied, drop the `whose` clause entirely.
         whose_part = f" whose {' and '.join(conditions)}" if conditions else ""
 
-        # `items 1 thru N of (messages of mailboxRef ...)` is rejected by Mail
-        # with error -1728 — you can't slice a live message collection reference.
-        # Use `count of` + `item i of` inside a repeat instead; both work on
-        # references and fetch one message at a time.
-        limit_clamp = (
-            f"if maxI > {limit} then set maxI to {limit}" if limit else ""
-        )
+        # `has_attachment` can't go in the whose clause — Mail rejects
+        # `(count of mail attachments) > 0` and `exists mail attachment` with
+        # type-specifier errors. Applied post-whose inside the repeat.
+        if has_attachment is None:
+            attachment_check = ""
+        elif has_attachment:
+            attachment_check = (
+                "if (count of mail attachments of msg) = 0 then "
+                "set includeThis to false"
+            )
+        else:
+            attachment_check = (
+                "if (count of mail attachments of msg) > 0 then "
+                "set includeThis to false"
+            )
+
+        # Per-match limit is applied after all filters (whose + attachment
+        # post-filter) so the caller gets up to `limit` final matches.
+        effective_limit = str(limit) if limit else "999999999"
 
         tell_body = f'''
         tell application "Mail"
             set accountRef to account "{account_safe}"
             set mailboxRef to mailbox "{mailbox_safe}" of accountRef
             set allMatches to messages of mailboxRef{whose_part}
-            set maxI to count of allMatches
-            {limit_clamp}
+            set totalCount to count of allMatches
 
             set resultData to {{}}
-            repeat with i from 1 to maxI
+            repeat with i from 1 to totalCount
                 set msg to item i of allMatches
-                set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg)}}
-                set end of resultData to msgRecord
+                set includeThis to true
+                {attachment_check}
+                if includeThis then
+                    set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg)}}
+                    set end of resultData to msgRecord
+                    if (count of resultData) >= {effective_limit} then exit repeat
+                end if
             end repeat
         end tell
         '''

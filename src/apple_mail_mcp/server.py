@@ -249,21 +249,30 @@ def search_messages(
     sender_contains: str | None = None,
     subject_contains: str | None = None,
     read_status: bool | None = None,
+    is_flagged: bool | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    has_attachment: bool | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
     """
     Search for messages matching criteria.
 
     Args:
-        account: Account name (e.g., "Gmail", "iCloud")
-        mailbox: Mailbox name (default: "INBOX")
-        sender_contains: Filter by sender email/domain
-        subject_contains: Filter by subject keywords
-        read_status: Filter by read status (true=read, false=unread)
-        limit: Maximum results to return (default: 50)
+        account: Account name (e.g., "Gmail", "iCloud").
+        mailbox: Mailbox name (default: "INBOX").
+        sender_contains: Filter by sender email/domain substring.
+        subject_contains: Filter by subject keywords substring.
+        read_status: Filter by read status (true=read, false=unread).
+        is_flagged: Filter by flagged status (true=flagged, false=not flagged).
+        date_from: Inclusive lower bound on date received. ISO 8601 YYYY-MM-DD.
+        date_to: Inclusive upper bound on date received (full day included). ISO 8601 YYYY-MM-DD.
+        has_attachment: Filter messages with (true) or without (false) attachments.
+        limit: Maximum results to return (default: 50).
 
     Returns:
-        Dictionary containing matching messages
+        Dictionary containing matching messages. Each message row includes
+        id, subject, sender, date_received, read_status, flagged.
 
     Example:
         >>> search_messages("Gmail", sender_contains="john@example.com", read_status=False, limit=10)
@@ -280,7 +289,9 @@ def search_messages(
 
         logger.info(
             f"Searching messages in {account}/{mailbox} with filters: "
-            f"sender={sender_contains}, subject={subject_contains}, read={read_status}"
+            f"sender={sender_contains}, subject={subject_contains}, read={read_status}, "
+            f"flagged={is_flagged}, date_from={date_from}, date_to={date_to}, "
+            f"has_attachment={has_attachment}"
         )
 
         messages = mail.search_messages(
@@ -289,6 +300,10 @@ def search_messages(
             sender_contains=sender_contains,
             subject_contains=subject_contains,
             read_status=read_status,
+            is_flagged=is_flagged,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachment=has_attachment,
             limit=limit,
         )
 
@@ -301,6 +316,10 @@ def search_messages(
                     "sender": sender_contains,
                     "subject": subject_contains,
                     "read_status": read_status,
+                    "is_flagged": is_flagged,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "has_attachment": has_attachment,
                 },
             },
             "success"
@@ -320,6 +339,13 @@ def search_messages(
             "success": False,
             "error": str(e),
             "error_type": "not_found",
+        }
+    except ValueError as e:
+        logger.error(f"Validation error in search_messages: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "validation_error",
         }
     except Exception as e:
         logger.error(f"Error searching messages: {e}")

@@ -255,6 +255,10 @@ class TestSearchMessages:
             sender_contains="alice@example.com",
             subject_contains=None,
             read_status=False,
+            is_flagged=None,
+            date_from=None,
+            date_to=None,
+            has_attachment=None,
             limit=10,
         )
         mock_logger.log_operation.assert_called_once()
@@ -283,6 +287,63 @@ class TestSearchMessages:
 
         assert result["success"] is False
         assert result["error_type"] == "not_found"
+
+    def test_advanced_filters_propagate_to_connector(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """New in #28: is_flagged, date_from, date_to, has_attachment must
+        pass through to the connector and appear in the audit log."""
+        mock_mail.search_messages.return_value = []
+
+        result = search_messages(
+            "Gmail",
+            mailbox="INBOX",
+            is_flagged=True,
+            date_from="2026-04-01",
+            date_to="2026-04-15",
+            has_attachment=True,
+            limit=25,
+        )
+
+        assert result["success"] is True
+        mock_mail.search_messages.assert_called_once_with(
+            account="Gmail",
+            mailbox="INBOX",
+            sender_contains=None,
+            subject_contains=None,
+            read_status=None,
+            is_flagged=True,
+            date_from="2026-04-01",
+            date_to="2026-04-15",
+            has_attachment=True,
+            limit=25,
+        )
+        logged_params = mock_logger.log_operation.call_args.args[1]
+        assert logged_params["filters"] == {
+            "sender": None,
+            "subject": None,
+            "read_status": None,
+            "is_flagged": True,
+            "date_from": "2026-04-01",
+            "date_to": "2026-04-15",
+            "has_attachment": True,
+        }
+
+    def test_malformed_date_maps_to_validation_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """Connector raises ValueError on bad date; server surfaces
+        error_type: validation_error (not generic unknown)."""
+        mock_mail.search_messages.side_effect = ValueError(
+            "date_from must be ISO 8601 YYYY-MM-DD, got: 'nope'"
+        )
+
+        result = search_messages("Gmail", date_from="nope")
+
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "date_from" in result["error"]
+        mock_logger.log_operation.assert_not_called()
 
     def test_unexpected_exception_maps_to_unknown(
         self, mock_mail: MagicMock, mock_logger: MagicMock

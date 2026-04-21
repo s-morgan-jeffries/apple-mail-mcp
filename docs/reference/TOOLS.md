@@ -22,7 +22,15 @@ Search for messages matching specified criteria.
 | `sender_contains` | string | No | None | Filter by sender email or domain |
 | `subject_contains` | string | No | None | Filter by subject keywords |
 | `read_status` | boolean | No | None | Filter by read status (true=read, false=unread) |
+| `is_flagged` | boolean | No | None | Filter by flagged status (true=flagged, false=not flagged) |
+| `date_from` | string | No | None | Inclusive lower bound on `date_received`. ISO 8601 YYYY-MM-DD. |
+| `date_to` | string | No | None | Inclusive upper bound on `date_received` (full day included). ISO 8601 YYYY-MM-DD. |
+| `has_attachment` | boolean | No | None | Filter messages with (true) or without (false) attachments |
 | `limit` | integer | No | 50 | Maximum number of results to return |
+
+**Notes:**
+- Malformed `date_from` / `date_to` raise `error_type: validation_error`. Only ISO 8601 YYYY-MM-DD is accepted; relative dates like "7 days ago" are not supported.
+- `has_attachment` is filtered after the initial server-side match because Mail.app rejects attachment predicates inside its `whose` clause.
 
 **Returns:**
 
@@ -37,7 +45,8 @@ Search for messages matching specified criteria.
       "subject": "Meeting Tomorrow",
       "sender": "john@example.com",
       "date_received": "Mon Jan 15 2024 10:30:00",
-      "read_status": false
+      "read_status": false,
+      "flagged": false
     }
   ],
   "count": 1
