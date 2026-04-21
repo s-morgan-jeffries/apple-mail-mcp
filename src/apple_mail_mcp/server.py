@@ -770,6 +770,65 @@ def get_attachments(message_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def get_thread(message_id: str) -> dict[str, Any]:
+    """
+    Return all messages in the thread containing the given message.
+
+    Looks up the message by its internal id, then reconstructs the
+    conversation by reading RFC 5322 threading headers (Message-ID,
+    In-Reply-To, References) across messages in the same account.
+    Results are sorted by date_received ascending.
+
+    Known limitation: thread members whose subject was rewritten
+    mid-conversation are missed (subject prefilter tradeoff).
+
+    Args:
+        message_id: Internal id of any message in the thread
+            (from search_messages or get_message results).
+
+    Returns:
+        Dictionary with the thread list.
+
+    Example:
+        >>> get_thread("12345")
+        {"success": True, "thread": [{...}, {...}], "count": 2}
+    """
+    try:
+        rate_err = check_rate_limit("get_thread", {"message_id": message_id})
+        if rate_err:
+            return rate_err
+
+        logger.info(f"Getting thread for message: {message_id}")
+
+        thread = mail.get_thread(message_id)
+
+        operation_logger.log_operation(
+            "get_thread", {"message_id": message_id}, "success"
+        )
+
+        return {
+            "success": True,
+            "thread": thread,
+            "count": len(thread),
+        }
+
+    except MailMessageNotFoundError as e:
+        logger.error(f"Message not found: {e}")
+        return {
+            "success": False,
+            "error": f"Message '{message_id}' not found",
+            "error_type": "message_not_found",
+        }
+    except Exception as e:
+        logger.error(f"Error getting thread: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
 def save_attachments(
     message_id: str,
     save_directory: str,
