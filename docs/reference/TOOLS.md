@@ -5,7 +5,7 @@ Complete reference for all MCP tools provided by the Apple Mail MCP server.
 ## Overview
 
 **Current Version:** v0.5.0 (Phase 4)
-**Total Tools:** 16 (5 from Phase 1 + 7 from Phase 2 + 2 from Phase 3 + 2 from Phase 4)
+**Total Tools:** 17 (5 from Phase 1 + 7 from Phase 2 + 2 from Phase 3 + 3 from Phase 4)
 
 ## Phase 1 Tools (v0.1.0) - Core Foundation
 
@@ -987,6 +987,54 @@ send_email(
 ---
 
 ## Phase 4 Tools (v0.5.0)
+
+### get_thread
+
+Return all messages in the thread containing the given anchor message, sorted chronologically.
+
+Looks up the anchor by its internal id, reads its RFC 5322 threading headers (Message-ID, In-Reply-To, References), then searches every mailbox in the anchor's account for candidate messages whose normalized subject matches. Candidates with overlapping Message-ID / In-Reply-To / References form the reply graph. The subject prefilter is a feasibility requirement, not an optimization — `whose message id is "X"` on Mail.app is ~21 seconds per lookup (not indexed) vs sub-second for subject.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `message_id` | string | Yes | - | Internal id of any message in the thread (from search_messages or get_message). |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "thread": [
+    {"id": "100", "subject": "Q3 Report", "sender": "alice@x.com",
+     "date_received": "Mon Jan 1 2024 10:00:00", "read_status": true, "flagged": false},
+    {"id": "101", "subject": "Re: Q3 Report", "sender": "bob@x.com",
+     "date_received": "Mon Jan 1 2024 14:30:00", "read_status": true, "flagged": false}
+  ],
+  "count": 2
+}
+```
+
+Message rows are the search_messages shape (6 fields). No content — chain `get_message` to read bodies.
+
+**Known limitations:**
+
+- **Subject rewrites miss thread members.** A reply whose subject was rewritten mid-conversation ("Re: Q3 Report" → "Reopening the Q3 discussion") won't match the subject prefilter and is excluded. Rare in practice.
+- **Single-account scope.** Threads that span multiple accounts (forwarding, aliases) are not reconstructed cross-account.
+- **Orphan anchors** (messages with no threading headers) return a thread of 1 (the anchor itself).
+
+**Examples:**
+
+```python
+# Get the full conversation for a message found via search
+matches = search_messages("Gmail", mailbox="INBOX", subject_contains="Q3")
+thread = get_thread(matches["messages"][0]["id"])
+print(f"Thread has {thread['count']} messages")
+```
+
+**Future:** An IMAP-based code path (tracked as issue #66) will remove the subject-rewrite limitation once the `imap_connector` (issue #41) lands.
+
+---
 
 ### list_rules
 

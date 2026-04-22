@@ -120,7 +120,7 @@ messages whose sender contains "user" and subject contains "report"
 ## Known Mail.app Automation Limitations
 
 1. **No scheduled sending** — Mail.app has no AppleScript support for delayed/scheduled sends
-2. **No thread/conversation access** — Messages are individual objects; no thread grouping in AppleScript API
+2. **Thread reconstruction is possible but not native** — Mail.app has no `thread` or `conversation` class. Reconstruct threads by reading `headers of msg` for `in-reply-to`, `references`, and matching against `message id of msg` (the RFC 822 header value) across candidate messages. **`whose message id is "X"` is NOT indexed** (~21s per lookup on a real mailbox); always subject-prefilter first. See `get_thread` in `mail_connector.py`.
 3. **Rule management is partial** — Rules are *readable* (`rules` collection, `name`, `enabled`, conditions/actions), but have no stable `id` and must be addressed positionally or by non-unique name. Mutation paths (creating, updating, deleting) are more complex and not yet implemented.
 4. **No smart mailbox access** — Smart mailboxes are not exposed to AppleScript
 5. **Rich text body** — `content of message` returns plain text; HTML body requires alternate approach
