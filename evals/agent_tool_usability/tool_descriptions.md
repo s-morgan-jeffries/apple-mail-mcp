@@ -83,6 +83,15 @@ Get full details of a specific message.
 
 ---
 
+### get_thread
+
+Return all messages in the thread containing the given message, sorted chronologically. Walks RFC 5322 threading headers across the anchor's account. Returns the search_messages shape (no bodies; chain get_message for content). Known limitation: members with mid-thread subject rewrites are missed.
+
+**Parameters:**
+- `message_id` (str, required): Internal id of any message in the thread.
+
+---
+
 ### list_accounts
 
 List all configured email accounts. Returns each account's id (UUID), name, email_addresses, account_type (`imap`, `pop`, `iCloud`, etc.), and enabled state. Call first to discover accounts before any other tool that needs an account name.

@@ -34,6 +34,7 @@ from apple_mail_mcp.server import (
     forward_message,
     get_attachments,
     get_message,
+    get_thread,
     list_accounts,
     list_mailboxes,
     list_rules,
@@ -718,6 +719,54 @@ class TestGetAttachments:
 
         assert result["success"] is False
         assert result["error_type"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# 7b. get_thread
+# ---------------------------------------------------------------------------
+
+
+class TestGetThread:
+    def test_success_returns_thread_and_logs(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = [
+            {"id": "1", "subject": "Q3", "sender": "a@b", "date_received": "Mon", "read_status": True, "flagged": False},
+            {"id": "2", "subject": "Re: Q3", "sender": "c@d", "date_received": "Tue", "read_status": False, "flagged": False},
+        ]
+
+        result = get_thread("1")
+
+        assert result["success"] is True
+        assert result["count"] == 2
+        assert len(result["thread"]) == 2
+        mock_mail.get_thread.assert_called_once_with("1")
+        mock_logger.log_operation.assert_called_once_with(
+            "get_thread", {"message_id": "1"}, "success"
+        )
+
+    def test_message_not_found_maps_to_message_not_found(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_thread.side_effect = MailMessageNotFoundError("nope")
+
+        result = get_thread("nope")
+
+        assert result["success"] is False
+        assert result["error_type"] == "message_not_found"
+        assert "nope" in result["error"]
+        mock_logger.log_operation.assert_not_called()
+
+    def test_unexpected_exception_maps_to_unknown(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_thread.side_effect = RuntimeError("boom")
+
+        result = get_thread("1")
+
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
 
 
 # ---------------------------------------------------------------------------

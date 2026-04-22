@@ -229,6 +229,23 @@ SCENARIOS = [
         "safety_critical": False,
     },
     {
+        "id": 42,
+        "category": "Read",
+        "name": "Show full thread containing a message",
+        "prompt": "Show me the full conversation for message with id msg-42.",
+        "expected": {
+            "tools": ["get_thread"],
+            "key_params": {"get_thread": {"message_id": "msg-42"}},
+        },
+        "scoring_notes": (
+            "PASS: Calls get_thread with message_id=msg-42. "
+            "PARTIAL: Calls get_thread but names the param differently. "
+            "FAIL: Calls get_message and tries to reconstruct the thread manually, "
+            "or calls search_messages and guesses."
+        ),
+        "safety_critical": False,
+    },
+    {
         "id": 41,
         "category": "Search",
         "name": "Find messages with attachments",

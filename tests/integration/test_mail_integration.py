@@ -163,6 +163,40 @@ class TestMailIntegration:
             assert isinstance(rule["name"], str) and rule["name"]
             assert isinstance(rule["enabled"], bool)
 
+    def test_get_thread_orphan_anchor(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """For any message, get_thread must at minimum return the anchor itself.
+
+        This exercises the anchor-resolution + candidate-collection path
+        end-to-end without needing a known-threaded message. Skips if the
+        inbox is empty.
+        """
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not matches:
+            pytest.skip("test inbox has no messages")
+
+        thread = connector.get_thread(matches[0]["id"])
+        assert isinstance(thread, list)
+        assert len(thread) >= 1
+        for m in thread:
+            assert set(m.keys()) >= {
+                "id", "subject", "sender", "date_received",
+                "read_status", "flagged",
+            }
+        # Anchor must be in the result.
+        assert any(m["id"] == matches[0]["id"] for m in thread)
+
+    def test_get_thread_rejects_nonexistent_anchor(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """Nonexistent anchor raises MailMessageNotFoundError."""
+        from apple_mail_mcp.exceptions import MailMessageNotFoundError
+        with pytest.raises(MailMessageNotFoundError):
+            connector.get_thread("99999999999")
+
     def test_get_message(
         self, connector: AppleMailConnector, test_account: str
     ) -> None:

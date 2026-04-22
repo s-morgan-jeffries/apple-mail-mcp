@@ -320,3 +320,105 @@ def parse_applescript_json(result: str) -> Any:
     if stripped.startswith("ERROR:"):
         raise MailAppleScriptError(stripped[len("ERROR:"):].strip())
     return json.loads(stripped)
+
+
+# Subject prefixes that indicate a reply or forward, case-insensitive.
+# Order doesn't matter; we strip the first match each pass and repeat.
+_REPLY_PREFIXES = ("re:", "fwd:", "fw:")
+
+
+def normalize_subject(subject: str) -> str:
+    """Strip reply/forward prefixes from a subject for thread matching.
+
+    Iteratively removes leading "Re:", "Fwd:", "Fw:" (case-insensitive) and
+    surrounding whitespace so that all messages in a thread share one base
+    key regardless of how many times the subject has been Re:'d.
+
+    Args:
+        subject: Raw subject line.
+
+    Returns:
+        Normalized subject. Empty input returns empty output.
+    """
+    s = subject.strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _REPLY_PREFIXES:
+            if s.lower().startswith(prefix):
+                s = s[len(prefix):].lstrip()
+                changed = True
+                break
+    return s
+
+
+def parse_rfc822_ids(raw: str) -> list[str]:
+    """Parse an In-Reply-To or References header into a list of Message-IDs.
+
+    RFC 5322 canonical form is `<id@domain>` separated by whitespace or
+    folded newlines. Some clients emit bare ids without angle brackets —
+    we accept both. Returns ids without angle brackets, order preserved,
+    duplicates removed.
+
+    Args:
+        raw: Header content (e.g., "<a@x> <b@x>").
+
+    Returns:
+        List of cleaned message-id strings. Empty input returns empty list.
+    """
+    tokens = raw.split()
+    out: list[str] = []
+    for tok in tokens:
+        cleaned = tok.strip().lstrip("<").rstrip(">").strip()
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
+def walk_thread_graph(
+    known_ids: set[str],
+    candidates: list[dict[str, Any]],
+    max_iterations: int = 100,
+) -> list[dict[str, Any]]:
+    """Graph-walk a candidate set, accepting members whose references
+    transitively connect to known_ids.
+
+    Iterates until stable. Each pass may add candidates whose rfc_message_id,
+    in_reply_to, or any parsed references overlap the known-id frontier.
+    Accepted candidates contribute their own ids back into the frontier.
+
+    Args:
+        known_ids: Seed set of RFC 822 Message-IDs known to belong to the
+            thread (typically {anchor.rfc_message_id} plus the anchor's own
+            in_reply_to and references).
+        candidates: List of dicts with keys ``id``, ``rfc_message_id``,
+            ``in_reply_to``, ``references_parsed`` (list[str]). Anchor
+            itself should NOT appear in this list.
+        max_iterations: Cycle-safety cap. Real threads stabilize in 1-2
+            passes; the cap only matters for malformed header chains.
+
+    Returns:
+        Accepted candidates in their original order.
+    """
+    accepted: list[dict[str, Any]] = []
+    accepted_ids: set[str] = set()
+    frontier = set(known_ids)
+
+    for _ in range(max_iterations):
+        changed = False
+        for cand in candidates:
+            if cand["id"] in accepted_ids:
+                continue
+            refs = {cand["rfc_message_id"]}
+            if cand["in_reply_to"]:
+                refs.add(cand["in_reply_to"])
+            refs.update(cand["references_parsed"])
+            if refs & frontier:
+                accepted.append(cand)
+                accepted_ids.add(cand["id"])
+                frontier |= refs
+                changed = True
+        if not changed:
+            break
+
+    return accepted

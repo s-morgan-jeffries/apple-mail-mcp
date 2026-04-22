@@ -123,6 +123,7 @@ OPERATION_TIERS: dict[str, str] = {
     "list_mailboxes": "cheap_reads",
     "get_message": "cheap_reads",
     "get_attachments": "cheap_reads",
+    "get_thread": "cheap_reads",
     "save_attachments": "cheap_reads",
     "search_messages": "expensive_ops",
     "mark_as_read": "expensive_ops",
