@@ -1,8 +1,8 @@
 # IMAP Hybrid Approach — Research Findings
 
-**Status:** Research complete, not yet implemented
-**Related issues:** #15 (closed), #39, #40, #41
-**Date:** 2026-04
+**Status:** Keychain-retrieval assumption **falsified 2026-04-22** — see [Spike Findings (#39)](#spike-findings-39-2026-04-22) below. Further IMAP work is blocked on a follow-up research issue that evaluates auth alternatives. The "Authentication: macOS Keychain" section of this document is superseded and kept only as historical context.
+**Related issues:** #15 (closed), #39 (closed — negative result), #40, #41, #66 (all blocked on #68), #68 (new — evaluate auth options)
+**Date:** 2026-04 (original); findings appended 2026-04-22
 
 ## Question
 
@@ -120,6 +120,8 @@ imap.store(msg_id, '+FLAGS', '\\Deleted')
 
 ## Authentication: macOS Keychain
 
+> **Superseded 2026-04-22 — this section's premise was falsified by spike #39. See [Spike Findings](#spike-findings-39-2026-04-22). Retained for historical context; do not act on the claims below without re-validating.**
+
 The key insight is that **Mail.app already stores IMAP credentials in the Keychain** when the user sets up an account. Python can retrieve them without prompting:
 
 ```bash
@@ -204,3 +206,69 @@ Follow-up issues #39, #40, #41 are on v0.5.0 as spikes.
 - [RFC 5256: IMAP SORT and THREAD](https://www.rfc-editor.org/rfc/rfc5256.html)
 - [macOS security(1) man page](x-man-page://1/security) — for `find-internet-password`
 - [email-oauth2-proxy](https://github.com/simonrob/email-oauth2-proxy) — OAuth2 shim if needed
+
+## Spike Findings (#39, 2026-04-22)
+
+### Context
+
+Issue #39 was scoped as a proof-of-concept for the auth path described in the superseded section above: retrieve IMAP credentials from macOS Keychain via `security find-internet-password -s imap.<provider>.com`, connect via IMAPClient, fetch a single message. On first probing, the central assumption failed immediately — Mail.app on modern macOS (tested on macOS 26.3.1 / Darwin 25.3.0) does not store its IMAP credentials anywhere the `security` CLI can reach.
+
+### Reproduction
+
+Run [`scripts/probe_keychain_for_imap.sh`](../../scripts/probe_keychain_for_imap.sh). It enumerates both the login and System keychains, searches for items by IMAP protocol and by common provider hostnames, counts OAuth-token items, and tests whether the Internet Accounts DB is readable.
+
+### Observed results (2026-04-22)
+
+Machine: macOS 26.3.1 (Darwin 25.3.0). Mail.app has 5 configured accounts: Gmail, Yahoo, iCloud, MobileMe (iCloud), Pitt (disabled).
+
+```
+--- Check 1: items with ptcl=imap or ptcl=imps ---
+  /Users/Morgan/Library/Keychains/login.keychain-db: 0 items
+  /Library/Keychains/System.keychain: 0 items
+  TOTAL: 0
+
+--- Check 2: items matching common IMAP server hostnames ---
+  imap.gmail.com: not found
+  imap.mail.me.com: not found
+  imap.mail.yahoo.com: not found
+  outlook.office365.com: not found
+  imap-mail.outlook.com: not found
+  imap.fastmail.com: not found
+  imap.aol.com: not found
+  TOTAL MATCHES: 0 / 7
+
+--- Check 3: OAuth tokens (Gmail/Google) ---
+  Items with gena="Google OAuth": 2
+
+--- Check 4: Accounts framework DB readability (TCC) ---
+  /Users/Morgan/Library/Accounts: NOT readable (TCC-protected — grant Full Disk Access to test)
+```
+
+### Interpretation
+
+On modern macOS:
+
+- **No IMAP-protocol internet-password items exist** in either user-accessible keychain for any of the configured accounts. The original assumption (that `security find-internet-password -s imap.gmail.com` would return usable creds) is wrong.
+- **Gmail auth is OAuth, not a stored password** — refresh tokens are present as generic-password items with `gena="Google OAuth"`, but they are not directly usable for IMAP LOGIN; they require XOAUTH2 plus token-refresh handling.
+- **The Internet Accounts framework DB** (`~/Library/Accounts/Accounts4.sqlite`), where Apple consolidates account metadata on recent macOS, is protected by TCC. Reading it requires the user to grant Full Disk Access to whatever binary is performing the read — inappropriate for an MCP server that runs as the user.
+- **iCloud accounts** (visible to Mail.app as `account type = iCloud`, not `imap`) go through Apple's Internet Accounts path entirely, not IMAP.
+
+The conclusion is cheap and definitive: the spike's hypothesis is falsified on this configuration. Further validation on other machines is welcome but not load-bearing — the mechanism is system-level, not account-specific.
+
+### Auth alternatives (to be evaluated in follow-up)
+
+| # | Option | Trade-off |
+|---|--------|-----------|
+| a | User-supplied Keychain item under a known service name (e.g. `apple-mail-mcp.<account>`) populated via a setup script | Simplest; works with app passwords across all providers; requires one-time user setup |
+| b | Extract Google OAuth refresh tokens from Keychain and speak XOAUTH2 | Gmail/Google only; must handle token refresh; brittle against Google OAuth changes |
+| c | Read the Accounts framework DB via a TCC-entitled helper | Requires user to grant Full Disk Access; entitlement distribution issues; heavyweight |
+| d | Plain env vars / config file for IMAP credentials | Trivial to implement; no Keychain integration; worst UX and worst security story |
+| e | Abandon IMAP; stay on AppleScript for all operations | Deletes the whole IMAP arc (#40, #41, #66); concedes the perf and threading wins of the hybrid design |
+
+### Status of related issues
+
+- **#39** — closed as a completed spike with negative result (this document is the deliverable).
+- **#40** (IMAPClient integration for `search_messages`) — blocked. The IMAP perf prototype is meaningful only once auth is settled.
+- **#41** (design `imap_connector.py` alongside `mail_connector.py`) — blocked. The delegation design assumed a working Keychain auth path.
+- **#66** (IMAP-based thread reconstruction) — blocked, same reason.
+- **#68** — new research issue to evaluate the five options above and recommend one.
