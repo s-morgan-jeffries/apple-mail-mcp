@@ -55,6 +55,7 @@ List the exact tool calls you would make, in order, with all parameters. Explain
 
 TOOL_NAMES = [
     "list_accounts", "list_rules", "list_mailboxes", "search_messages", "get_message",
+    "get_thread",
     "send_email", "send_email_with_attachments",
     "get_attachments", "save_attachments",
     "mark_as_read", "flag_message",
