@@ -1,7 +1,7 @@
 # IMAP Hybrid Approach — Research Findings
 
-**Status:** Keychain-retrieval assumption **falsified 2026-04-22** — see [Spike Findings (#39)](#spike-findings-39-2026-04-22) below. Further IMAP work is blocked on a follow-up research issue that evaluates auth alternatives. The "Authentication: macOS Keychain" section of this document is superseded and kept only as historical context.
-**Related issues:** #15 (closed), #39 (closed — negative result), #40, #41, #66 (all blocked on #68), #68 (new — evaluate auth options)
+**Status:** Keychain-retrieval assumption **falsified 2026-04-22** — see [Spike Findings (#39)](#spike-findings-39-2026-04-22) below. Auth path decided in [`imap-auth-options-decision.md`](./imap-auth-options-decision.md) (user-supplied Keychain item per account). The "Authentication: macOS Keychain" section of this document is superseded by that decision.
+**Related issues:** #15 (closed), #39 (closed — negative result), #68 (closed — decision), #41 (unblocked), #40, #66 (blocked on #41)
 **Date:** 2026-04 (original); findings appended 2026-04-22
 
 ## Question

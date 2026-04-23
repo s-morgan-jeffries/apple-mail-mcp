@@ -55,6 +55,9 @@ dev = [
     { name = "radon" },
     { name = "ruff" },
 ]
+research = [
+    { name = "imapclient" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -70,6 +73,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=0.2.0" },
+    { name = "imapclient", marker = "extra == 'research'", specifier = ">=3.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
@@ -78,7 +82,7 @@ requires-dist = [
     { name = "radon", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "research"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -788,6 +792,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6f/6d/0703ccc57f3a7233505399edb88de3cbd678da106337b9fcde432b65ed60/idna-3.11.tar.gz", hash = "sha256:795dafcc9c04ed0c1fb032c2aa73654d8e8c5023a7df64a53f39190ada629902", size = 194582, upload-time = "2025-10-12T14:55:20.501Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0e/61/66938bbb5fc52dbdf84594873d5b51fb1f7c7794e9c0f5bd885f30bc507b/idna-3.11-py3-none-any.whl", hash = "sha256:771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea", size = 71008, upload-time = "2025-10-12T14:55:18.883Z" },
+]
+
+[[package]]
+name = "imapclient"
+version = "3.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/79/8138f8c91e791f49cf4c2269b1eaaaddb93013d162e92ddc249b84d38105/imapclient-3.1.0.tar.gz", hash = "sha256:b0413a516ffcc4b4d69f2c611c0e95da57968edf5a5c78ac82d1bf882305facc", size = 199675, upload-time = "2026-01-17T18:50:12.186Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/a8/a0f86ed51f792d9e6afcc062db2766033be7d1028d1fd5deaf38b075430a/imapclient-3.1.0-py2.py3-none-any.whl", hash = "sha256:34c192ffe82936e940a998ac89c474296942cd7c4f6c208f0fccfcd972946038", size = 182536, upload-time = "2026-01-17T18:49:09.105Z" },
 ]
 
 [[package]]
