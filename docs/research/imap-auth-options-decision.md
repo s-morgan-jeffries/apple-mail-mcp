@@ -6,7 +6,7 @@
 
 ## Recommendation
 
-Production IMAP authentication will read per-account app-specific passwords from a user-populated Keychain entry, keyed by a project-scoped service name and the Mail.app account's email. A setup helper will hide the raw `security` invocation. No part of the production path will rely on reading Mail.app's own stored credentials, which are not reachable from an unsigned user-scoped process on modern macOS.
+Production IMAP authentication will read per-account app-specific passwords from a user-populated Keychain entry, keyed by a project-scoped service name and the Mail.app account's email. A setup helper (tracked in #76) will hide the raw `security` invocation. No part of the production path will rely on reading Mail.app's own stored credentials, which are not reachable from an unsigned user-scoped process on modern macOS.
 
 ## Graceful degradation invariants
 
@@ -63,7 +63,7 @@ The 4.4-second Keychain lookup is a one-time prompt the first time the `security
 **Setup UX.** Per account, one-time:
 
 1. Generate an app-specific password at the provider (appleid.apple.com for iCloud; 2FA-enabled Google Accounts; Yahoo account security).
-2. Run `security add-generic-password -s "apple-mail-mcp.imap.<Name>" -a <email> -w <password> -T "" -U` — the setup helper will wrap this.
+2. Run `security add-generic-password -s "apple-mail-mcp.imap.<Name>" -a <email> -w <password> -T "" -U` — a setup helper (tracked in #76) will wrap this.
 
 **Provider coverage.** Works for any provider that still exposes IMAP + app passwords. **Verified on iCloud (2026-04-22).** Yahoo's app-password UI was not available for the test account on 2026-04-23 — Yahoo has been sunsetting app passwords for several years and the option has quietly disappeared or become non-self-serve for at least some accounts. Gmail (with 2FA enabled), Fastmail, and AOL are expected to work based on public docs but were not exercised in this spike. For providers that are OAuth-only via Mail.app's UI (some enterprise Outlook configurations, some Google Workspace tenants), the user would need a separate app-password path at the provider or fall back to AppleScript. Provider-by-provider coverage is documented, not blocked on — the mechanism is validated, and per-provider feasibility is a deployment-time question for the user.
 
@@ -128,7 +128,7 @@ def get_imap_password(mail_app_account: str, email: str) -> str:
     with actionable setup instructions if the entry is missing."""
 ```
 
-**Server-side setup helper (future work, scope of #41 follow-on):**
+**Server-side setup helper (tracked in #76):**
 
 ```bash
 apple-mail-mcp setup-imap --account iCloud --email user@icloud.com
