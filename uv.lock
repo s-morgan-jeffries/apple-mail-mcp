@@ -43,6 +43,7 @@ version = "0.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "imapclient" },
 ]
 
 [package.optional-dependencies]
@@ -73,6 +74,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=0.2.0" },
+    { name = "imapclient", specifier = ">=3.0.0" },
     { name = "imapclient", marker = "extra == 'research'", specifier = ">=3.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7.0" },
