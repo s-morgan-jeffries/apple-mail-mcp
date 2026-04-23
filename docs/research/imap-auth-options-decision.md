@@ -8,6 +8,29 @@
 
 Production IMAP authentication will read per-account app-specific passwords from a user-populated Keychain entry, keyed by a project-scoped service name and the Mail.app account's email. A setup helper will hide the raw `security` invocation. No part of the production path will rely on reading Mail.app's own stored credentials, which are not reachable from an unsigned user-scoped process on modern macOS.
 
+## Graceful degradation invariants
+
+IMAP is an optional enhancement, never a prerequisite. The following invariants are binding on the implementation (#41) and on any future work touching the delegation layer. They exist so that a user with no Keychain entry, a user with a revoked app password, and a user working offline all get identical, working tool behavior — just via AppleScript.
+
+1. **AppleScript baseline.** Every MCP tool this server exposes must function when IMAP is not available for any reason. AppleScript + Mail.app is the universal baseline. IMAP is, and will remain, a strictly additive enhancement for read / search operations.
+
+2. **Per-account opt-in.** IMAP is enabled per Mail.app account by the presence of a Keychain entry at `apple-mail-mcp.imap.<mail_app_account_name>`. Accounts without an entry never attempt IMAP; they go straight to AppleScript with no per-call check.
+
+3. **Runtime failure → fallback.** For accounts with IMAP configured, any runtime failure of an IMAP operation falls back to AppleScript for *that operation*. The failure classes that must be caught:
+   - `OSError` / `socket.timeout` — offline, DNS failure, host unreachable, wifi dropped mid-operation.
+   - `imapclient.exceptions.LoginError` — creds rejected (password revoked, app password deleted at the provider, account locked).
+   - `imapclient.exceptions.IMAPClientError` — protocol-level error or server-side error mid-session.
+   - Explicit per-operation timeout.
+   Application-level errors (mailbox does not exist, invalid search criteria, permissions error) are **not** caught; they propagate to the caller because AppleScript would fail identically.
+
+4. **Fail-fast connect timeout.** The IMAP connect timeout is ≤3 seconds. When offline, fallback happens within that budget; the user does not sit through the TCP default of tens of seconds on every operation.
+
+5. **Quiet fallback, audible first failure.** Fallback emits at `DEBUG` log level in the steady state. The *first* IMAP failure per account per server-process lifetime emits a single `WARNING` log entry identifying the account, the failure class, and the fact that subsequent operations on that account will also use AppleScript until the process restarts or the operator intervenes. Subsequent failures for the same account drop back to DEBUG.
+
+6. **Write operations always AppleScript.** `send_email`, `send_email_with_attachments`, `reply_to_message`, `forward_message` always use AppleScript regardless of IMAP state. They are never candidates for delegation. (Repeating the existing hybrid design to forestall confusion.)
+
+7. **No whole-session disable.** We do not introduce a global kill switch that disables IMAP for the whole process after N consecutive failures. Fallback is per-operation; an operation that succeeds later (e.g. user reconnects wifi) re-enables IMAP for that call with no state change. Rationale: a laptop oscillating between offline and online is a common case; a session-wide disable would be user-hostile.
+
 ## Context
 
 Spike #39 tested the architectural assumption from [`imap-hybrid-approach.md`](./imap-hybrid-approach.md) that Mail.app's IMAP credentials could be pulled from the login Keychain via `security find-internet-password`. The assumption was falsified in under a minute: zero items with `ptcl=imap`/`imps` exist in the login or system keychain, and the Internet Accounts framework DB (`~/Library/Accounts/Accounts4.sqlite`) is TCC-protected. See [Spike Findings (#39)](./imap-hybrid-approach.md#spike-findings-39-2026-04-22).
