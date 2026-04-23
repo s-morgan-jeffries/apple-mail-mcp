@@ -176,17 +176,26 @@ src/apple_mail_mcp/
 
 **Feature flag:** `MAIL_USE_IMAP=true` for opt-in during development. Default off until stable.
 
-**Delegation logic:**
+**Delegation logic:** see the [graceful-degradation invariants](./imap-auth-options-decision.md#graceful-degradation-invariants) in the decision doc. The sketch below shows the required runtime-fallback shape; the invariants doc is authoritative on exact failure classes and logging behavior.
 
 ```python
+import socket
+from imapclient.exceptions import LoginError, IMAPClientError
+
+IMAP_CONNECT_TIMEOUT_S = 3
+
 class AppleMailConnector:
     def search_messages(self, account, mailbox, ...):
         if self._imap_available(account):
-            return self._imap.search(...)
-        return self._applescript.search(...)
+            try:
+                return self._imap.search(account, mailbox, ...)
+            except (OSError, socket.timeout, LoginError, IMAPClientError) as exc:
+                self._log_imap_fallback(account, exc)
+                # fall through to AppleScript for this operation
+        return self._applescript.search(account, mailbox, ...)
 
     def send_email(self, ...):
-        # Always AppleScript — sending needs compose UI
+        # Always AppleScript — sending needs compose UI. Never delegated.
         return self._applescript.send(...)
 ```
 
