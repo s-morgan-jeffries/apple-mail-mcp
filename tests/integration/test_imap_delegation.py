@@ -140,3 +140,98 @@ class TestIMAPDelegation:
         )
         msg = warnings[0].getMessage()
         assert ICLOUD_ACCOUNT_NAME in msg
+
+    def test_get_thread_uses_imap_when_keychain_entry_present(
+        self,
+        connector: AppleMailConnector,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Positive path: real iCloud, IMAP path resolves a thread.
+
+        Discovers a real message ID at runtime (via Mail.app — iCloud's
+        INBOX is empty for this user, so we look in Sent Messages where
+        we know there are some). Skips if no messages anywhere.
+        """
+        host, port, email = connector._resolve_imap_config(ICLOUD_ACCOUNT_NAME)
+        if not _keychain_entry_exists(ICLOUD_ACCOUNT_NAME, email):
+            pytest.skip(
+                f"No Keychain entry under "
+                f"apple-mail-mcp.imap.{ICLOUD_ACCOUNT_NAME} for {email}."
+            )
+
+        # Find any iCloud message to use as anchor.
+        anchor_finder = subprocess.run(
+            [
+                "/usr/bin/osascript", "-e",
+                'tell application "Mail" to return id of '
+                '(first message of mailbox "Sent Messages" of account "iCloud")',
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        if anchor_finder.returncode != 0:
+            pytest.skip(
+                f"No anchor message available in iCloud Sent Messages: "
+                f"{anchor_finder.stderr.strip()}"
+            )
+        anchor_id = anchor_finder.stdout.strip()
+        assert anchor_id, "Anchor finder returned empty stdout"
+
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp"):
+            result = connector.get_thread(message_id=anchor_id)
+
+        assert isinstance(result, list)
+        # IMAP path must have succeeded silently — no fallback WARNING for
+        # this account.
+        assert ICLOUD_ACCOUNT_NAME not in connector._imap_failures
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert warnings == [], (
+            f"Expected IMAP path to succeed silently, but got warnings: "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+
+    def test_get_thread_falls_back_when_imap_host_unroutable(
+        self,
+        connector: AppleMailConnector,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Negative path for get_thread: IMAP fails, AppleScript path runs.
+
+        Same monkey-patch trick as the search_messages negative test —
+        force the IMAP connect to fail by pointing at an unroutable host,
+        and stub the Keychain lookup so we don't short-circuit on the
+        benign not-found path.
+        """
+        # Find an anchor first (anchor resolution stays AppleScript).
+        anchor_finder = subprocess.run(
+            [
+                "/usr/bin/osascript", "-e",
+                'tell application "Mail" to return id of '
+                '(first message of mailbox "Sent Messages" of account "iCloud")',
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        if anchor_finder.returncode != 0:
+            pytest.skip(f"No anchor message available: {anchor_finder.stderr.strip()}")
+        anchor_id = anchor_finder.stdout.strip()
+
+        def fake_config(_account: str) -> tuple[str, int, str]:
+            return ("10.255.255.1", 993, "fake@example.com")
+
+        monkeypatch.setattr(connector, "_resolve_imap_config", fake_config)
+        monkeypatch.setattr(
+            "apple_mail_mcp.mail_connector.get_imap_password",
+            lambda _account, _email: "fake-password",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp"):
+            result = connector.get_thread(message_id=anchor_id)
+
+        # AppleScript fallback ran and returned the thread (at least the
+        # anchor itself).
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        assert ICLOUD_ACCOUNT_NAME in connector._imap_failures
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert ICLOUD_ACCOUNT_NAME in warnings[0].getMessage()
