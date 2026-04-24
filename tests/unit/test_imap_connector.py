@@ -396,3 +396,105 @@ class TestHasAttachment:
 
         fetch_keys = mock_client.fetch.call_args[0][1]
         assert b"BODYSTRUCTURE" in fetch_keys
+
+
+class TestEnvelopeTranslation:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_strips_angle_brackets_from_message_id(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<abc@example.com>"),
+                b"FLAGS": (),
+            }
+        }
+        [msg] = ImapConnector("h", 993, "u@e.com", "pw").search_messages()
+        assert msg["id"] == "abc@example.com"
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_empty_sender_returns_empty_string(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        env = Envelope(
+            date=datetime(2026, 4, 22),
+            subject=b"s",
+            from_=(),
+            sender=(),
+            reply_to=(),
+            to=(),
+            cc=(),
+            bcc=(),
+            in_reply_to=None,
+            message_id=b"<1@e.com>",
+        )
+        mock_client.fetch.return_value = {
+            1: {b"ENVELOPE": env, b"FLAGS": ()},
+        }
+        [msg] = ImapConnector("h", 993, "u@e.com", "pw").search_messages()
+        assert msg["sender"] == ""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_seen_flag_maps_to_read_status(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<1@e.com>"),
+                b"FLAGS": (b"\\Seen",),
+            }
+        }
+        [msg] = ImapConnector("h", 993, "u@e.com", "pw").search_messages()
+        assert msg["read_status"] is True
+        assert msg["flagged"] is False
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_flagged_flag_maps_to_flagged(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<1@e.com>"),
+                b"FLAGS": (b"\\Flagged",),
+            }
+        }
+        [msg] = ImapConnector("h", 993, "u@e.com", "pw").search_messages()
+        assert msg["flagged"] is True
+        assert msg["read_status"] is False
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_date_iso_format(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(
+                    message_id=b"<1@e.com>",
+                    date=datetime(2026, 4, 22, 14, 30, 0),
+                ),
+                b"FLAGS": (),
+            }
+        }
+        [msg] = ImapConnector("h", 993, "u@e.com", "pw").search_messages()
+        assert msg["date_received"] == "2026-04-22T14:30:00"
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_subject_bytes_decoded_utf8(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(
+                    message_id=b"<1@e.com>", subject="héllo ✓".encode()
+                ),
+                b"FLAGS": (),
+            }
+        }
+        [msg] = ImapConnector("h", 993, "u@e.com", "pw").search_messages()
+        assert msg["subject"] == "héllo ✓"
