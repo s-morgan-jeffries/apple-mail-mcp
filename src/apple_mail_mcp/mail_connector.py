@@ -13,6 +13,7 @@ from typing import Any, cast
 from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailKeychainEntryNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
 )
@@ -74,6 +75,40 @@ class AppleMailConnector:
             timeout: Timeout in seconds for AppleScript operations
         """
         self.timeout = timeout
+        # Accounts for which we've already logged a WARNING about IMAP failure.
+        # Subsequent failures for the same account are demoted to DEBUG per
+        # invariant 5 in docs/research/imap-auth-options-decision.md.
+        self._imap_failures: set[str] = set()
+
+    def _log_imap_fallback(self, account: str, exc: Exception) -> None:
+        """Log an IMAP fallback event at the level specified by the invariants.
+
+        MailKeychainEntryNotFoundError is a benign opt-out signal — always DEBUG,
+        never tracked. For any other failure, the first per-account occurrence
+        logs WARNING; subsequent occurrences for the same account log DEBUG.
+        """
+        if isinstance(exc, MailKeychainEntryNotFoundError):
+            logger.debug(
+                "IMAP not configured for %s (no Keychain entry); using AppleScript",
+                account,
+            )
+            return
+        if account not in self._imap_failures:
+            self._imap_failures.add(account)
+            logger.warning(
+                "IMAP failed for %s (%s: %s), falling back to AppleScript; "
+                "subsequent failures for this account will log at DEBUG",
+                account,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            logger.debug(
+                "IMAP retry failed for %s: %s: %s",
+                account,
+                type(exc).__name__,
+                exc,
+            )
 
     def _run_applescript(self, script: str) -> str:
         """

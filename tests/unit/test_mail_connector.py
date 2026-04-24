@@ -1,5 +1,6 @@
 """Unit tests for mail connector."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,8 @@ import pytest
 from apple_mail_mcp.exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailKeychainAccessDeniedError,
+    MailKeychainEntryNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
 )
@@ -308,6 +311,95 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         # The quote must be escaped; raw quotes would break the script.
         assert 'Weird \\"Name\\" Acct' in script
+
+    # --- _imap_failures state + _log_imap_fallback -----------------------
+
+    def test_imap_failures_starts_empty(
+        self, connector: AppleMailConnector
+    ) -> None:
+        assert connector._imap_failures == set()
+
+    def test_log_imap_fallback_keychain_entry_not_found_is_silent(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Missing Keychain entry is a benign opt-out signal — DEBUG only."""
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback(
+                "iCloud", MailKeychainEntryNotFoundError("missing")
+            )
+        # Not in the failures set — benign signals don't count as failures.
+        assert "iCloud" not in connector._imap_failures
+        # Should log at DEBUG, never WARNING.
+        warning_records = [
+            r for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert warning_records == []
+        debug_records = [
+            r for r in caplog.records if r.levelno == logging.DEBUG
+        ]
+        assert len(debug_records) == 1
+        assert "iCloud" in debug_records[0].getMessage()
+
+    def test_log_imap_fallback_first_failure_logs_warning(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback("iCloud", OSError("network down"))
+        assert "iCloud" in connector._imap_failures
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
+        msg = warning_records[0].getMessage()
+        assert "iCloud" in msg
+        assert "OSError" in msg
+
+    def test_log_imap_fallback_subsequent_failure_same_account_is_debug(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Seed: first failure.
+        connector._log_imap_fallback("iCloud", OSError("first"))
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback("iCloud", OSError("second"))
+        # Set unchanged (already contains iCloud).
+        assert connector._imap_failures == {"iCloud"}
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert warning_records == []
+        debug_records = [
+            r for r in caplog.records if r.levelno == logging.DEBUG
+        ]
+        assert len(debug_records) == 1
+
+    def test_log_imap_fallback_failure_new_account_logs_warning(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        connector._log_imap_fallback("iCloud", OSError("iCloud first"))
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback("Gmail", OSError("Gmail first"))
+        assert connector._imap_failures == {"iCloud", "Gmail"}
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
+        assert "Gmail" in warning_records[0].getMessage()
+
+    def test_log_imap_fallback_access_denied_counts_as_failure(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Access denied is a misconfiguration worth surfacing, unlike missing entry."""
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback(
+                "iCloud", MailKeychainAccessDeniedError("ACL refused")
+            )
+        assert "iCloud" in connector._imap_failures
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_basic(
