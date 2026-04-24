@@ -845,12 +845,6 @@ class AppleMailConnector:
     def get_thread(self, message_id: str) -> list[dict[str, Any]]:
         """Return all messages in the thread containing ``message_id``.
 
-        Uses Mail.app's indexed ``whose subject contains "..."`` filter as a
-        pre-filter, then reconstructs the thread by walking RFC 5322
-        Message-ID / In-Reply-To / References headers across the candidate
-        set. Members whose subject was rewritten mid-thread are not found
-        (documented limitation).
-
         Args:
             message_id: Internal Mail.app id of any message in the thread
                 (the anchor). Typically obtained from search_messages or
@@ -864,16 +858,52 @@ class AppleMailConnector:
 
         Raises:
             MailMessageNotFoundError: If no message with the given id exists.
+
+        Will grow IMAP delegation in a subsequent commit of #66; for now
+        this is a passthrough to the AppleScript implementation so the
+        MCP tool surface keeps working during the refactor.
         """
-        from .utils import (
-            normalize_subject,
-            parse_rfc822_ids,
-            walk_thread_graph,
-        )
+        return self._get_thread_applescript(message_id)
+
+    def _get_thread_applescript(self, message_id: str) -> list[dict[str, Any]]:
+        """AppleScript path for get_thread (the universal baseline).
+
+        Composes _resolve_thread_anchor_applescript (call 1) and
+        _collect_thread_applescript (call 2 + Python graph walk). Called
+        directly when IMAP is not configured for the account, or as a
+        fallback when the IMAP path fails for any reason.
+
+        Uses Mail.app's indexed ``whose subject contains "..."`` filter as
+        a pre-filter, then reconstructs the thread by walking RFC 5322
+        Message-ID / In-Reply-To / References headers across the candidate
+        set. Members whose subject was rewritten mid-thread are not found
+        (documented limitation of this path; fixed by the IMAP path).
+        """
+        anchor = self._resolve_thread_anchor_applescript(message_id)
+        return self._collect_thread_applescript(anchor)
+
+    def _resolve_thread_anchor_applescript(
+        self, message_id: str,
+    ) -> dict[str, Any]:
+        """AppleScript call 1: resolve Mail.app internal ID to thread anchor.
+
+        Returns a dict with keys:
+            internal_id: str — the Mail.app internal id the caller passed in
+                (echoed back so downstream code can use it without threading
+                it separately).
+            account: str — Mail.app account name the message lives in.
+            rfc_message_id: str — RFC 5322 Message-ID (no angle brackets).
+            subject: str — message subject.
+            in_reply_to: str | None — parent's Message-ID if present.
+            references: list[str] — parsed References header (bracketless,
+                order preserved, duplicates removed).
+
+        Raises:
+            MailMessageNotFoundError: If no message with the given id exists.
+        """
+        from .utils import parse_rfc822_ids
 
         message_id_safe = escape_applescript_string(sanitize_input(message_id))
-
-        # ---- Call 1: resolve anchor ----
         anchor_body = f'''
         tell application "Mail"
             set anchorResult to missing value
@@ -906,12 +936,33 @@ class AppleMailConnector:
 
         anchor_script = _wrap_as_json_script(anchor_body)
         anchor_raw = self._run_applescript(anchor_script)
-        anchor = cast(dict[str, Any], parse_applescript_json(anchor_raw))
+        raw = cast(dict[str, Any], parse_applescript_json(anchor_raw))
 
-        # ---- Call 2: collect subject-prefiltered candidates across the
-        # anchor's account (all mailboxes) with their threading headers ----
-        account_name = anchor["account"]
-        base_subject = normalize_subject(anchor["subject"])
+        in_reply_to_raw = raw.get("in_reply_to") or ""
+        references_raw = raw.get("references_raw") or ""
+        return {
+            "internal_id": message_id,
+            "account": cast(str, raw["account"]),
+            "rfc_message_id": cast(str, raw["rfc_message_id"]),
+            "subject": cast(str, raw["subject"]),
+            "in_reply_to": in_reply_to_raw or None,
+            "references": parse_rfc822_ids(references_raw),
+        }
+
+    def _collect_thread_applescript(
+        self, anchor: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """AppleScript call 2 + Python graph walk.
+
+        Takes the anchor dict produced by _resolve_thread_anchor_applescript,
+        fetches subject-prefiltered candidates across all mailboxes of the
+        anchor's account, and walks the reference graph to assemble the
+        thread. Returns the final sorted search-shape list.
+        """
+        from .utils import normalize_subject, parse_rfc822_ids, walk_thread_graph
+
+        account_name = cast(str, anchor["account"])
+        base_subject = normalize_subject(cast(str, anchor["subject"]))
         account_safe = escape_applescript_string(sanitize_input(account_name))
         subject_safe = escape_applescript_string(sanitize_input(base_subject))
 
@@ -956,11 +1007,12 @@ class AppleMailConnector:
             )
 
         # Seed the known-id frontier: anchor + its own references.
-        anchor_rfc = anchor["rfc_message_id"]
+        anchor_rfc = cast(str, anchor["rfc_message_id"])
         known_ids: set[str] = {anchor_rfc}
-        if anchor["in_reply_to"]:
-            known_ids.add(anchor["in_reply_to"])
-        known_ids.update(parse_rfc822_ids(anchor["references_raw"]))
+        in_reply_to = cast("str | None", anchor.get("in_reply_to"))
+        if in_reply_to:
+            known_ids.add(in_reply_to)
+        known_ids.update(cast(list[str], anchor.get("references") or []))
 
         # Separate the anchor's own candidate row (when present) from the
         # rest. The graph walk operates on the non-anchor candidates; the
@@ -990,7 +1042,7 @@ class AppleMailConnector:
                 anchor_rfc,
             )
             thread.append({
-                "id": message_id,
+                "id": cast(str, anchor.get("internal_id") or ""),
                 "subject": anchor["subject"],
                 "sender": "",
                 "date_received": "",
