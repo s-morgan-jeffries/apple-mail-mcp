@@ -17,6 +17,8 @@ from .exceptions import (
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
 )
+from .imap_connector import ImapConnector
+from .keychain import get_imap_password
 from .utils import escape_applescript_string, parse_applescript_json, sanitize_input
 
 logger = logging.getLogger(__name__)
@@ -280,6 +282,49 @@ class AppleMailConnector:
             cast(str, parsed["host"]),
             cast(int, parsed["port"]),
             cast(str, parsed["email"]),
+        )
+
+    def _imap_search(
+        self,
+        account: str,
+        mailbox: str = "INBOX",
+        sender_contains: str | None = None,
+        subject_contains: str | None = None,
+        read_status: bool | None = None,
+        is_flagged: bool | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachment: bool | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run search_messages through the IMAP path.
+
+        Resolves host/port/email via AppleScript, fetches the password from
+        Keychain, and delegates to ImapConnector. Propagates all fallback-
+        triggering exceptions unchanged — the caller (search_messages) is
+        responsible for catching and falling back.
+
+        Raises:
+            MailKeychainEntryNotFoundError: No opt-in (benign).
+            MailKeychainAccessDeniedError: Keychain ACL refused.
+            OSError (incl. socket.timeout): Network / connection failure.
+            imapclient.exceptions.LoginError: Credentials rejected.
+            imapclient.exceptions.IMAPClientError: Protocol or session error.
+            MailAccountNotFoundError: Mail.app doesn't know this account.
+        """
+        host, port, email = self._resolve_imap_config(account)
+        password = get_imap_password(account, email)
+        imap = ImapConnector(host, port, email, password)
+        return imap.search_messages(
+            mailbox=mailbox,
+            sender_contains=sender_contains,
+            subject_contains=subject_contains,
+            read_status=read_status,
+            is_flagged=is_flagged,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachment=has_attachment,
+            limit=limit,
         )
 
     def search_messages(

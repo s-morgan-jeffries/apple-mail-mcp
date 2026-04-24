@@ -401,6 +401,98 @@ class TestAppleMailConnector:
         ]
         assert len(warning_records) == 1
 
+    # --- _imap_search helper ---------------------------------------------
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_happy_path(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "app-password"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search_messages.return_value = [{"id": "1", "subject": "S"}]
+
+        result = connector._imap_search("iCloud", "INBOX", limit=5)
+
+        mock_resolve.assert_called_once_with("iCloud")
+        mock_keychain.assert_called_once_with("iCloud", "user@icloud.com")
+        mock_imap_cls.assert_called_once_with(
+            "imap.mail.me.com", 993, "user@icloud.com", "app-password"
+        )
+        # Parameters forwarded 1:1 to the IMAP connector (minus `account`).
+        mock_imap.search_messages.assert_called_once_with(
+            mailbox="INBOX",
+            sender_contains=None,
+            subject_contains=None,
+            read_status=None,
+            is_flagged=None,
+            date_from=None,
+            date_to=None,
+            has_attachment=None,
+            limit=5,
+        )
+        assert result == [{"id": "1", "subject": "S"}]
+
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_keychain_missing_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.side_effect = MailKeychainEntryNotFoundError("no entry")
+        with pytest.raises(MailKeychainEntryNotFoundError):
+            connector._imap_search("iCloud", "INBOX")
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_login_error_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from imapclient.exceptions import LoginError
+
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "wrong-password"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search_messages.side_effect = LoginError("rejected")
+
+        with pytest.raises(LoginError):
+            connector._imap_search("iCloud", "INBOX")
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_oserror_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "pw"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search_messages.side_effect = OSError("unreachable")
+
+        with pytest.raises(OSError, match="unreachable"):
+            connector._imap_search("iCloud", "INBOX")
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_basic(
         self, mock_run: MagicMock, connector: AppleMailConnector
