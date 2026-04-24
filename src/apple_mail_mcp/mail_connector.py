@@ -231,8 +231,43 @@ class AppleMailConnector:
         has_attachment: bool | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Search messages via AppleScript.
+
+        Will grow IMAP delegation in a subsequent commit of #40; for now this
+        is a passthrough to the AppleScript implementation so the MCP tool
+        surface keeps working during the refactor.
         """
-        Search for messages matching criteria.
+        return self._search_messages_applescript(
+            account,
+            mailbox,
+            sender_contains,
+            subject_contains,
+            read_status,
+            is_flagged,
+            date_from,
+            date_to,
+            has_attachment,
+            limit,
+        )
+
+    def _search_messages_applescript(
+        self,
+        account: str,
+        mailbox: str = "INBOX",
+        sender_contains: str | None = None,
+        subject_contains: str | None = None,
+        read_status: bool | None = None,
+        is_flagged: bool | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachment: bool | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """AppleScript path for search_messages (the universal baseline).
+
+        Called directly when IMAP is not configured for the account, or as a
+        fallback when the IMAP path fails for any reason (see the graceful-
+        degradation invariants in docs/research/imap-auth-options-decision.md).
 
         Args:
             account: Account name.
