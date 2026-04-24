@@ -215,3 +215,80 @@ class TestFlagFilters:
 
         ImapConnector("h", 993, "u@e.com", "pw").search_messages(is_flagged=False)
         mock_client.search.assert_called_once_with(["UNFLAGGED"])
+
+
+class TestDateFilters:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_date_from_iso_converted_to_imap_format(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            date_from="2026-04-22"
+        )
+        mock_client.search.assert_called_once_with(["SINCE", "22-Apr-2026"])
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_date_to_is_inclusive_of_full_day(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            date_to="2026-04-22"
+        )
+        # Inclusive upper bound → BEFORE next day.
+        mock_client.search.assert_called_once_with(["BEFORE", "23-Apr-2026"])
+
+    def test_invalid_date_from_raises_value_error(self):
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        with pytest.raises(ValueError, match="ISO 8601"):
+            conn.search_messages(date_from="04/22/2026")
+
+    def test_invalid_date_to_raises_value_error(self):
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        with pytest.raises(ValueError, match="ISO 8601"):
+            conn.search_messages(date_to="not-a-date")
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_date_range(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            date_from="2026-04-01", date_to="2026-04-22"
+        )
+        mock_client.search.assert_called_once_with(
+            ["SINCE", "01-Apr-2026", "BEFORE", "23-Apr-2026"]
+        )
+
+
+class TestLimit:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_limit_slices_uids_from_end(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = list(range(1, 101))  # 100 UIDs
+        mock_client.fetch.return_value = _fake_fetch_result(list(range(91, 101)))
+
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(limit=10)
+
+        fetch_uids = mock_client.fetch.call_args[0][0]
+        assert fetch_uids == list(range(91, 101))
+        assert len(result) == 10
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_limit_none_fetches_all(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = list(range(1, 11))
+        mock_client.fetch.return_value = _fake_fetch_result(list(range(1, 11)))
+
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        conn.search_messages(limit=None)
+
+        fetch_uids = mock_client.fetch.call_args[0][0]
+        assert fetch_uids == list(range(1, 11))

@@ -12,10 +12,14 @@ See ``docs/plans/2026-04-23-imap-connector-design.md``.
 
 from __future__ import annotations
 
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 from typing import Any
 
 from imapclient import IMAPClient
 from imapclient.response_types import Envelope
+
+from apple_mail_mcp.mail_connector import _ISO_DATE_RE
 
 CONNECT_TIMEOUT_S: float = 3.0
 """Per invariant 4 in imap-auth-options-decision.md: ≤3s so offline
@@ -24,6 +28,40 @@ waiting for TCP's default timeout."""
 
 _FLAG_SEEN = b"\\Seen"
 _FLAG_FLAGGED = b"\\Flagged"
+
+_IMAP_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def _iso_to_imap_date(iso: str, field: str) -> str:
+    if not _ISO_DATE_RE.match(iso):
+        raise ValueError(
+            f"{field} must be ISO 8601 YYYY-MM-DD, got: {iso!r}"
+        )
+    d = _date.fromisoformat(iso)
+    return f"{d.day:02d}-{_IMAP_MONTHS[d.month - 1]}-{d.year}"
+
+
+def _iso_to_imap_before(iso: str, field: str) -> str:
+    """Upper-bound helper: IMAP BEFORE is exclusive; pass date + 1 day."""
+    if not _ISO_DATE_RE.match(iso):
+        raise ValueError(
+            f"{field} must be ISO 8601 YYYY-MM-DD, got: {iso!r}"
+        )
+    d = _date.fromisoformat(iso) + _timedelta(days=1)
+    return f"{d.day:02d}-{_IMAP_MONTHS[d.month - 1]}-{d.year}"
 
 
 def _build_search_criteria(
@@ -52,6 +90,10 @@ def _build_search_criteria(
         criteria.append("FLAGGED")
     elif is_flagged is False:
         criteria.append("UNFLAGGED")
+    if date_from is not None:
+        criteria.extend(["SINCE", _iso_to_imap_date(date_from, "date_from")])
+    if date_to is not None:
+        criteria.extend(["BEFORE", _iso_to_imap_before(date_to, "date_to")])
     return criteria or ["ALL"]
 
 
@@ -126,6 +168,17 @@ class ImapConnector:
         has_attachment: bool | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        # Validate and translate filters before opening a connection so that
+        # invalid input fails fast without the TCP-connect + LOGIN round trip.
+        criteria = _build_search_criteria(
+            sender_contains,
+            subject_contains,
+            read_status,
+            is_flagged,
+            date_from,
+            date_to,
+        )
+
         client = IMAPClient(
             self._host, port=self._port, ssl=True, timeout=self._connect_timeout
         )
@@ -133,14 +186,6 @@ class ImapConnector:
             client.login(self._email, self._password)
             client.select_folder(mailbox, readonly=True)
 
-            criteria = _build_search_criteria(
-                sender_contains,
-                subject_contains,
-                read_status,
-                is_flagged,
-                date_from,
-                date_to,
-            )
             uids = client.search(criteria)
             if limit is not None:
                 uids = uids[-limit:]
