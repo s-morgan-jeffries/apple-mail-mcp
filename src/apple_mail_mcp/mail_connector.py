@@ -218,6 +218,35 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
+    def _resolve_imap_config(self, account: str) -> tuple[str, int, str]:
+        """Query Mail.app for the IMAP connection details of an account.
+
+        Args:
+            account: Mail.app account name (e.g. "iCloud", "Gmail").
+
+        Returns:
+            Tuple of (host, port, email). `email` is Mail.app's `user name`
+            property — the canonical login identifier, not an alias.
+
+        Raises:
+            MailAccountNotFoundError: If the account doesn't exist.
+        """
+        account_safe = escape_applescript_string(sanitize_input(account))
+        tell_body = f'''
+        tell application "Mail"
+            set acctRef to account "{account_safe}"
+            set result to {{|host|:(server name of acctRef), |port|:(port of acctRef), |email|:(user name of acctRef)}}
+        end tell
+        '''
+        script = _wrap_as_json_script(tell_body)
+        raw = self._run_applescript(script)
+        parsed = cast(dict[str, Any], parse_applescript_json(raw))
+        return (
+            cast(str, parsed["host"]),
+            cast(int, parsed["port"]),
+            cast(str, parsed["email"]),
+        )
+
     def search_messages(
         self,
         account: str,

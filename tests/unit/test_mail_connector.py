@@ -257,6 +257,56 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         assert "|name|:(name of mb)" in script
 
+    # --- _resolve_imap_config --------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_returns_tuple(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = (
+            '{"host":"imap.mail.me.com",'
+            '"port":993,'
+            '"email":"s_morgan_jeffries@yahoo.com"}'
+        )
+        result = connector._resolve_imap_config("iCloud")
+        assert result == ("imap.mail.me.com", 993, "s_morgan_jeffries@yahoo.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_propagates_account_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = MailAccountNotFoundError(
+            "Can't get account \"NoSuch\"."
+        )
+        with pytest.raises(MailAccountNotFoundError):
+            connector._resolve_imap_config("NoSuch")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_script_has_quoted_keys(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """NSJSONSerialization requires |key| form for record keys."""
+        mock_run.return_value = (
+            '{"host":"h","port":993,"email":"e@e.com"}'
+        )
+        connector._resolve_imap_config("iCloud")
+        script = mock_run.call_args[0][0]
+        assert "|host|:(server name of acctRef)" in script
+        assert "|port|:(port of acctRef)" in script
+        assert "|email|:(user name of acctRef)" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_escapes_account_name(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = (
+            '{"host":"h","port":993,"email":"e@e.com"}'
+        )
+        connector._resolve_imap_config('Weird "Name" Acct')
+        script = mock_run.call_args[0][0]
+        # The quote must be escaped; raw quotes would break the script.
+        assert 'Weird \\"Name\\" Acct' in script
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_basic(
         self, mock_run: MagicMock, connector: AppleMailConnector
