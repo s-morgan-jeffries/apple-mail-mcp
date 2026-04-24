@@ -263,16 +263,36 @@ class TestAppleMailConnector:
     # --- _resolve_imap_config --------------------------------------------
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_resolve_imap_config_returns_tuple(
+    def test_resolve_imap_config_prefers_first_email_address(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
+        """Primary path: first email_addresses entry wins over user_name.
+
+        iCloud's IMAP server rejects the Apple-ID user_name as LOGIN
+        but accepts the aliases in email_addresses.
+        """
         mock_run.return_value = (
             '{"host":"imap.mail.me.com",'
             '"port":993,'
-            '"email":"s_morgan_jeffries@yahoo.com"}'
+            '"user_name":"apple.id@gmail.com",'
+            '"email_addresses":["user@icloud.com","user@me.com"]}'
         )
         result = connector._resolve_imap_config("iCloud")
-        assert result == ("imap.mail.me.com", 993, "s_morgan_jeffries@yahoo.com")
+        assert result == ("imap.mail.me.com", 993, "user@icloud.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_falls_back_to_user_name_when_emails_empty(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Fallback path: empty email_addresses → use user_name."""
+        mock_run.return_value = (
+            '{"host":"imap.gmail.com",'
+            '"port":993,'
+            '"user_name":"me@gmail.com",'
+            '"email_addresses":[]}'
+        )
+        result = connector._resolve_imap_config("Gmail")
+        assert result == ("imap.gmail.com", 993, "me@gmail.com")
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_resolve_imap_config_propagates_account_not_found(
@@ -290,13 +310,15 @@ class TestAppleMailConnector:
     ) -> None:
         """NSJSONSerialization requires |key| form for record keys."""
         mock_run.return_value = (
-            '{"host":"h","port":993,"email":"e@e.com"}'
+            '{"host":"h","port":993,'
+            '"user_name":"u@e.com","email_addresses":["u@e.com"]}'
         )
         connector._resolve_imap_config("iCloud")
         script = mock_run.call_args[0][0]
         assert "|host|:(server name of acctRef)" in script
         assert "|port|:(port of acctRef)" in script
-        assert "|email|:(user name of acctRef)" in script
+        assert "|user_name|:(user name of acctRef)" in script
+        assert "|email_addresses|:acctEmails" in script
         # Must assign to resultData for _wrap_as_json_script to serialize.
         assert "set resultData to" in script
 
@@ -305,7 +327,8 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         mock_run.return_value = (
-            '{"host":"h","port":993,"email":"e@e.com"}'
+            '{"host":"h","port":993,'
+            '"user_name":"u@e.com","email_addresses":["u@e.com"]}'
         )
         connector._resolve_imap_config('Weird "Name" Acct')
         script = mock_run.call_args[0][0]

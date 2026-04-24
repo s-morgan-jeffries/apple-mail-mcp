@@ -278,8 +278,17 @@ class AppleMailConnector:
             account: Mail.app account name (e.g. "iCloud", "Gmail").
 
         Returns:
-            Tuple of (host, port, email). `email` is Mail.app's `user name`
-            property — the canonical login identifier, not an alias.
+            Tuple of (host, port, email). `email` is the first entry of
+            Mail.app's `email addresses` list if non-empty, else falls back
+            to the `user name` property.
+
+            For iCloud specifically, `user name` is the Apple ID login
+            identifier — which may be any email (e.g. a Gmail address) —
+            while the IMAP server only accepts @icloud.com / @me.com aliases
+            as LOGIN username. `email addresses` reliably contains the
+            alias iCloud's IMAP server expects. For Gmail / Yahoo / generic
+            IMAP accounts, the first email address typically equals
+            `user name`, so the behavior is equivalent there.
 
         Raises:
             MailAccountNotFoundError: If the account doesn't exist.
@@ -288,16 +297,20 @@ class AppleMailConnector:
         tell_body = f'''
         tell application "Mail"
             set acctRef to account "{account_safe}"
-            set resultData to {{|host|:(server name of acctRef), |port|:(port of acctRef), |email|:(user name of acctRef)}}
+            set acctEmails to email addresses of acctRef
+            if acctEmails is missing value then set acctEmails to {{}}
+            set resultData to {{|host|:(server name of acctRef), |port|:(port of acctRef), |user_name|:(user name of acctRef), |email_addresses|:acctEmails}}
         end tell
         '''
         script = _wrap_as_json_script(tell_body)
         raw = self._run_applescript(script)
         parsed = cast(dict[str, Any], parse_applescript_json(raw))
+        email_addresses = cast(list[str], parsed.get("email_addresses") or [])
+        email = email_addresses[0] if email_addresses else cast(str, parsed["user_name"])
         return (
             cast(str, parsed["host"]),
             cast(int, parsed["port"]),
-            cast(str, parsed["email"]),
+            email,
         )
 
     def _imap_search(
