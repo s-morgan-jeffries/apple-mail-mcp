@@ -294,6 +294,8 @@ class TestAppleMailConnector:
         assert "|host|:(server name of acctRef)" in script
         assert "|port|:(port of acctRef)" in script
         assert "|email|:(user name of acctRef)" in script
+        # Must assign to resultData for _wrap_as_json_script to serialize.
+        assert "set resultData to" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_resolve_imap_config_escapes_account_name(

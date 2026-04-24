@@ -235,7 +235,7 @@ class AppleMailConnector:
         tell_body = f'''
         tell application "Mail"
             set acctRef to account "{account_safe}"
-            set result to {{|host|:(server name of acctRef), |port|:(port of acctRef), |email|:(user name of acctRef)}}
+            set resultData to {{|host|:(server name of acctRef), |port|:(port of acctRef), |email|:(user name of acctRef)}}
         end tell
         '''
         script = _wrap_as_json_script(tell_body)
