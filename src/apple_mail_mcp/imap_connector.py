@@ -123,6 +123,48 @@ def _format_sender(envelope: Envelope) -> str:
     return f"{name} <{email}>" if name else email
 
 
+def _bodystructure_has_attachment(structure: Any) -> bool:
+    """Walk an IMAPClient-parsed BODYSTRUCTURE tree and detect attachments.
+
+    IMAPClient represents multipart as a tuple ``(part_tuple, ..., subtype)``
+    where each ``part_tuple`` is either another multipart (starts with a
+    tuple) or a leaf (starts with bytes like ``b"text"``, ``b"application"``).
+
+    A message "has an attachment" if any leaf carries a disposition of
+    ``attachment`` or ``inline`` with a ``filename`` parameter.
+    """
+    if not isinstance(structure, tuple) or not structure:
+        return False
+
+    # Multipart — first element is a nested tuple (sub-part).
+    if isinstance(structure[0], tuple):
+        for child in structure:
+            if isinstance(child, tuple) and _bodystructure_has_attachment(child):
+                return True
+        return False
+
+    # Leaf — scan for a disposition tuple whose first element is
+    # b"attachment" or b"inline".
+    for elem in structure:
+        if (
+            isinstance(elem, tuple)
+            and elem
+            and isinstance(elem[0], bytes)
+        ):
+            disp = elem[0].lower()
+            if disp == b"attachment":
+                return True
+            if disp == b"inline":
+                params = elem[1] if len(elem) > 1 else ()
+                if isinstance(params, tuple):
+                    # Params are a flat tuple (key, value, key, value, ...).
+                    for i in range(0, len(params) - 1, 2):
+                        key = params[i]
+                        if isinstance(key, bytes) and key.lower() == b"filename":
+                            return True
+    return False
+
+
 def _envelope_to_dict(
     envelope: Envelope, flags: tuple[bytes, ...]
 ) -> dict[str, Any]:
@@ -193,13 +235,25 @@ class ImapConnector:
             if not uids:
                 return []
 
-            fetch_keys = [b"ENVELOPE", b"FLAGS"]
+            fetch_keys: list[bytes] = [b"ENVELOPE", b"FLAGS"]
+            if has_attachment is not None:
+                fetch_keys.append(b"BODYSTRUCTURE")
             fetched = client.fetch(uids, fetch_keys)
-            return [
-                _envelope_to_dict(
-                    fetched[uid][b"ENVELOPE"], tuple(fetched[uid][b"FLAGS"])
+
+            results: list[dict[str, Any]] = []
+            for uid in uids:
+                entry = fetched[uid]
+                if has_attachment is not None:
+                    has = _bodystructure_has_attachment(
+                        entry.get(b"BODYSTRUCTURE")
+                    )
+                    if has_attachment is True and not has:
+                        continue
+                    if has_attachment is False and has:
+                        continue
+                results.append(
+                    _envelope_to_dict(entry[b"ENVELOPE"], tuple(entry[b"FLAGS"]))
                 )
-                for uid in uids
-            ]
+            return results
         finally:
             client.logout()

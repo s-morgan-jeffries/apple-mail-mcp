@@ -292,3 +292,107 @@ class TestLimit:
 
         fetch_uids = mock_client.fetch.call_args[0][0]
         assert fetch_uids == list(range(1, 11))
+
+
+# BODYSTRUCTURE shapes below match what IMAPClient returns: either a flat
+# leaf tuple (type, subtype, params, id, desc, encoding, size, [type-specific], [disposition])
+# or a multipart tuple ((child1,), (child2,), ..., subtype).
+_LEAF_TEXT = (b"text", b"plain", (), None, None, b"7bit", 100, 5)
+_LEAF_PDF_ATTACHMENT = (
+    b"application",
+    b"pdf",
+    (b"name", b"x.pdf"),
+    None,
+    None,
+    b"base64",
+    2048,
+    (b"attachment", (b"filename", b"x.pdf")),
+)
+_MULTIPART_WITH_ATTACHMENT = (_LEAF_TEXT, _LEAF_PDF_ATTACHMENT, b"mixed")
+
+
+class TestHasAttachment:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_has_attachment_true_filters_to_messages_with_attachments(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1, 2, 3]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<1@e.com>"),
+                b"FLAGS": (),
+                b"BODYSTRUCTURE": _LEAF_TEXT,
+            },
+            2: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<2@e.com>"),
+                b"FLAGS": (),
+                b"BODYSTRUCTURE": _MULTIPART_WITH_ATTACHMENT,
+            },
+            3: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<3@e.com>"),
+                b"FLAGS": (),
+                b"BODYSTRUCTURE": (b"text", b"html", (), None, None, b"7bit", 456, 10),
+            },
+        }
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            has_attachment=True
+        )
+
+        ids = [m["id"] for m in result]
+        assert ids == ["2@e.com"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_has_attachment_false_filters_to_messages_without(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1, 2]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<1@e.com>"),
+                b"FLAGS": (),
+                b"BODYSTRUCTURE": _LEAF_TEXT,
+            },
+            2: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<2@e.com>"),
+                b"FLAGS": (),
+                b"BODYSTRUCTURE": _MULTIPART_WITH_ATTACHMENT,
+            },
+        }
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            has_attachment=False
+        )
+
+        ids = [m["id"] for m in result]
+        assert ids == ["1@e.com"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_has_attachment_none_does_not_fetch_bodystructure(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = _fake_fetch_result([1])
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(has_attachment=None)
+
+        fetch_keys = mock_client.fetch.call_args[0][1]
+        assert b"BODYSTRUCTURE" not in fetch_keys
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_has_attachment_set_includes_bodystructure_in_fetch(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<1@e.com>"),
+                b"FLAGS": (),
+                b"BODYSTRUCTURE": _LEAF_TEXT,
+            }
+        }
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(has_attachment=True)
+
+        fetch_keys = mock_client.fetch.call_args[0][1]
+        assert b"BODYSTRUCTURE" in fetch_keys
