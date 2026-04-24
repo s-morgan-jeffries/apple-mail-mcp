@@ -1,5 +1,6 @@
 """Unit tests for mail connector."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,8 @@ import pytest
 from apple_mail_mcp.exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailKeychainAccessDeniedError,
+    MailKeychainEntryNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
 )
@@ -257,6 +260,415 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         assert "|name|:(name of mb)" in script
 
+    # --- _resolve_imap_config --------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_prefers_first_email_address(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Primary path: first email_addresses entry wins over user_name.
+
+        iCloud's IMAP server rejects the Apple-ID user_name as LOGIN
+        but accepts the aliases in email_addresses.
+        """
+        mock_run.return_value = (
+            '{"host":"imap.mail.me.com",'
+            '"port":993,'
+            '"user_name":"apple.id@gmail.com",'
+            '"email_addresses":["user@icloud.com","user@me.com"]}'
+        )
+        result = connector._resolve_imap_config("iCloud")
+        assert result == ("imap.mail.me.com", 993, "user@icloud.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_falls_back_to_user_name_when_emails_empty(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Fallback path: empty email_addresses → use user_name."""
+        mock_run.return_value = (
+            '{"host":"imap.gmail.com",'
+            '"port":993,'
+            '"user_name":"me@gmail.com",'
+            '"email_addresses":[]}'
+        )
+        result = connector._resolve_imap_config("Gmail")
+        assert result == ("imap.gmail.com", 993, "me@gmail.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_propagates_account_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = MailAccountNotFoundError(
+            "Can't get account \"NoSuch\"."
+        )
+        with pytest.raises(MailAccountNotFoundError):
+            connector._resolve_imap_config("NoSuch")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_script_has_quoted_keys(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """NSJSONSerialization requires |key| form for record keys."""
+        mock_run.return_value = (
+            '{"host":"h","port":993,'
+            '"user_name":"u@e.com","email_addresses":["u@e.com"]}'
+        )
+        connector._resolve_imap_config("iCloud")
+        script = mock_run.call_args[0][0]
+        assert "|host|:(server name of acctRef)" in script
+        assert "|port|:(port of acctRef)" in script
+        assert "|user_name|:(user name of acctRef)" in script
+        assert "|email_addresses|:acctEmails" in script
+        # Must assign to resultData for _wrap_as_json_script to serialize.
+        assert "set resultData to" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_escapes_account_name(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = (
+            '{"host":"h","port":993,'
+            '"user_name":"u@e.com","email_addresses":["u@e.com"]}'
+        )
+        connector._resolve_imap_config('Weird "Name" Acct')
+        script = mock_run.call_args[0][0]
+        # The quote must be escaped; raw quotes would break the script.
+        assert 'Weird \\"Name\\" Acct' in script
+
+    # --- _imap_failures state + _log_imap_fallback -----------------------
+
+    def test_imap_failures_starts_empty(
+        self, connector: AppleMailConnector
+    ) -> None:
+        assert connector._imap_failures == set()
+
+    def test_log_imap_fallback_keychain_entry_not_found_is_silent(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Missing Keychain entry is a benign opt-out signal — DEBUG only."""
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback(
+                "iCloud", MailKeychainEntryNotFoundError("missing")
+            )
+        # Not in the failures set — benign signals don't count as failures.
+        assert "iCloud" not in connector._imap_failures
+        # Should log at DEBUG, never WARNING.
+        warning_records = [
+            r for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert warning_records == []
+        debug_records = [
+            r for r in caplog.records if r.levelno == logging.DEBUG
+        ]
+        assert len(debug_records) == 1
+        assert "iCloud" in debug_records[0].getMessage()
+
+    def test_log_imap_fallback_first_failure_logs_warning(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback("iCloud", OSError("network down"))
+        assert "iCloud" in connector._imap_failures
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
+        msg = warning_records[0].getMessage()
+        assert "iCloud" in msg
+        assert "OSError" in msg
+
+    def test_log_imap_fallback_subsequent_failure_same_account_is_debug(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Seed: first failure.
+        connector._log_imap_fallback("iCloud", OSError("first"))
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback("iCloud", OSError("second"))
+        # Set unchanged (already contains iCloud).
+        assert connector._imap_failures == {"iCloud"}
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert warning_records == []
+        debug_records = [
+            r for r in caplog.records if r.levelno == logging.DEBUG
+        ]
+        assert len(debug_records) == 1
+
+    def test_log_imap_fallback_failure_new_account_logs_warning(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        connector._log_imap_fallback("iCloud", OSError("iCloud first"))
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback("Gmail", OSError("Gmail first"))
+        assert connector._imap_failures == {"iCloud", "Gmail"}
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
+        assert "Gmail" in warning_records[0].getMessage()
+
+    def test_log_imap_fallback_access_denied_counts_as_failure(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Access denied is a misconfiguration worth surfacing, unlike missing entry."""
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            connector._log_imap_fallback(
+                "iCloud", MailKeychainAccessDeniedError("ACL refused")
+            )
+        assert "iCloud" in connector._imap_failures
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
+
+    # --- _imap_search helper ---------------------------------------------
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_happy_path(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "app-password"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search_messages.return_value = [{"id": "1", "subject": "S"}]
+
+        result = connector._imap_search("iCloud", "INBOX", limit=5)
+
+        mock_resolve.assert_called_once_with("iCloud")
+        mock_keychain.assert_called_once_with("iCloud", "user@icloud.com")
+        mock_imap_cls.assert_called_once_with(
+            "imap.mail.me.com", 993, "user@icloud.com", "app-password"
+        )
+        # Parameters forwarded 1:1 to the IMAP connector (minus `account`).
+        mock_imap.search_messages.assert_called_once_with(
+            mailbox="INBOX",
+            sender_contains=None,
+            subject_contains=None,
+            read_status=None,
+            is_flagged=None,
+            date_from=None,
+            date_to=None,
+            has_attachment=None,
+            limit=5,
+        )
+        assert result == [{"id": "1", "subject": "S"}]
+
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_keychain_missing_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.side_effect = MailKeychainEntryNotFoundError("no entry")
+        with pytest.raises(MailKeychainEntryNotFoundError):
+            connector._imap_search("iCloud", "INBOX")
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_login_error_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from imapclient.exceptions import LoginError
+
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "wrong-password"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search_messages.side_effect = LoginError("rejected")
+
+        with pytest.raises(LoginError):
+            connector._imap_search("iCloud", "INBOX")
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_search_oserror_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "pw"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.search_messages.side_effect = OSError("unreachable")
+
+        with pytest.raises(OSError, match="unreachable"):
+            connector._imap_search("iCloud", "INBOX")
+
+    # --- search_messages delegation --------------------------------------
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_uses_imap_on_success(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_imap_search.return_value = [{"id": "1", "subject": "from imap"}]
+        result = connector.search_messages(account="iCloud", mailbox="INBOX")
+        assert result == [{"id": "1", "subject": "from imap"}]
+        mock_as_search.assert_not_called()
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_falls_back_on_keychain_missing(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_imap_search.side_effect = MailKeychainEntryNotFoundError("no entry")
+        mock_as_search.return_value = [{"id": "1", "subject": "from applescript"}]
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            result = connector.search_messages(account="iCloud")
+        assert result == [{"id": "1", "subject": "from applescript"}]
+        mock_as_search.assert_called_once()
+        # Missing-entry = silent (no WARNING).
+        warning_records = [
+            r for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert warning_records == []
+        # Account not tracked as a failure.
+        assert "iCloud" not in connector._imap_failures
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_falls_back_on_oserror_with_warning(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_imap_search.side_effect = OSError("unreachable")
+        mock_as_search.return_value = [{"id": "1"}]
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            result = connector.search_messages(account="iCloud")
+        assert result == [{"id": "1"}]
+        mock_as_search.assert_called_once()
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
+        assert "iCloud" in connector._imap_failures
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_falls_back_on_login_error(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from imapclient.exceptions import LoginError
+
+        mock_imap_search.side_effect = LoginError("rejected")
+        mock_as_search.return_value = [{"id": "1"}]
+        result = connector.search_messages(account="iCloud")
+        assert result == [{"id": "1"}]
+        mock_as_search.assert_called_once()
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_falls_back_on_imap_protocol_error(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from imapclient.exceptions import IMAPClientError
+
+        mock_imap_search.side_effect = IMAPClientError("bad thing")
+        mock_as_search.return_value = [{"id": "1"}]
+        result = connector.search_messages(account="iCloud")
+        assert result == [{"id": "1"}]
+        mock_as_search.assert_called_once()
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_forwards_all_parameters(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_imap_search.return_value = []
+        connector.search_messages(
+            account="iCloud",
+            mailbox="Sent",
+            sender_contains="alice",
+            subject_contains="invoice",
+            read_status=True,
+            is_flagged=False,
+            date_from="2026-04-01",
+            date_to="2026-04-22",
+            has_attachment=True,
+            limit=10,
+        )
+        mock_imap_search.assert_called_once_with(
+            "iCloud",
+            "Sent",
+            "alice",
+            "invoice",
+            True,
+            False,
+            "2026-04-01",
+            "2026-04-22",
+            True,
+            10,
+        )
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_does_not_catch_value_error(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """Invalid-input errors must propagate to the caller, not silently fall back."""
+        mock_imap_search.side_effect = ValueError("bad date")
+        with pytest.raises(ValueError, match="bad date"):
+            connector.search_messages(account="iCloud", date_from="not-a-date")
+        mock_as_search.assert_not_called()
+
+    @patch.object(AppleMailConnector, "_search_messages_applescript")
+    @patch.object(AppleMailConnector, "_imap_search")
+    def test_search_messages_does_not_catch_mailaccountnotfound(
+        self,
+        mock_imap_search: MagicMock,
+        mock_as_search: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """A truly-missing account must surface, not be papered over by fallback."""
+        mock_imap_search.side_effect = MailAccountNotFoundError("No such account")
+        with pytest.raises(MailAccountNotFoundError):
+            connector.search_messages(account="Ghost")
+        mock_as_search.assert_not_called()
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_basic(
         self, mock_run: MagicMock, connector: AppleMailConnector
@@ -268,7 +680,7 @@ class TestAppleMailConnector:
             '"read_status":false}]'
         )
 
-        result = connector.search_messages("Gmail", "INBOX")
+        result = connector._search_messages_applescript("Gmail", "INBOX")
 
         assert len(result) == 1
         assert result[0]["id"] == "12345"
@@ -289,7 +701,7 @@ class TestAppleMailConnector:
             '"sender":"boss@example.com","date_received":"Wed Feb 5 2025",'
             '"read_status":true}]'
         )
-        result = connector.search_messages("Gmail", "INBOX")
+        result = connector._search_messages_applescript("Gmail", "INBOX")
         assert len(result) == 1
         assert result[0]["subject"] == "Q3 Report | Draft"
 
@@ -304,7 +716,7 @@ class TestAppleMailConnector:
         """
         mock_run.side_effect = MailAccountNotFoundError("Can't get account \"NoSuch\".")
         with pytest.raises(MailAccountNotFoundError):
-            connector.search_messages("NoSuch", "INBOX")
+            connector._search_messages_applescript("NoSuch", "INBOX")
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_propagates_mailbox_not_found(
@@ -313,7 +725,7 @@ class TestAppleMailConnector:
         """Similar regression guard for MailMailboxNotFoundError."""
         mock_run.side_effect = MailMailboxNotFoundError("Can't get mailbox \"NoSuch\".")
         with pytest.raises(MailMailboxNotFoundError):
-            connector.search_messages("Gmail", "NoSuch")
+            connector._search_messages_applescript("Gmail", "NoSuch")
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_with_filters(
@@ -322,7 +734,7 @@ class TestAppleMailConnector:
         """Test message search with filters."""
         mock_run.return_value = "[]"
 
-        connector.search_messages(
+        connector._search_messages_applescript(
             "Gmail",
             "INBOX",
             sender_contains="john@example.com",
@@ -352,7 +764,7 @@ class TestAppleMailConnector:
         rejects with `Illegal comparison or logical (-1726)`.
         """
         mock_run.return_value = "[]"
-        connector.search_messages("Gmail", "INBOX")
+        connector._search_messages_applescript("Gmail", "INBOX")
         script = mock_run.call_args[0][0]
         assert "whose true" not in script
         # With NO filters, the generated source must reference `mailboxRef`
@@ -369,7 +781,7 @@ class TestAppleMailConnector:
         by slicing the live message collection reference.
         """
         mock_run.return_value = "[]"
-        connector.search_messages("Gmail", "INBOX", limit=5)
+        connector._search_messages_applescript("Gmail", "INBOX", limit=5)
         script = mock_run.call_args[0][0]
         assert "items 1 thru" not in script
         assert "if (count of resultData) >= 5 then exit repeat" in script
@@ -379,11 +791,11 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         mock_run.return_value = "[]"
-        connector.search_messages("Gmail", "INBOX", is_flagged=True)
+        connector._search_messages_applescript("Gmail", "INBOX", is_flagged=True)
         script = mock_run.call_args[0][0]
         assert "flagged status is true" in script
 
-        connector.search_messages("Gmail", "INBOX", is_flagged=False)
+        connector._search_messages_applescript("Gmail", "INBOX", is_flagged=False)
         script = mock_run.call_args[0][0]
         assert "flagged status is false" in script
 
@@ -392,7 +804,7 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         mock_run.return_value = "[]"
-        connector.search_messages(
+        connector._search_messages_applescript(
             "Gmail", "INBOX", date_from="2026-04-01", date_to="2026-04-15"
         )
         script = mock_run.call_args[0][0]
@@ -409,7 +821,7 @@ class TestAppleMailConnector:
         Prevents AppleScript injection via unescaped date strings.
         """
         with pytest.raises(ValueError, match="date_from"):
-            connector.search_messages(
+            connector._search_messages_applescript(
                 "Gmail", "INBOX",
                 date_from='2024-01-01", delete mailbox',
             )
@@ -420,7 +832,7 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         with pytest.raises(ValueError, match="date_to"):
-            connector.search_messages("Gmail", "INBOX", date_to="not-a-date")
+            connector._search_messages_applescript("Gmail", "INBOX", date_to="not-a-date")
         mock_run.assert_not_called()
 
     @patch.object(AppleMailConnector, "_run_applescript")
@@ -431,7 +843,7 @@ class TestAppleMailConnector:
         mock_run.return_value = "[]"
         # Combine with a read_status filter so the whose clause exists and the
         # "count attachments not in whose" assertion is meaningful.
-        connector.search_messages(
+        connector._search_messages_applescript(
             "Gmail", "INBOX", read_status=True, has_attachment=True
         )
         script = mock_run.call_args[0][0]
@@ -451,7 +863,7 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         mock_run.return_value = "[]"
-        connector.search_messages("Gmail", "INBOX", has_attachment=False)
+        connector._search_messages_applescript("Gmail", "INBOX", has_attachment=False)
         script = mock_run.call_args[0][0]
         assert (
             "if (count of mail attachments of msg) > 0 then set includeThis to false"
@@ -464,7 +876,7 @@ class TestAppleMailConnector:
     ) -> None:
         """When has_attachment is None, no attachment post-filter code appears."""
         mock_run.return_value = "[]"
-        connector.search_messages("Gmail", "INBOX")
+        connector._search_messages_applescript("Gmail", "INBOX")
         script = mock_run.call_args[0][0]
         assert "mail attachments of msg" not in script
 
@@ -477,7 +889,7 @@ class TestAppleMailConnector:
             '[{"id":"1","subject":"s","sender":"a@b.c",'
             '"date_received":"Mon","read_status":false,"flagged":true}]'
         )
-        result = connector.search_messages("Gmail", "INBOX")
+        result = connector._search_messages_applescript("Gmail", "INBOX")
         assert result[0]["flagged"] is True
 
     @patch.object(AppleMailConnector, "_run_applescript")
@@ -490,7 +902,7 @@ class TestAppleMailConnector:
         gets stripped during NSDictionary conversion. Must be quoted as `|id|:`.
         """
         mock_run.return_value = "[]"
-        connector.search_messages("Gmail", "INBOX")
+        connector._search_messages_applescript("Gmail", "INBOX")
         script = mock_run.call_args[0][0]
         assert "|id|:(id of msg as text)" in script
         # The bare form must not appear in the msgRecord literal — it would collide.

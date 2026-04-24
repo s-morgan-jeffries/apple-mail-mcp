@@ -12,6 +12,7 @@ See ``docs/plans/2026-04-23-imap-connector-design.md``.
 
 from __future__ import annotations
 
+import re
 from datetime import date as _date
 from datetime import timedelta as _timedelta
 from typing import Any
@@ -19,7 +20,12 @@ from typing import Any
 from imapclient import IMAPClient
 from imapclient.response_types import Envelope
 
-from apple_mail_mcp.mail_connector import _ISO_DATE_RE
+# Strict ISO 8601 YYYY-MM-DD. Duplicated from mail_connector to break an
+# otherwise-circular import: mail_connector.search_messages delegates to
+# this module, so mail_connector has to import from imap_connector, and a
+# reverse dependency would deadlock. The regex is trivial; duplication is
+# preferable to reshuffling the module layout.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 CONNECT_TIMEOUT_S: float = 3.0
 """Per invariant 4 in imap-auth-options-decision.md: ≤3s so offline

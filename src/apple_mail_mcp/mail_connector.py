@@ -10,13 +10,32 @@ from datetime import timedelta as _timedelta
 from pathlib import Path
 from typing import Any, cast
 
+from imapclient.exceptions import IMAPClientError, LoginError
+
 from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailKeychainAccessDeniedError,
+    MailKeychainEntryNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
 )
+from .imap_connector import ImapConnector
+from .keychain import get_imap_password
 from .utils import escape_applescript_string, parse_applescript_json, sanitize_input
+
+# Exception classes that trigger AppleScript fallback per the graceful-
+# degradation invariants (docs/research/imap-auth-options-decision.md).
+# OSError covers socket.timeout too. ValueError and MailAccountNotFoundError
+# are deliberately NOT in this tuple — they indicate caller/config errors
+# and must surface, not be papered over by fallback.
+_IMAP_FALLBACK_EXCS: tuple[type[Exception], ...] = (
+    MailKeychainEntryNotFoundError,
+    MailKeychainAccessDeniedError,
+    OSError,
+    LoginError,
+    IMAPClientError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +93,40 @@ class AppleMailConnector:
             timeout: Timeout in seconds for AppleScript operations
         """
         self.timeout = timeout
+        # Accounts for which we've already logged a WARNING about IMAP failure.
+        # Subsequent failures for the same account are demoted to DEBUG per
+        # invariant 5 in docs/research/imap-auth-options-decision.md.
+        self._imap_failures: set[str] = set()
+
+    def _log_imap_fallback(self, account: str, exc: Exception) -> None:
+        """Log an IMAP fallback event at the level specified by the invariants.
+
+        MailKeychainEntryNotFoundError is a benign opt-out signal — always DEBUG,
+        never tracked. For any other failure, the first per-account occurrence
+        logs WARNING; subsequent occurrences for the same account log DEBUG.
+        """
+        if isinstance(exc, MailKeychainEntryNotFoundError):
+            logger.debug(
+                "IMAP not configured for %s (no Keychain entry); using AppleScript",
+                account,
+            )
+            return
+        if account not in self._imap_failures:
+            self._imap_failures.add(account)
+            logger.warning(
+                "IMAP failed for %s (%s: %s), falling back to AppleScript; "
+                "subsequent failures for this account will log at DEBUG",
+                account,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            logger.debug(
+                "IMAP retry failed for %s: %s: %s",
+                account,
+                type(exc).__name__,
+                exc,
+            )
 
     def _run_applescript(self, script: str) -> str:
         """
@@ -218,6 +271,91 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
+    def _resolve_imap_config(self, account: str) -> tuple[str, int, str]:
+        """Query Mail.app for the IMAP connection details of an account.
+
+        Args:
+            account: Mail.app account name (e.g. "iCloud", "Gmail").
+
+        Returns:
+            Tuple of (host, port, email). `email` is the first entry of
+            Mail.app's `email addresses` list if non-empty, else falls back
+            to the `user name` property.
+
+            For iCloud specifically, `user name` is the Apple ID login
+            identifier — which may be any email (e.g. a Gmail address) —
+            while the IMAP server only accepts @icloud.com / @me.com aliases
+            as LOGIN username. `email addresses` reliably contains the
+            alias iCloud's IMAP server expects. For Gmail / Yahoo / generic
+            IMAP accounts, the first email address typically equals
+            `user name`, so the behavior is equivalent there.
+
+        Raises:
+            MailAccountNotFoundError: If the account doesn't exist.
+        """
+        account_safe = escape_applescript_string(sanitize_input(account))
+        tell_body = f'''
+        tell application "Mail"
+            set acctRef to account "{account_safe}"
+            set acctEmails to email addresses of acctRef
+            if acctEmails is missing value then set acctEmails to {{}}
+            set resultData to {{|host|:(server name of acctRef), |port|:(port of acctRef), |user_name|:(user name of acctRef), |email_addresses|:acctEmails}}
+        end tell
+        '''
+        script = _wrap_as_json_script(tell_body)
+        raw = self._run_applescript(script)
+        parsed = cast(dict[str, Any], parse_applescript_json(raw))
+        email_addresses = cast(list[str], parsed.get("email_addresses") or [])
+        email = email_addresses[0] if email_addresses else cast(str, parsed["user_name"])
+        return (
+            cast(str, parsed["host"]),
+            cast(int, parsed["port"]),
+            email,
+        )
+
+    def _imap_search(
+        self,
+        account: str,
+        mailbox: str = "INBOX",
+        sender_contains: str | None = None,
+        subject_contains: str | None = None,
+        read_status: bool | None = None,
+        is_flagged: bool | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachment: bool | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run search_messages through the IMAP path.
+
+        Resolves host/port/email via AppleScript, fetches the password from
+        Keychain, and delegates to ImapConnector. Propagates all fallback-
+        triggering exceptions unchanged — the caller (search_messages) is
+        responsible for catching and falling back.
+
+        Raises:
+            MailKeychainEntryNotFoundError: No opt-in (benign).
+            MailKeychainAccessDeniedError: Keychain ACL refused.
+            OSError (incl. socket.timeout): Network / connection failure.
+            imapclient.exceptions.LoginError: Credentials rejected.
+            imapclient.exceptions.IMAPClientError: Protocol or session error.
+            MailAccountNotFoundError: Mail.app doesn't know this account.
+        """
+        host, port, email = self._resolve_imap_config(account)
+        password = get_imap_password(account, email)
+        imap = ImapConnector(host, port, email, password)
+        return imap.search_messages(
+            mailbox=mailbox,
+            sender_contains=sender_contains,
+            subject_contains=subject_contains,
+            read_status=read_status,
+            is_flagged=is_flagged,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachment=has_attachment,
+            limit=limit,
+        )
+
     def search_messages(
         self,
         account: str,
@@ -231,8 +369,61 @@ class AppleMailConnector:
         has_attachment: bool | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Search for messages matching criteria.
+
+        Tries the IMAP path first (fast, server-side SEARCH). Falls back to
+        AppleScript on any IMAP failure per the graceful-degradation invariants
+        in docs/research/imap-auth-options-decision.md — so a user with no
+        Keychain entry, a revoked password, or a dropped network still gets
+        working search via AppleScript.
         """
-        Search for messages matching criteria.
+        try:
+            return self._imap_search(
+                account,
+                mailbox,
+                sender_contains,
+                subject_contains,
+                read_status,
+                is_flagged,
+                date_from,
+                date_to,
+                has_attachment,
+                limit,
+            )
+        except _IMAP_FALLBACK_EXCS as exc:
+            self._log_imap_fallback(account, exc)
+            # fall through to AppleScript
+        return self._search_messages_applescript(
+            account,
+            mailbox,
+            sender_contains,
+            subject_contains,
+            read_status,
+            is_flagged,
+            date_from,
+            date_to,
+            has_attachment,
+            limit,
+        )
+
+    def _search_messages_applescript(
+        self,
+        account: str,
+        mailbox: str = "INBOX",
+        sender_contains: str | None = None,
+        subject_contains: str | None = None,
+        read_status: bool | None = None,
+        is_flagged: bool | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachment: bool | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """AppleScript path for search_messages (the universal baseline).
+
+        Called directly when IMAP is not configured for the account, or as a
+        fallback when the IMAP path fails for any reason (see the graceful-
+        degradation invariants in docs/research/imap-auth-options-decision.md).
 
         Args:
             account: Account name.
