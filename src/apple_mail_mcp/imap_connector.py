@@ -26,6 +26,35 @@ _FLAG_SEEN = b"\\Seen"
 _FLAG_FLAGGED = b"\\Flagged"
 
 
+def _build_search_criteria(
+    sender_contains: str | None,
+    subject_contains: str | None,
+    read_status: bool | None,
+    is_flagged: bool | None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[Any]:
+    """Translate ImapConnector.search_messages parameters to IMAP SEARCH criteria.
+
+    Returns ``["ALL"]`` if no filters are supplied — IMAP SEARCH requires at
+    least one criterion.
+    """
+    criteria: list[Any] = []
+    if sender_contains:
+        criteria.extend(["FROM", sender_contains])
+    if subject_contains:
+        criteria.extend(["SUBJECT", subject_contains])
+    if read_status is True:
+        criteria.append("SEEN")
+    elif read_status is False:
+        criteria.append("UNSEEN")
+    if is_flagged is True:
+        criteria.append("FLAGGED")
+    elif is_flagged is False:
+        criteria.append("UNFLAGGED")
+    return criteria or ["ALL"]
+
+
 def _decode(b: bytes | str | None) -> str:
     if b is None:
         return ""
@@ -104,7 +133,14 @@ class ImapConnector:
             client.login(self._email, self._password)
             client.select_folder(mailbox, readonly=True)
 
-            criteria: list[Any] = ["ALL"]  # Filter building in later tasks.
+            criteria = _build_search_criteria(
+                sender_contains,
+                subject_contains,
+                read_status,
+                is_flagged,
+                date_from,
+                date_to,
+            )
             uids = client.search(criteria)
             if limit is not None:
                 uids = uids[-limit:]

@@ -137,3 +137,81 @@ class TestSearchHappyPath:
             conn.search_messages()
 
         mock_client.logout.assert_called_once()
+
+
+class TestTextFilters:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_sender_contains_maps_to_from(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            sender_contains="alice"
+        )
+
+        mock_client.search.assert_called_once_with(["FROM", "alice"])
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_subject_contains_maps_to_subject(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            subject_contains="invoice"
+        )
+
+        mock_client.search.assert_called_once_with(["SUBJECT", "invoice"])
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_sender_and_subject_combined(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(
+            sender_contains="bob", subject_contains="report"
+        )
+
+        mock_client.search.assert_called_once_with(
+            ["FROM", "bob", "SUBJECT", "report"]
+        )
+
+
+class TestFlagFilters:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_read_status_true_maps_to_seen(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(read_status=True)
+        mock_client.search.assert_called_once_with(["SEEN"])
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_read_status_false_maps_to_unseen(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(read_status=False)
+        mock_client.search.assert_called_once_with(["UNSEEN"])
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_is_flagged_true_maps_to_flagged(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(is_flagged=True)
+        mock_client.search.assert_called_once_with(["FLAGGED"])
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_is_flagged_false_maps_to_unflagged(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").search_messages(is_flagged=False)
+        mock_client.search.assert_called_once_with(["UNFLAGGED"])
