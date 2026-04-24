@@ -10,9 +10,12 @@ from datetime import timedelta as _timedelta
 from pathlib import Path
 from typing import Any, cast
 
+from imapclient.exceptions import IMAPClientError, LoginError
+
 from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailKeychainAccessDeniedError,
     MailKeychainEntryNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
@@ -20,6 +23,19 @@ from .exceptions import (
 from .imap_connector import ImapConnector
 from .keychain import get_imap_password
 from .utils import escape_applescript_string, parse_applescript_json, sanitize_input
+
+# Exception classes that trigger AppleScript fallback per the graceful-
+# degradation invariants (docs/research/imap-auth-options-decision.md).
+# OSError covers socket.timeout too. ValueError and MailAccountNotFoundError
+# are deliberately NOT in this tuple — they indicate caller/config errors
+# and must surface, not be papered over by fallback.
+_IMAP_FALLBACK_EXCS: tuple[type[Exception], ...] = (
+    MailKeychainEntryNotFoundError,
+    MailKeychainAccessDeniedError,
+    OSError,
+    LoginError,
+    IMAPClientError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -340,12 +356,30 @@ class AppleMailConnector:
         has_attachment: bool | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Search messages via AppleScript.
+        """Search for messages matching criteria.
 
-        Will grow IMAP delegation in a subsequent commit of #40; for now this
-        is a passthrough to the AppleScript implementation so the MCP tool
-        surface keeps working during the refactor.
+        Tries the IMAP path first (fast, server-side SEARCH). Falls back to
+        AppleScript on any IMAP failure per the graceful-degradation invariants
+        in docs/research/imap-auth-options-decision.md — so a user with no
+        Keychain entry, a revoked password, or a dropped network still gets
+        working search via AppleScript.
         """
+        try:
+            return self._imap_search(
+                account,
+                mailbox,
+                sender_contains,
+                subject_contains,
+                read_status,
+                is_flagged,
+                date_from,
+                date_to,
+                has_attachment,
+                limit,
+            )
+        except _IMAP_FALLBACK_EXCS as exc:
+            self._log_imap_fallback(account, exc)
+            # fall through to AppleScript
         return self._search_messages_applescript(
             account,
             mailbox,
