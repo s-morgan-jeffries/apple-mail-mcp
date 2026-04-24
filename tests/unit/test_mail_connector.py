@@ -260,6 +260,26 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         assert "|name|:(name of mb)" in script
 
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_mailboxes_with_name_uses_account_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "[]"
+        connector.list_mailboxes("Gmail")
+        script = mock_run.call_args[0][0]
+        assert 'set accountRef to account "Gmail"' in script
+        assert "account id" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_mailboxes_with_uuid_uses_account_id_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        uuid = "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        mock_run.return_value = "[]"
+        connector.list_mailboxes(uuid)
+        script = mock_run.call_args[0][0]
+        assert f'set accountRef to account id "{uuid}"' in script
+
     # --- _resolve_imap_config --------------------------------------------
 
     @patch.object(AppleMailConnector, "_run_applescript")
@@ -334,6 +354,19 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         # The quote must be escaped; raw quotes would break the script.
         assert 'Weird \\"Name\\" Acct' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_with_uuid_uses_account_id_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        uuid = "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        mock_run.return_value = (
+            '{"host":"h","port":993,'
+            '"user_name":"u@e.com","email_addresses":["u@e.com"]}'
+        )
+        connector._resolve_imap_config(uuid)
+        script = mock_run.call_args[0][0]
+        assert f'set acctRef to account id "{uuid}"' in script
 
     # --- _imap_failures state + _log_imap_fallback -----------------------
 
@@ -1126,6 +1159,16 @@ class TestAppleMailConnector:
         assert "|id|:(id of msg as text)" in script
         # The bare form must not appear in the msgRecord literal — it would collide.
         assert ", id:(id of msg" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_applescript_with_uuid_uses_account_id_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        uuid = "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        mock_run.return_value = "[]"
+        connector._search_messages_applescript(uuid, "INBOX")
+        script = mock_run.call_args[0][0]
+        assert f'set accountRef to account id "{uuid}"' in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_message(
