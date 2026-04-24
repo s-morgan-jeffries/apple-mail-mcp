@@ -516,6 +516,225 @@ class TestAppleMailConnector:
         with pytest.raises(OSError, match="unreachable"):
             connector._imap_search("iCloud", "INBOX")
 
+    # --- _imap_get_thread helper -----------------------------------------
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_get_thread_happy_path(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "app-password"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.find_thread_members.return_value = [
+            {"id": "anchor@x", "subject": "S"},
+        ]
+
+        anchor = {
+            "internal_id": "500",
+            "account": "iCloud",
+            "rfc_message_id": "anchor@x",
+            "subject": "Hello",
+            "in_reply_to": None,
+            "references": ["parent@x"],
+        }
+        result = connector._imap_get_thread(anchor)
+
+        mock_resolve.assert_called_once_with("iCloud")
+        mock_keychain.assert_called_once_with("iCloud", "user@icloud.com")
+        mock_imap_cls.assert_called_once_with(
+            "imap.mail.me.com", 993, "user@icloud.com", "app-password"
+        )
+        mock_imap.find_thread_members.assert_called_once_with(
+            anchor_rfc_message_id="anchor@x",
+            anchor_references=["parent@x"],
+        )
+        assert result == [{"id": "anchor@x", "subject": "S"}]
+
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_get_thread_keychain_missing_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.side_effect = MailKeychainEntryNotFoundError("no entry")
+        anchor = {
+            "internal_id": "500",
+            "account": "iCloud",
+            "rfc_message_id": "anchor@x",
+            "subject": "Hello",
+            "in_reply_to": None,
+            "references": [],
+        }
+        with pytest.raises(MailKeychainEntryNotFoundError):
+            connector._imap_get_thread(anchor)
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(AppleMailConnector, "_resolve_imap_config")
+    def test_imap_get_thread_login_error_propagates(
+        self,
+        mock_resolve: MagicMock,
+        mock_keychain: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from imapclient.exceptions import LoginError
+
+        mock_resolve.return_value = ("imap.mail.me.com", 993, "user@icloud.com")
+        mock_keychain.return_value = "pw"
+        mock_imap = MagicMock()
+        mock_imap_cls.return_value = mock_imap
+        mock_imap.find_thread_members.side_effect = LoginError("rejected")
+        anchor = {
+            "internal_id": "500",
+            "account": "iCloud",
+            "rfc_message_id": "anchor@x",
+            "subject": "Hello",
+            "in_reply_to": None,
+            "references": [],
+        }
+        with pytest.raises(LoginError):
+            connector._imap_get_thread(anchor)
+
+    # --- get_thread delegation -------------------------------------------
+
+    @patch.object(AppleMailConnector, "_collect_thread_applescript")
+    @patch.object(AppleMailConnector, "_imap_get_thread")
+    @patch.object(AppleMailConnector, "_resolve_thread_anchor_applescript")
+    def test_get_thread_uses_imap_on_success(
+        self,
+        mock_anchor: MagicMock,
+        mock_imap: MagicMock,
+        mock_collect: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_anchor.return_value = {
+            "internal_id": "500",
+            "account": "iCloud",
+            "rfc_message_id": "anchor@x",
+            "subject": "S",
+            "in_reply_to": None,
+            "references": [],
+        }
+        mock_imap.return_value = [{"id": "anchor@x", "subject": "from imap"}]
+        result = connector.get_thread("500")
+        assert result == [{"id": "anchor@x", "subject": "from imap"}]
+        mock_collect.assert_not_called()
+
+    @patch.object(AppleMailConnector, "_collect_thread_applescript")
+    @patch.object(AppleMailConnector, "_imap_get_thread")
+    @patch.object(AppleMailConnector, "_resolve_thread_anchor_applescript")
+    def test_get_thread_falls_back_on_keychain_missing(
+        self,
+        mock_anchor: MagicMock,
+        mock_imap: MagicMock,
+        mock_collect: MagicMock,
+        connector: AppleMailConnector,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_anchor.return_value = {
+            "internal_id": "500",
+            "account": "iCloud",
+            "rfc_message_id": "anchor@x",
+            "subject": "S",
+            "in_reply_to": None,
+            "references": [],
+        }
+        mock_imap.side_effect = MailKeychainEntryNotFoundError("no entry")
+        mock_collect.return_value = [{"id": "500", "subject": "from applescript"}]
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            result = connector.get_thread("500")
+        assert result == [{"id": "500", "subject": "from applescript"}]
+        mock_collect.assert_called_once()
+        # Missing-entry = silent (no WARNING).
+        warning_records = [
+            r for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert warning_records == []
+        assert "iCloud" not in connector._imap_failures
+
+    @patch.object(AppleMailConnector, "_collect_thread_applescript")
+    @patch.object(AppleMailConnector, "_imap_get_thread")
+    @patch.object(AppleMailConnector, "_resolve_thread_anchor_applescript")
+    def test_get_thread_falls_back_on_oserror_with_warning(
+        self,
+        mock_anchor: MagicMock,
+        mock_imap: MagicMock,
+        mock_collect: MagicMock,
+        connector: AppleMailConnector,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_anchor.return_value = {
+            "internal_id": "500",
+            "account": "iCloud",
+            "rfc_message_id": "anchor@x",
+            "subject": "S",
+            "in_reply_to": None,
+            "references": [],
+        }
+        mock_imap.side_effect = OSError("unreachable")
+        mock_collect.return_value = [{"id": "500"}]
+        with caplog.at_level(logging.DEBUG, logger="apple_mail_mcp.mail_connector"):
+            result = connector.get_thread("500")
+        assert result == [{"id": "500"}]
+        mock_collect.assert_called_once()
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert len(warning_records) == 1
+        assert "iCloud" in connector._imap_failures
+
+    @patch.object(AppleMailConnector, "_collect_thread_applescript")
+    @patch.object(AppleMailConnector, "_imap_get_thread")
+    @patch.object(AppleMailConnector, "_resolve_thread_anchor_applescript")
+    def test_get_thread_falls_back_on_login_error(
+        self,
+        mock_anchor: MagicMock,
+        mock_imap: MagicMock,
+        mock_collect: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from imapclient.exceptions import LoginError
+
+        mock_anchor.return_value = {
+            "internal_id": "500", "account": "iCloud",
+            "rfc_message_id": "anchor@x", "subject": "S",
+            "in_reply_to": None, "references": [],
+        }
+        mock_imap.side_effect = LoginError("rejected")
+        mock_collect.return_value = [{"id": "500"}]
+        result = connector.get_thread("500")
+        assert result == [{"id": "500"}]
+        mock_collect.assert_called_once()
+
+    @patch.object(AppleMailConnector, "_collect_thread_applescript")
+    @patch.object(AppleMailConnector, "_imap_get_thread")
+    @patch.object(AppleMailConnector, "_resolve_thread_anchor_applescript")
+    def test_get_thread_anchor_not_found_propagates(
+        self,
+        mock_anchor: MagicMock,
+        mock_imap: MagicMock,
+        mock_collect: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """MailMessageNotFoundError from anchor resolution must propagate,
+        not fall back — the message just doesn't exist anywhere."""
+        mock_anchor.side_effect = MailMessageNotFoundError("Can't get message")
+        with pytest.raises(MailMessageNotFoundError):
+            connector.get_thread("nonexistent")
+        mock_imap.assert_not_called()
+        mock_collect.assert_not_called()
+
     # --- search_messages delegation --------------------------------------
 
     @patch.object(AppleMailConnector, "_search_messages_applescript")
@@ -1031,7 +1250,7 @@ class TestAppleMailConnector:
             '"in_reply_to":"","references_raw":""}',
             "[]",
         ]
-        connector.get_thread("12345")
+        connector._get_thread_applescript("12345")
         anchor_script = mock_run.call_args_list[0][0][0]
         # All record keys must be |quoted| per the v0.4.1 selector-collision rule.
         assert "|rfc_message_id|:(message id of msg)" in anchor_script
@@ -1046,7 +1265,7 @@ class TestAppleMailConnector:
         """Anchor lookup failure propagates MailMessageNotFoundError."""
         mock_run.side_effect = MailMessageNotFoundError("Can't get message")
         with pytest.raises(MailMessageNotFoundError):
-            connector.get_thread("99999")
+            connector._get_thread_applescript("99999")
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_thread_returns_anchor_plus_replies_sorted(
@@ -1068,7 +1287,7 @@ class TestAppleMailConnector:
             '"date_received":"Wed Jan 3 2024","read_status":false,"flagged":false}'
             ']'
         ]
-        result = connector.get_thread("100")
+        result = connector._get_thread_applescript("100")
         assert len(result) == 3
         assert [m["id"] for m in result] == ["100", "101", "102"]
         # Response rows match search_messages shape (6 fields).
@@ -1089,7 +1308,7 @@ class TestAppleMailConnector:
             '"references_raw":"","subject":"Q3","sender":"a@x",'
             '"date_received":"Mon","read_status":false,"flagged":false}]'
         ]
-        result = connector.get_thread("100")
+        result = connector._get_thread_applescript("100")
         for m in result:
             assert "rfc_message_id" not in m
             assert "in_reply_to" not in m
@@ -1108,7 +1327,7 @@ class TestAppleMailConnector:
             '"references_raw":"","subject":"Standalone","sender":"a@x",'
             '"date_received":"Mon","read_status":false,"flagged":false}]'
         ]
-        result = connector.get_thread("500")
+        result = connector._get_thread_applescript("500")
         assert len(result) == 1
         assert result[0]["id"] == "500"
 
@@ -1122,7 +1341,7 @@ class TestAppleMailConnector:
             '"subject":"Re: Re: Q3 Report","in_reply_to":"","references_raw":""}',
             '[]',
         ]
-        connector.get_thread("1")
+        connector._get_thread_applescript("1")
         candidate_script = mock_run.call_args_list[1][0][0]
         assert 'account "Gmail"' in candidate_script
         # Base subject strips all Re: prefixes.

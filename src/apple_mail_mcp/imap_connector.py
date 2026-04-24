@@ -12,13 +12,17 @@ See ``docs/plans/2026-04-23-imap-connector-design.md``.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date as _date
 from datetime import timedelta as _timedelta
 from typing import Any
 
 from imapclient import IMAPClient
+from imapclient.exceptions import IMAPClientError
 from imapclient.response_types import Envelope
+
+logger = logging.getLogger(__name__)
 
 # Strict ISO 8601 YYYY-MM-DD. Duplicated from mail_connector to break an
 # otherwise-circular import: mail_connector.search_messages delegates to
@@ -261,5 +265,107 @@ class ImapConnector:
                     _envelope_to_dict(entry[b"ENVELOPE"], tuple(entry[b"FLAGS"]))
                 )
             return results
+        finally:
+            client.logout()
+
+    def find_thread_members(
+        self,
+        anchor_rfc_message_id: str,
+        anchor_references: list[str],
+    ) -> list[dict[str, Any]]:
+        """Return all messages in the anchor's thread across the account.
+
+        Iterates every mailbox on the server. For each mailbox, searches
+        for any message whose Message-ID, In-Reply-To, or References
+        header matches any of the known thread IDs (the anchor plus its
+        known ancestors from the anchor's References header). Collects
+        matches, dedupes by Message-ID, sorts chronologically.
+
+        A single pass suffices because well-formed replies copy the entire
+        References chain of their parent — so searching on the anchor's
+        Message-ID against the References header captures all descendants
+        regardless of tree depth.
+
+        Args:
+            anchor_rfc_message_id: RFC 5322 Message-ID of the thread anchor,
+                bracketless (as returned by _strip_brackets).
+            anchor_references: List of Message-IDs from the anchor's
+                References header, bracketless, order preserved.
+
+        Returns:
+            List of message dicts in the same shape as search_messages
+            (``id``, ``subject``, ``sender``, ``date_received``,
+            ``read_status``, ``flagged``), deduped by Message-ID, sorted
+            chronologically ascending.
+        """
+        known_ids: set[str] = {anchor_rfc_message_id} | set(anchor_references)
+
+        client = IMAPClient(
+            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
+        )
+        try:
+            client.login(self._email, self._password)
+            mailboxes = client.list_folders()
+            collected: dict[str, dict[str, Any]] = {}
+
+            for entry in mailboxes:
+                # list_folders yields (flags, delimiter, name) tuples.
+                mailbox_name = entry[2] if len(entry) >= 3 else entry[-1]
+                if isinstance(mailbox_name, bytes):
+                    mailbox_name = mailbox_name.decode("utf-8", errors="replace")
+
+                try:
+                    client.select_folder(mailbox_name, readonly=True)
+                except IMAPClientError as exc:
+                    # Some mailboxes (e.g. Gmail smart labels) reject SELECT.
+                    # Matches the AppleScript path's precedent of skipping
+                    # them silently.
+                    logger.debug(
+                        "find_thread_members: skipping mailbox %s: %s",
+                        mailbox_name, exc,
+                    )
+                    continue
+
+                # Search for each known id across three header types. IMAP
+                # returns UIDs whose specified header contains the given
+                # substring; each search is server-side and indexed.
+                uids_found: set[int] = set()
+                for id_ in known_ids:
+                    id_quoted = f"<{id_}>"
+                    for header in ("Message-ID", "In-Reply-To", "References"):
+                        try:
+                            uids = client.search(["HEADER", header, id_quoted])
+                        except IMAPClientError as exc:
+                            logger.debug(
+                                "find_thread_members: search failed in %s for "
+                                "%s=%s: %s",
+                                mailbox_name, header, id_quoted, exc,
+                            )
+                            continue
+                        uids_found.update(uids)
+
+                if not uids_found:
+                    continue
+
+                fetched = client.fetch(
+                    list(uids_found), [b"ENVELOPE", b"FLAGS"]
+                )
+                for fetch_entry in fetched.values():
+                    envelope = fetch_entry.get(b"ENVELOPE")
+                    if envelope is None:
+                        continue
+                    raw_msgid = getattr(envelope, "message_id", None)
+                    if not raw_msgid:
+                        continue
+                    clean_msgid = _strip_brackets(_decode(raw_msgid))
+                    if clean_msgid in collected:
+                        continue
+                    flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
+                    collected[clean_msgid] = _envelope_to_dict(envelope, flags)
+
+            return sorted(
+                collected.values(),
+                key=lambda m: m.get("date_received") or "",
+            )
         finally:
             client.logout()
