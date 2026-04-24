@@ -865,6 +865,33 @@ class AppleMailConnector:
         """
         return self._get_thread_applescript(message_id)
 
+    def _imap_get_thread(
+        self, anchor: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """IMAP path for get_thread.
+
+        Takes the anchor dict produced by _resolve_thread_anchor_applescript
+        and delegates thread-member collection to ImapConnector. Propagates
+        all fallback-triggering exceptions unchanged — the caller
+        (get_thread) is responsible for catching and falling back.
+
+        Raises:
+            MailKeychainEntryNotFoundError: No opt-in (benign).
+            MailKeychainAccessDeniedError: Keychain ACL refused.
+            OSError (incl. socket.timeout): Network / connection failure.
+            imapclient.exceptions.LoginError: Credentials rejected.
+            imapclient.exceptions.IMAPClientError: Protocol or session error.
+            MailAccountNotFoundError: Mail.app doesn't know this account.
+        """
+        account = cast(str, anchor["account"])
+        host, port, email = self._resolve_imap_config(account)
+        password = get_imap_password(account, email)
+        imap = ImapConnector(host, port, email, password)
+        return imap.find_thread_members(
+            anchor_rfc_message_id=cast(str, anchor["rfc_message_id"]),
+            anchor_references=cast(list[str], anchor.get("references") or []),
+        )
+
     def _get_thread_applescript(self, message_id: str) -> list[dict[str, Any]]:
         """AppleScript path for get_thread (the universal baseline).
 
