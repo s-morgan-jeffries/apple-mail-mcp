@@ -498,3 +498,174 @@ class TestEnvelopeTranslation:
         }
         [msg] = ImapConnector("h", 993, "u@e.com", "pw").search_messages()
         assert msg["subject"] == "héllo ✓"
+
+
+class TestFindThreadMembers:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_returns_empty_when_no_search_hits(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.list_folders.return_value = [((b"\\HasNoChildren",), b"/", "INBOX")]
+        mock_client.search.return_value = []
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@x",
+            anchor_references=[],
+        )
+        assert result == []
+        mock_client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_returns_anchor_and_reply_sorted_chronologically(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.list_folders.return_value = [((b"\\HasNoChildren",), b"/", "INBOX")]
+        # Every search returns the same UIDs — dedup by Message-ID in fetch.
+        mock_client.search.return_value = [1, 2]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(
+                    message_id=b"<anchor@x>",
+                    subject=b"Original",
+                    date=datetime(2026, 4, 20, 10, 0, 0),
+                ),
+                b"FLAGS": (),
+            },
+            2: {
+                b"ENVELOPE": _fake_envelope(
+                    message_id=b"<reply@x>",
+                    subject=b"Re: Original",
+                    date=datetime(2026, 4, 21, 10, 0, 0),
+                ),
+                b"FLAGS": (),
+            },
+        }
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@x",
+            anchor_references=[],
+        )
+
+        assert len(result) == 2
+        assert [m["id"] for m in result] == ["anchor@x", "reply@x"]
+        # Chronological sort
+        assert result[0]["date_received"] < result[1]["date_received"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_iterates_all_mailboxes_in_account(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.list_folders.return_value = [
+            ((), b"/", "INBOX"),
+            ((), b"/", "Archive"),
+            ((), b"/", "Sent"),
+        ]
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="a@x",
+            anchor_references=[],
+        )
+
+        selected_folders = [
+            call.args[0] for call in mock_client.select_folder.call_args_list
+        ]
+        assert selected_folders == ["INBOX", "Archive", "Sent"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_dedups_messages_found_in_multiple_mailboxes(self, mock_cls):
+        """A Gmail-like account may surface the same message in INBOX and
+        All Mail. Output must not duplicate it."""
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.list_folders.return_value = [
+            ((), b"/", "INBOX"),
+            ((), b"/", "All Mail"),
+        ]
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(
+                    message_id=b"<anchor@x>", subject=b"Original"
+                ),
+                b"FLAGS": (),
+            }
+        }
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@x",
+            anchor_references=[],
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "anchor@x"
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_skips_mailbox_that_fails_to_select(self, mock_cls):
+        from imapclient.exceptions import IMAPClientError
+
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.list_folders.return_value = [
+            ((), b"/", "INBOX"),
+            ((), b"/", "[Gmail]/Smart Label"),
+        ]
+
+        def select_side_effect(name, readonly=False):
+            if "Smart Label" in name:
+                raise IMAPClientError("cannot select this mailbox")
+
+        mock_client.select_folder.side_effect = select_side_effect
+        mock_client.search.return_value = [1]
+        mock_client.fetch.return_value = {
+            1: {
+                b"ENVELOPE": _fake_envelope(message_id=b"<anchor@x>"),
+                b"FLAGS": (),
+            }
+        }
+
+        # No exception — Smart Label skipped, INBOX still processed.
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@x",
+            anchor_references=[],
+        )
+        assert len(result) == 1
+        mock_client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_searches_for_each_known_id(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.list_folders.return_value = [((), b"/", "INBOX")]
+        mock_client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@x",
+            anchor_references=["parent@x", "grandparent@x"],
+        )
+
+        # Collect all search criteria across all calls.
+        searched_ids: set[str] = set()
+        for call in mock_client.search.call_args_list:
+            crit = call.args[0]
+            # Last element is the header value, e.g. "<anchor@x>"
+            val = crit[-1]
+            if isinstance(val, str) and val.startswith("<") and val.endswith(">"):
+                searched_ids.add(val.strip("<>"))
+
+        assert "anchor@x" in searched_ids
+        assert "parent@x" in searched_ids
+        assert "grandparent@x" in searched_ids
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_logout_called_on_exception(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.list_folders.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+                anchor_rfc_message_id="a@x",
+                anchor_references=[],
+            )
+
+        mock_client.logout.assert_called_once()
