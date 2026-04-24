@@ -845,6 +845,13 @@ class AppleMailConnector:
     def get_thread(self, message_id: str) -> list[dict[str, Any]]:
         """Return all messages in the thread containing ``message_id``.
 
+        Tries the IMAP path first (server-side header search, no subject-
+        prefilter dependency). Falls back to AppleScript on any IMAP
+        failure per the graceful-degradation invariants in
+        docs/research/imap-auth-options-decision.md — so a user with no
+        Keychain entry, a revoked password, or a dropped network still
+        gets working threading via AppleScript.
+
         Args:
             message_id: Internal Mail.app id of any message in the thread
                 (the anchor). Typically obtained from search_messages or
@@ -858,12 +865,14 @@ class AppleMailConnector:
 
         Raises:
             MailMessageNotFoundError: If no message with the given id exists.
-
-        Will grow IMAP delegation in a subsequent commit of #66; for now
-        this is a passthrough to the AppleScript implementation so the
-        MCP tool surface keeps working during the refactor.
         """
-        return self._get_thread_applescript(message_id)
+        anchor = self._resolve_thread_anchor_applescript(message_id)
+        try:
+            return self._imap_get_thread(anchor)
+        except _IMAP_FALLBACK_EXCS as exc:
+            self._log_imap_fallback(cast(str, anchor["account"]), exc)
+            # fall through to AppleScript
+        return self._collect_thread_applescript(anchor)
 
     def _imap_get_thread(
         self, anchor: dict[str, Any],
