@@ -1,3 +1,13 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false
+#
+# imapclient ships without a py.typed marker, so Pyright/Pylance can't verify
+# argument types against its public API. Mypy is configured to ignore missing
+# imports for the imapclient package via [[tool.mypy.overrides]] in
+# pyproject.toml; Pyright respects file-level pragmas instead. The three
+# suppressed categories cover the false positives that arise when calling
+# search() / fetch() with list-shaped criteria and reading Envelope/BodyData
+# fields. Suppression is scoped to this file so unrelated type bugs elsewhere
+# in the codebase still surface.
 """IMAPClient wrapper for read operations.
 
 Stateless, per-call connection lifecycle. This module is deliberately
@@ -15,6 +25,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date as _date
+from datetime import datetime as _datetime
 from datetime import timedelta as _timedelta
 from typing import Any
 
@@ -107,12 +118,13 @@ def _build_search_criteria(
     return criteria or ["ALL"]
 
 
-def _decode(b: bytes | str | None) -> str:
+def _decode(b: bytes | bytearray | str | None) -> str:
     if b is None:
         return ""
-    if isinstance(b, bytes):
-        return b.decode("utf-8", errors="replace")
-    return b
+    if isinstance(b, str):
+        return b
+    # bytes or bytearray — both have .decode().
+    return b.decode("utf-8", errors="replace")
 
 
 def _strip_brackets(s: str) -> str:
@@ -179,7 +191,7 @@ def _envelope_to_dict(
     envelope: Envelope, flags: tuple[bytes, ...]
 ) -> dict[str, Any]:
     date = envelope.date
-    if hasattr(date, "isoformat"):
+    if isinstance(date, _datetime):
         date_str = date.isoformat()
     else:
         date_str = _decode(date)
@@ -308,11 +320,13 @@ class ImapConnector:
             mailboxes = client.list_folders()
             collected: dict[str, dict[str, Any]] = {}
 
-            for entry in mailboxes:
-                # list_folders yields (flags, delimiter, name) tuples.
-                mailbox_name = entry[2] if len(entry) >= 3 else entry[-1]
-                if isinstance(mailbox_name, bytes):
-                    mailbox_name = mailbox_name.decode("utf-8", errors="replace")
+            for _flags, _delimiter, raw_name in mailboxes:
+                # imapclient returns names as str when its decoder succeeds,
+                # bytes/bytearray on failure. Coerce to str either way.
+                if isinstance(raw_name, (bytes, bytearray)):
+                    mailbox_name = raw_name.decode("utf-8", errors="replace")
+                else:
+                    mailbox_name = raw_name
 
                 try:
                     client.select_folder(mailbox_name, readonly=True)
