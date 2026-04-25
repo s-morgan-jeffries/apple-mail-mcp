@@ -632,6 +632,141 @@ class TestAppleMailConnector:
                 actions={"mark_flagged": True, "flag_color": "neon"},
             )
 
+    # --- update_rule -----------------------------------------------------
+
+    @staticmethod
+    def _supported_actions_clean_response() -> str:
+        """Mock _check_supported_actions JSON for a rule with no
+        unsupported actions set."""
+        return (
+            '{"run_script_set":false,"play_sound_set":false,'
+            '"redirect_set":false,"forward_text_set":false,'
+            '"reply_text_set":false,"highlight_text":false,'
+            '"color_message":"none"}'
+        )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_rule_name_only_emits_minimal_script(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        # Two AppleScript calls happen: _check_supported_actions, then update.
+        mock_run.side_effect = [
+            self._supported_actions_clean_response(),
+            "",  # the update itself returns nothing
+        ]
+        connector.update_rule(rule_index=2, name="Renamed")
+        update_script = mock_run.call_args_list[1][0][0]
+        assert "set newRule to rule 2" in update_script
+        assert 'set name of newRule to "Renamed"' in update_script
+        # Patch semantics: enabled/match_logic/conditions/actions not touched.
+        assert "set enabled of newRule" not in update_script
+        assert "delete every rule condition" not in update_script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_rule_enabled_only_changes_enabled(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = [
+            self._supported_actions_clean_response(),
+            "",
+        ]
+        connector.update_rule(rule_index=3, enabled=False)
+        update_script = mock_run.call_args_list[1][0][0]
+        assert "set enabled of newRule to false" in update_script
+        assert "set name of newRule" not in update_script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_rule_conditions_replaces_existing(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = [
+            self._supported_actions_clean_response(),
+            "",
+        ]
+        connector.update_rule(
+            rule_index=4,
+            conditions=[
+                {"field": "from", "operator": "contains", "value": "@x.com"}
+            ],
+        )
+        update_script = mock_run.call_args_list[1][0][0]
+        assert "delete every rule condition of newRule" in update_script
+        assert "rule type:from header" in update_script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_rule_actions_resets_then_applies(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = [
+            self._supported_actions_clean_response(),
+            "",
+        ]
+        connector.update_rule(
+            rule_index=2,
+            actions={"mark_read": True},
+        )
+        update_script = mock_run.call_args_list[1][0][0]
+        # All action flags reset first
+        assert "set mark flagged of newRule to false" in update_script
+        assert "set delete message of newRule to false" in update_script
+        # Then provided action applied
+        assert "set mark read of newRule to true" in update_script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_rule_no_args_after_index_makes_no_changes(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Calling update_rule with only rule_index does the supported-action
+        check and then exits — no script for an empty update."""
+        mock_run.return_value = self._supported_actions_clean_response()
+        connector.update_rule(rule_index=2)
+        # Only one AppleScript call: the supported-actions check.
+        assert mock_run.call_count == 1
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_rule_refuses_unsupported_actions(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailUnsupportedRuleActionError
+
+        # _check_supported_actions response indicates run-script is set.
+        mock_run.return_value = (
+            '{"run_script_set":true,"play_sound_set":false,'
+            '"redirect_set":false,"forward_text_set":false,'
+            '"reply_text_set":false,"highlight_text":false,'
+            '"color_message":"none"}'
+        )
+        with pytest.raises(MailUnsupportedRuleActionError):
+            connector.update_rule(rule_index=4, enabled=False)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_rule_propagates_rule_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailRuleNotFoundError
+
+        mock_run.side_effect = MailRuleNotFoundError("Can't get rule 99")
+        with pytest.raises(MailRuleNotFoundError):
+            connector.update_rule(rule_index=99, enabled=False)
+
+    def test_update_rule_rejects_invalid_match_logic(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="match_logic"):
+            connector.update_rule(rule_index=2, match_logic="bogus")
+
+    def test_update_rule_rejects_empty_name(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="name"):
+            connector.update_rule(rule_index=2, name="")
+
+    def test_update_rule_rejects_empty_conditions(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="conditions"):
+            connector.update_rule(rule_index=2, conditions=[])
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(
         self, mock_run: MagicMock, connector: AppleMailConnector

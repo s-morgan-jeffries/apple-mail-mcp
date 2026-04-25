@@ -507,6 +507,127 @@ class AppleMailConnector:
         script = f'tell application "Mail"\n{body}\nend tell'
         return int(self._run_applescript(script))
 
+    def update_rule(
+        self,
+        rule_index: int,
+        name: str | None = None,
+        enabled: bool | None = None,
+        conditions: list[dict[str, Any]] | None = None,
+        actions: dict[str, Any] | None = None,
+        match_logic: str | None = None,
+    ) -> None:
+        """Update an existing Mail.app rule (patch-style for top-level fields,
+        full replacement for conditions/actions when provided).
+
+        Calls ``_check_supported_actions`` first; refuses to update any rule
+        whose existing action set includes something outside our schema
+        (run-AppleScript, redirect, reply text, etc.) — we cannot safely
+        partial-update because the unsupported actions would be silently
+        dropped or misrepresented.
+
+        Args:
+            rule_index: 1-based positional index from ``list_rules``.
+            name: New name (only set if not None).
+            enabled: New enabled state (only set if not None).
+            conditions: If provided, REPLACES all existing conditions wholesale.
+            actions: If provided, REPLACES all action flags wholesale —
+                unprovided actions are reset to off.
+            match_logic: 'all' | 'any', only set if not None.
+
+        Raises:
+            ValueError: If any provided input fails schema validation.
+            MailRuleNotFoundError: If rule_index is out of range.
+            MailUnsupportedRuleActionError: If the rule currently has an
+                action outside the supported schema.
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        if match_logic is not None and match_logic not in ("all", "any"):
+            raise ValueError(
+                f"match_logic must be 'all' or 'any', got {match_logic!r}"
+            )
+        if conditions is not None:
+            if not conditions:
+                raise ValueError(
+                    "conditions, if provided, must have at least one entry"
+                )
+            for cond in conditions:
+                self._validate_rule_condition(cond)
+        if actions is not None:
+            self._validate_rule_actions(actions)
+        if name is not None and (not isinstance(name, str) or not name):
+            raise ValueError("name, if provided, must be a non-empty string")
+
+        # Refuse to patch rules whose existing actions we don't fully model.
+        self._check_supported_actions(rule_index)
+
+        body_parts: list[str] = [
+            f"set newRule to rule {rule_index}",
+        ]
+
+        if name is not None:
+            name_safe = escape_applescript_string(sanitize_input(name))
+            body_parts.append(f'set name of newRule to "{name_safe}"')
+        if enabled is not None:
+            body_parts.append(
+                f"set enabled of newRule to "
+                f"{'true' if enabled else 'false'}"
+            )
+        if match_logic is not None:
+            body_parts.append(
+                f"set all conditions must be met of newRule to "
+                f"{'true' if match_logic == 'all' else 'false'}"
+            )
+        if conditions is not None:
+            body_parts.append("delete every rule condition of newRule")
+            for cond in conditions:
+                rule_type = _RULE_FIELD_MAP[cond["field"]]
+                qualifier = _RULE_OPERATOR_MAP[cond["operator"]]
+                expr_safe = escape_applescript_string(
+                    sanitize_input(cond["value"])
+                )
+                if cond["field"] == "header_name":
+                    header_safe = escape_applescript_string(
+                        sanitize_input(cond["header_name"])
+                    )
+                    body_parts.append(
+                        f"make new rule condition with properties "
+                        f"{{rule type:{rule_type}, qualifier:{qualifier}, "
+                        f'expression:"{expr_safe}", header:"{header_safe}"}} '
+                        f"at end of rule conditions of newRule"
+                    )
+                else:
+                    body_parts.append(
+                        f"make new rule condition with properties "
+                        f"{{rule type:{rule_type}, qualifier:{qualifier}, "
+                        f'expression:"{expr_safe}"}} '
+                        f"at end of rule conditions of newRule"
+                    )
+        if actions is not None:
+            # Reset all supported action flags first; then apply provided ones.
+            body_parts.extend([
+                "set should move message of newRule to false",
+                "set should copy message of newRule to false",
+                "set mark read of newRule to false",
+                "set mark flagged of newRule to false",
+                "set mark flag index of newRule to -1",
+                "set delete message of newRule to false",
+                'set forward message of newRule to ""',
+            ])
+            body_parts.extend(self._build_action_lines(actions))
+
+        if len(body_parts) == 1:
+            # Only the rule lookup, no actual updates — caller passed nothing.
+            return
+        script = (
+            'tell application "Mail"\n'
+            + "\n".join(body_parts)
+            + "\nend tell"
+        )
+        self._run_applescript(script)
+
     def _check_supported_actions(self, rule_index: int) -> None:
         """Verify a rule's existing actions are all in our schema.
 
