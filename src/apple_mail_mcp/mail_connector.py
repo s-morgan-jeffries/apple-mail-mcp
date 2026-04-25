@@ -278,6 +278,37 @@ class AppleMailConnector:
         )
         self._run_applescript(script)
 
+    def delete_rule(self, rule_index: int) -> str:
+        """Delete a rule by 1-based index.
+
+        Reads the rule's name in the same AppleScript call so callers
+        (typically the server layer's elicitation summary) can echo the
+        deleted name. After deletion, downstream rule indices shift down
+        by one — callers should re-call ``list_rules`` before any further
+        rule operations.
+
+        Args:
+            rule_index: 1-based positional index, as returned by ``list_rules``.
+
+        Returns:
+            The name of the deleted rule (for confirmation / logging).
+
+        Raises:
+            MailRuleNotFoundError: If rule_index is out of range.
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        script = (
+            f'tell application "Mail"\n'
+            f"    set deletedName to name of rule {rule_index}\n"
+            f"    delete rule {rule_index}\n"
+            f"    return deletedName\n"
+            f"end tell"
+        )
+        return self._run_applescript(script)
+
     def list_mailboxes(self, account: str) -> list[dict[str, Any]]:
         """List all mailboxes for an account.
 

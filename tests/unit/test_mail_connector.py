@@ -267,6 +267,47 @@ class TestAppleMailConnector:
         with pytest.raises(MailRuleNotFoundError):
             connector.set_rule_enabled(rule_index=-1, enabled=True)
 
+    # --- delete_rule -----------------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_rule_returns_deleted_name(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "Junk filter"
+        result = connector.delete_rule(rule_index=2)
+        assert result == "Junk filter"
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_rule_emits_correct_script(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "X"
+        connector.delete_rule(rule_index=2)
+        script = mock_run.call_args[0][0]
+        # Reads name before deleting (so we can echo it back).
+        assert "name of rule 2" in script
+        assert "delete rule 2" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_rule_propagates_rule_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailRuleNotFoundError
+
+        mock_run.side_effect = MailRuleNotFoundError("Can't get rule 99")
+        with pytest.raises(MailRuleNotFoundError):
+            connector.delete_rule(rule_index=99)
+
+    def test_delete_rule_rejects_zero_or_negative_index(
+        self, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailRuleNotFoundError
+
+        with pytest.raises(MailRuleNotFoundError):
+            connector.delete_rule(rule_index=0)
+        with pytest.raises(MailRuleNotFoundError):
+            connector.delete_rule(rule_index=-5)
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(
         self, mock_run: MagicMock, connector: AppleMailConnector
