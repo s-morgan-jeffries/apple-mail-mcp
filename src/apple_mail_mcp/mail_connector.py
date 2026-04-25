@@ -563,13 +563,15 @@ class AppleMailConnector:
         # Refuse to patch rules whose existing actions we don't fully model.
         self._check_supported_actions(rule_index)
 
+        # Renaming a rule invalidates the local AppleScript variable
+        # bound to it (Mail.app tries to resolve the variable by the old
+        # name on subsequent property accesses, which now fails). Defer
+        # any rename to the very end so all other property changes
+        # operate on a stable reference.
         body_parts: list[str] = [
             f"set newRule to rule {rule_index}",
         ]
 
-        if name is not None:
-            name_safe = escape_applescript_string(sanitize_input(name))
-            body_parts.append(f'set name of newRule to "{name_safe}"')
         if enabled is not None:
             body_parts.append(
                 f"set enabled of newRule to "
@@ -617,6 +619,10 @@ class AppleMailConnector:
                 'set forward message of newRule to ""',
             ])
             body_parts.extend(self._build_action_lines(actions))
+        # Rename last — see comment above.
+        if name is not None:
+            name_safe = escape_applescript_string(sanitize_input(name))
+            body_parts.append(f'set name of newRule to "{name_safe}"')
 
         if len(body_parts) == 1:
             # Only the rule lookup, no actual updates — caller passed nothing.
