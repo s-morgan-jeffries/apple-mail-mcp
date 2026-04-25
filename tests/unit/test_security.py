@@ -352,6 +352,59 @@ class TestCheckTestModeSafety:
         assert result is not None
         assert result["error_type"] == "safety_violation"
 
+    # --- Rule-mutation prefix gate (#63) -------------------------------
+
+    def test_rule_mutation_with_test_prefix_returns_none(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+        assert (
+            check_test_mode_safety(
+                "set_rule_enabled",
+                rule_name="[apple-mail-mcp-test] my rule",
+            )
+            is None
+        )
+
+    def test_rule_mutation_without_test_prefix_returns_error(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+        result = check_test_mode_safety(
+            "delete_rule",
+            rule_name="News From Apple",
+        )
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+        assert "[apple-mail-mcp-test]" in result["error"]
+
+    def test_rule_mutation_outside_test_mode_allowed(
+        self, monkeypatch: Any
+    ) -> None:
+        """No prefix enforcement when MAIL_TEST_MODE is not set."""
+        monkeypatch.delenv("MAIL_TEST_MODE", raising=False)
+        assert (
+            check_test_mode_safety(
+                "delete_rule",
+                rule_name="News From Apple",
+            )
+            is None
+        )
+
+    def test_rule_mutation_with_no_rule_name_skipped(
+        self, monkeypatch: Any
+    ) -> None:
+        """When the caller doesn't supply rule_name, the gate has nothing
+        to check (e.g. rule_index couldn't be resolved). Returns None."""
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+        assert (
+            check_test_mode_safety("delete_rule", rule_name=None)
+            is None
+        )
+
     @patch("apple_mail_mcp.security.subprocess.run")
     def test_uuid_lookup_failure_falls_back_to_name_only(
         self, mock_run: Any, monkeypatch: Any
