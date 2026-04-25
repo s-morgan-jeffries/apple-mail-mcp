@@ -118,12 +118,13 @@ def _build_search_criteria(
     return criteria or ["ALL"]
 
 
-def _decode(b: bytes | str | None) -> str:
+def _decode(b: bytes | bytearray | str | None) -> str:
     if b is None:
         return ""
-    if isinstance(b, bytes):
-        return b.decode("utf-8", errors="replace")
-    return b
+    if isinstance(b, str):
+        return b
+    # bytes or bytearray — both have .decode().
+    return b.decode("utf-8", errors="replace")
 
 
 def _strip_brackets(s: str) -> str:
