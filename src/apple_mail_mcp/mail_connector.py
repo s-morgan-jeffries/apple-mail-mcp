@@ -278,6 +278,58 @@ class AppleMailConnector:
         )
         self._run_applescript(script)
 
+    def _check_supported_actions(self, rule_index: int) -> None:
+        """Verify a rule's existing actions are all in our schema.
+
+        Used by ``update_rule`` before applying changes — if the rule
+        currently has any action set that we don't model (run-AppleScript,
+        redirect, reply text, play sound, highlight color, forward text),
+        we can't safely partial-update because we'd silently drop or
+        misrepresent that action. Read access via ``list_rules`` is
+        unaffected.
+
+        Raises:
+            MailRuleNotFoundError: If rule_index is out of range.
+            MailUnsupportedRuleActionError: If any action outside the
+                medium-tier schema is currently set on the rule.
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        tell_body = f'''
+        tell application "Mail"
+            set r to rule {rule_index}
+            set resultData to {{|run_script_set|:(run script of r is not missing value), |play_sound_set|:(play sound of r is not missing value), |redirect_set|:((redirect message of r) is not ""), |forward_text_set|:((forward text of r) is not ""), |reply_text_set|:((reply text of r) is not ""), |highlight_text|:(highlight text using color of r), |color_message|:((color message of r) as text)}}
+        end tell
+        '''
+        script = _wrap_as_json_script(tell_body)
+        raw = self._run_applescript(script)
+        parsed = cast(dict[str, Any], parse_applescript_json(raw))
+
+        unsupported: list[str] = []
+        if parsed.get("run_script_set"):
+            unsupported.append("run script")
+        if parsed.get("play_sound_set"):
+            unsupported.append("play sound")
+        if parsed.get("redirect_set"):
+            unsupported.append("redirect message")
+        if parsed.get("forward_text_set"):
+            unsupported.append("forward text")
+        if parsed.get("reply_text_set"):
+            unsupported.append("reply text")
+        if parsed.get("highlight_text"):
+            unsupported.append("highlight text using color")
+        if parsed.get("color_message", "none") != "none":
+            unsupported.append("color message")
+
+        if unsupported:
+            raise MailUnsupportedRuleActionError(
+                f"rule {rule_index} uses actions outside the supported "
+                f"schema: {', '.join(unsupported)}. Edit this rule in "
+                f"Mail.app's Rules pane instead."
+            )
+
     def delete_rule(self, rule_index: int) -> str:
         """Delete a rule by 1-based index.
 

@@ -308,6 +308,94 @@ class TestAppleMailConnector:
         with pytest.raises(MailRuleNotFoundError):
             connector.delete_rule(rule_index=-5)
 
+    # --- _check_supported_actions ---------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_check_supported_actions_passes_for_clean_rule(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """A rule with only supported actions does not raise."""
+        mock_run.return_value = (
+            '{"run_script_set":false,"play_sound_set":false,'
+            '"redirect_set":false,"forward_text_set":false,'
+            '"reply_text_set":false,"highlight_text":false,'
+            '"color_message":"none"}'
+        )
+        # Should not raise.
+        connector._check_supported_actions(rule_index=1)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_check_supported_actions_rejects_run_script(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailUnsupportedRuleActionError
+
+        mock_run.return_value = (
+            '{"run_script_set":true,"play_sound_set":false,'
+            '"redirect_set":false,"forward_text_set":false,'
+            '"reply_text_set":false,"highlight_text":false,'
+            '"color_message":"none"}'
+        )
+        with pytest.raises(MailUnsupportedRuleActionError, match="run script"):
+            connector._check_supported_actions(rule_index=1)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_check_supported_actions_lists_all_unsupported(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailUnsupportedRuleActionError
+
+        mock_run.return_value = (
+            '{"run_script_set":true,"play_sound_set":true,'
+            '"redirect_set":false,"forward_text_set":false,'
+            '"reply_text_set":true,"highlight_text":false,'
+            '"color_message":"none"}'
+        )
+        with pytest.raises(MailUnsupportedRuleActionError) as excinfo:
+            connector._check_supported_actions(rule_index=2)
+        msg = str(excinfo.value)
+        assert "run script" in msg
+        assert "play sound" in msg
+        assert "reply text" in msg
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_check_supported_actions_treats_color_message_none_as_clean(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """color_message == 'none' is the default — not a customization."""
+        mock_run.return_value = (
+            '{"run_script_set":false,"play_sound_set":false,'
+            '"redirect_set":false,"forward_text_set":false,'
+            '"reply_text_set":false,"highlight_text":false,'
+            '"color_message":"none"}'
+        )
+        connector._check_supported_actions(rule_index=1)  # no raise
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_check_supported_actions_rejects_non_none_color_message(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailUnsupportedRuleActionError
+
+        mock_run.return_value = (
+            '{"run_script_set":false,"play_sound_set":false,'
+            '"redirect_set":false,"forward_text_set":false,'
+            '"reply_text_set":false,"highlight_text":false,'
+            '"color_message":"red"}'
+        )
+        with pytest.raises(MailUnsupportedRuleActionError, match="color message"):
+            connector._check_supported_actions(rule_index=1)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_check_supported_actions_propagates_rule_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailRuleNotFoundError
+
+        mock_run.side_effect = MailRuleNotFoundError("Can't get rule 99")
+        with pytest.raises(MailRuleNotFoundError):
+            connector._check_supported_actions(rule_index=99)
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(
         self, mock_run: MagicMock, connector: AppleMailConnector
