@@ -396,6 +396,242 @@ class TestAppleMailConnector:
         with pytest.raises(MailRuleNotFoundError):
             connector._check_supported_actions(rule_index=99)
 
+    # --- create_rule -----------------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_rule_returns_new_rule_index(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "6"
+        new_index = connector.create_rule(
+            name="My Rule",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "X"}
+            ],
+            actions={"mark_read": True},
+        )
+        assert new_index == 6
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_rule_emits_correct_field_and_operator(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_rule(
+            name="X",
+            conditions=[
+                {"field": "from", "operator": "contains", "value": "@apple.com"}
+            ],
+            actions={"delete": True},
+        )
+        script = mock_run.call_args[0][0]
+        assert "rule type:from header" in script
+        assert "qualifier:does contain value" in script
+        assert 'expression:"@apple.com"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_rule_header_name_includes_header_field(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_rule(
+            name="X",
+            conditions=[
+                {
+                    "field": "header_name",
+                    "operator": "equals",
+                    "value": "yes",
+                    "header_name": "X-Important",
+                }
+            ],
+            actions={"mark_flagged": True},
+        )
+        script = mock_run.call_args[0][0]
+        assert "rule type:header key" in script
+        assert 'header:"X-Important"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_rule_match_logic_any_emits_false(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_rule(
+            name="X",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "Y"}
+            ],
+            actions={"delete": True},
+            match_logic="any",
+        )
+        script = mock_run.call_args[0][0]
+        assert "all conditions must be met of newRule to false" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_rule_move_action_emits_mailbox_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_rule(
+            name="X",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "Y"}
+            ],
+            actions={"move_to": {"account": "Gmail", "mailbox": "Archive"}},
+        )
+        script = mock_run.call_args[0][0]
+        assert "set should move message of newRule to true" in script
+        assert (
+            'set move message of newRule to mailbox "Archive" of '
+            'account "Gmail"' in script
+        )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_rule_mark_flagged_with_color_sets_flag_index(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_rule(
+            name="X",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "Y"}
+            ],
+            actions={"mark_flagged": True, "flag_color": "yellow"},
+        )
+        script = mock_run.call_args[0][0]
+        assert "set mark flagged of newRule to true" in script
+        assert "set mark flag index of newRule to 2" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_rule_forward_to_uses_comma_string(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_rule(
+            name="X",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "Y"}
+            ],
+            actions={"forward_to": ["a@example.com", "b@example.com"]},
+        )
+        script = mock_run.call_args[0][0]
+        # forward_message is a string, not a list — recipients are
+        # comma-separated.
+        assert (
+            'set forward message of newRule to "a@example.com, b@example.com"'
+            in script
+        )
+
+    def test_create_rule_rejects_empty_name(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="name"):
+            connector.create_rule(
+                name="",
+                conditions=[
+                    {"field": "subject", "operator": "contains", "value": "X"}
+                ],
+                actions={"delete": True},
+            )
+
+    def test_create_rule_rejects_empty_conditions(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="conditions"):
+            connector.create_rule(
+                name="X",
+                conditions=[],
+                actions={"delete": True},
+            )
+
+    def test_create_rule_rejects_empty_actions(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="actions"):
+            connector.create_rule(
+                name="X",
+                conditions=[
+                    {"field": "subject", "operator": "contains", "value": "Y"}
+                ],
+                actions={},
+            )
+
+    def test_create_rule_rejects_invalid_field(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="field"):
+            connector.create_rule(
+                name="X",
+                conditions=[
+                    {"field": "bogus", "operator": "contains", "value": "Y"}
+                ],
+                actions={"delete": True},
+            )
+
+    def test_create_rule_rejects_invalid_operator(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="operator"):
+            connector.create_rule(
+                name="X",
+                conditions=[
+                    {"field": "subject", "operator": "BOGUS", "value": "Y"}
+                ],
+                actions={"delete": True},
+            )
+
+    def test_create_rule_rejects_header_name_field_without_header_name(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="header_name"):
+            connector.create_rule(
+                name="X",
+                conditions=[
+                    {
+                        "field": "header_name",
+                        "operator": "contains",
+                        "value": "v",
+                    }
+                ],
+                actions={"delete": True},
+            )
+
+    def test_create_rule_rejects_invalid_forward_to_email(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="email"):
+            connector.create_rule(
+                name="X",
+                conditions=[
+                    {"field": "subject", "operator": "contains", "value": "Y"}
+                ],
+                actions={"forward_to": ["not-an-email"]},
+            )
+
+    def test_create_rule_rejects_invalid_match_logic(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="match_logic"):
+            connector.create_rule(
+                name="X",
+                conditions=[
+                    {"field": "subject", "operator": "contains", "value": "Y"}
+                ],
+                actions={"delete": True},
+                match_logic="bogus",
+            )
+
+    def test_create_rule_rejects_invalid_flag_color(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError):
+            connector.create_rule(
+                name="X",
+                conditions=[
+                    {"field": "subject", "operator": "contains", "value": "Y"}
+                ],
+                actions={"mark_flagged": True, "flag_color": "neon"},
+            )
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(
         self, mock_run: MagicMock, connector: AppleMailConnector

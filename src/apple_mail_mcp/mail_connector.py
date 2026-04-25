@@ -27,8 +27,10 @@ from .keychain import get_imap_password
 from .utils import (
     applescript_account_clause,
     escape_applescript_string,
+    get_flag_index,
     parse_applescript_json,
     sanitize_input,
+    validate_email,
 )
 
 # Exception classes that trigger AppleScript fallback per the graceful-
@@ -49,6 +51,33 @@ logger = logging.getLogger(__name__)
 # Strict ISO 8601 YYYY-MM-DD — search_messages's date_from/date_to filters
 # reject anything else to prevent AppleScript injection via the date clause.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+# MCP-tool field name → Mail.app AppleScript `rule type` enum identifier.
+# Verified against Mail.app's running rules: 'from header', 'subject header',
+# 'message content' all confirmed live. Other values follow the same naming
+# convention per Mail.app's AppleScript dictionary; verified via integration
+# test on live rule creation.
+_RULE_FIELD_MAP = {
+    "from": "from header",
+    "to": "to header",
+    "subject": "subject header",
+    "body": "message content",
+    "any_recipient": "any recipient",
+    "header_name": "header key",
+}
+
+# MCP-tool operator name → Mail.app AppleScript `qualifier` enum identifier.
+# 'does contain value', 'equal to value', 'begins with value' verified live
+# against the user's existing rules. Others follow Mail.app's documented
+# naming.
+_RULE_OPERATOR_MAP = {
+    "contains": "does contain value",
+    "does_not_contain": "does not contain value",
+    "begins_with": "begins with value",
+    "ends_with": "ends with value",
+    "equals": "equal to value",
+}
 
 
 def _wrap_as_json_script(body: str) -> str:
@@ -277,6 +306,206 @@ class AppleMailConnector:
             f"set enabled of rule {rule_index} to {enabled_str}"
         )
         self._run_applescript(script)
+
+    def _validate_rule_condition(self, cond: dict[str, Any]) -> None:
+        """Validate a single RuleCondition dict.
+
+        Required keys: field (in _RULE_FIELD_MAP), operator (in
+        _RULE_OPERATOR_MAP), value (non-empty str). header_name required
+        iff field == 'header_name'.
+        """
+        if "field" not in cond or cond["field"] not in _RULE_FIELD_MAP:
+            raise ValueError(
+                f"condition.field must be one of {sorted(_RULE_FIELD_MAP)}, "
+                f"got {cond.get('field')!r}"
+            )
+        if (
+            "operator" not in cond
+            or cond["operator"] not in _RULE_OPERATOR_MAP
+        ):
+            raise ValueError(
+                f"condition.operator must be one of "
+                f"{sorted(_RULE_OPERATOR_MAP)}, got {cond.get('operator')!r}"
+            )
+        if not cond.get("value") or not isinstance(cond["value"], str):
+            raise ValueError("condition.value must be a non-empty string")
+        if cond["field"] == "header_name":
+            if not cond.get("header_name"):
+                raise ValueError(
+                    "condition.header_name is required when field is "
+                    "'header_name'"
+                )
+
+    def _validate_rule_actions(self, actions: dict[str, Any]) -> None:
+        """Validate a RuleActions dict has at least one meaningful entry,
+        flag_color (if any) is valid, and forward_to emails are valid."""
+        meaningful_keys = {
+            "move_to", "copy_to", "mark_read", "mark_flagged",
+            "delete", "forward_to",
+        }
+        # Strip falsy bools / empty containers — they're no-ops, not actions.
+        active = {
+            k: v for k, v in actions.items()
+            if k in meaningful_keys and v
+        }
+        if not active:
+            raise ValueError(
+                "actions must include at least one of "
+                f"{sorted(meaningful_keys)} with a truthy value"
+            )
+        if "flag_color" in actions and actions["flag_color"]:
+            # get_flag_index raises ValueError on bad input.
+            get_flag_index(actions["flag_color"])
+        if active.get("forward_to"):
+            for addr in active["forward_to"]:
+                if not isinstance(addr, str) or not validate_email(addr):
+                    raise ValueError(
+                        f"forward_to entries must be valid email "
+                        f"addresses; got {addr!r}"
+                    )
+        for mb_key in ("move_to", "copy_to"):
+            if mb_key in active:
+                ref = active[mb_key]
+                if (
+                    not isinstance(ref, dict)
+                    or not ref.get("account")
+                    or not ref.get("mailbox")
+                ):
+                    raise ValueError(
+                        f"actions.{mb_key} must be a dict with "
+                        f"'account' and 'mailbox' keys, got {ref!r}"
+                    )
+
+    def _build_action_lines(self, actions: dict[str, Any]) -> list[str]:
+        """Translate a validated RuleActions dict into AppleScript lines.
+
+        Each line operates on a variable named ``newRule`` (or ``r`` for
+        update_rule's reuse). Caller picks the target variable name and
+        substitutes.
+        """
+        lines: list[str] = []
+        if actions.get("move_to"):
+            mb_safe = escape_applescript_string(
+                sanitize_input(actions["move_to"]["mailbox"])
+            )
+            acct_clause = applescript_account_clause(
+                actions["move_to"]["account"]
+            )
+            lines.append("set should move message of newRule to true")
+            lines.append(
+                f'set move message of newRule to mailbox "{mb_safe}" '
+                f"of {acct_clause}"
+            )
+        if actions.get("copy_to"):
+            mb_safe = escape_applescript_string(
+                sanitize_input(actions["copy_to"]["mailbox"])
+            )
+            acct_clause = applescript_account_clause(
+                actions["copy_to"]["account"]
+            )
+            lines.append("set should copy message of newRule to true")
+            lines.append(
+                f'set copy message of newRule to mailbox "{mb_safe}" '
+                f"of {acct_clause}"
+            )
+        if actions.get("mark_read"):
+            lines.append("set mark read of newRule to true")
+        if actions.get("mark_flagged"):
+            lines.append("set mark flagged of newRule to true")
+            if actions.get("flag_color"):
+                idx = get_flag_index(actions["flag_color"])
+                lines.append(
+                    f"set mark flag index of newRule to {idx}"
+                )
+        if actions.get("delete"):
+            lines.append("set delete message of newRule to true")
+        if actions.get("forward_to"):
+            recipients = ", ".join(actions["forward_to"])
+            recipients_safe = escape_applescript_string(recipients)
+            lines.append(
+                f'set forward message of newRule to "{recipients_safe}"'
+            )
+        return lines
+
+    def create_rule(
+        self,
+        name: str,
+        conditions: list[dict[str, Any]],
+        actions: dict[str, Any],
+        match_logic: str = "all",
+        enabled: bool = True,
+    ) -> int:
+        """Create a new Mail.app rule. Returns the new rule's 1-based index.
+
+        Args:
+            name: Rule display name.
+            conditions: List of RuleCondition dicts. At least one required.
+            actions: RuleActions dict. At least one action must be set.
+            match_logic: 'all' (AND) or 'any' (OR) across conditions.
+            enabled: Whether the rule is enabled on creation.
+
+        Returns:
+            1-based positional index of the newly-created rule (Mail.app
+            appends new rules to the end, so this equals the new total
+            count of rules).
+
+        Raises:
+            ValueError: If any input fails schema validation.
+        """
+        if not name or not isinstance(name, str):
+            raise ValueError("name must be a non-empty string")
+        if not conditions:
+            raise ValueError("conditions must have at least one entry")
+        if match_logic not in ("all", "any"):
+            raise ValueError(
+                f"match_logic must be 'all' or 'any', got {match_logic!r}"
+            )
+        for cond in conditions:
+            self._validate_rule_condition(cond)
+        self._validate_rule_actions(actions)
+
+        name_safe = escape_applescript_string(sanitize_input(name))
+        all_conditions = "true" if match_logic == "all" else "false"
+        enabled_str = "true" if enabled else "false"
+
+        condition_lines: list[str] = []
+        for cond in conditions:
+            rule_type = _RULE_FIELD_MAP[cond["field"]]
+            qualifier = _RULE_OPERATOR_MAP[cond["operator"]]
+            expr_safe = escape_applescript_string(
+                sanitize_input(cond["value"])
+            )
+            if cond["field"] == "header_name":
+                header_safe = escape_applescript_string(
+                    sanitize_input(cond["header_name"])
+                )
+                condition_lines.append(
+                    f"make new rule condition with properties "
+                    f"{{rule type:{rule_type}, qualifier:{qualifier}, "
+                    f'expression:"{expr_safe}", header:"{header_safe}"}} '
+                    f"at end of rule conditions of newRule"
+                )
+            else:
+                condition_lines.append(
+                    f"make new rule condition with properties "
+                    f"{{rule type:{rule_type}, qualifier:{qualifier}, "
+                    f'expression:"{expr_safe}"}} '
+                    f"at end of rule conditions of newRule"
+                )
+
+        action_lines = self._build_action_lines(actions)
+
+        body = (
+            f'set newRule to make new rule with properties '
+            f'{{name:"{name_safe}"}}\n'
+            f"set all conditions must be met of newRule to {all_conditions}\n"
+            + "\n".join(condition_lines) + "\n"
+            + "\n".join(action_lines) + "\n"
+            f"set enabled of newRule to {enabled_str}\n"
+            f"return (count of rules) as text"
+        )
+        script = f'tell application "Mail"\n{body}\nend tell'
+        return int(self._run_applescript(script))
 
     def _check_supported_actions(self, rule_index: int) -> None:
         """Verify a rule's existing actions are all in our schema.
