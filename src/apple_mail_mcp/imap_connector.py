@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date as _date
+from datetime import datetime as _datetime
 from datetime import timedelta as _timedelta
 from typing import Any
 
@@ -189,7 +190,7 @@ def _envelope_to_dict(
     envelope: Envelope, flags: tuple[bytes, ...]
 ) -> dict[str, Any]:
     date = envelope.date
-    if hasattr(date, "isoformat"):
+    if isinstance(date, _datetime):
         date_str = date.isoformat()
     else:
         date_str = _decode(date)
