@@ -227,6 +227,46 @@ class TestAppleMailConnector:
         assert "|enabled|:(enabled of r)" in script
         assert "|index|:i" in script
 
+    # --- set_rule_enabled ------------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_set_rule_enabled_true_emits_correct_script(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = ""
+        connector.set_rule_enabled(rule_index=2, enabled=True)
+        script = mock_run.call_args[0][0]
+        assert "set enabled of rule 2 to true" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_set_rule_enabled_false_emits_correct_script(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = ""
+        connector.set_rule_enabled(rule_index=3, enabled=False)
+        script = mock_run.call_args[0][0]
+        assert "set enabled of rule 3 to false" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_set_rule_enabled_propagates_rule_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailRuleNotFoundError
+
+        mock_run.side_effect = MailRuleNotFoundError("Can't get rule 99")
+        with pytest.raises(MailRuleNotFoundError):
+            connector.set_rule_enabled(rule_index=99, enabled=True)
+
+    def test_set_rule_enabled_rejects_zero_or_negative_index(
+        self, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailRuleNotFoundError
+
+        with pytest.raises(MailRuleNotFoundError):
+            connector.set_rule_enabled(rule_index=0, enabled=True)
+        with pytest.raises(MailRuleNotFoundError):
+            connector.set_rule_enabled(rule_index=-1, enabled=True)
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(
         self, mock_run: MagicMock, connector: AppleMailConnector

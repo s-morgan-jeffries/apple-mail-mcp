@@ -19,6 +19,8 @@ from .exceptions import (
     MailKeychainEntryNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
+    MailRuleNotFoundError,
+    MailUnsupportedRuleActionError,
 )
 from .imap_connector import ImapConnector
 from .keychain import get_imap_password
@@ -175,6 +177,8 @@ class AppleMailConnector:
                     raise MailMailboxNotFoundError(error_msg)
                 elif "Can't get message" in normalized:
                     raise MailMessageNotFoundError(error_msg)
+                elif "Can't get rule" in normalized:
+                    raise MailRuleNotFoundError(error_msg)
                 else:
                     raise MailAppleScriptError(error_msg)
 
@@ -251,6 +255,28 @@ class AppleMailConnector:
         script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
+
+    def set_rule_enabled(self, rule_index: int, enabled: bool) -> None:
+        """Toggle the enabled state of a rule by 1-based index.
+
+        Args:
+            rule_index: 1-based positional index, as returned by ``list_rules``.
+            enabled: New enabled state.
+
+        Raises:
+            MailRuleNotFoundError: If rule_index is out of range (≤0 or
+                greater than the number of existing rules).
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        enabled_str = "true" if enabled else "false"
+        script = (
+            f'tell application "Mail" to '
+            f"set enabled of rule {rule_index} to {enabled_str}"
+        )
+        self._run_applescript(script)
 
     def list_mailboxes(self, account: str) -> list[dict[str, Any]]:
         """List all mailboxes for an account.
