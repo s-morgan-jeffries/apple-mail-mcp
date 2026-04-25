@@ -1,3 +1,13 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false
+#
+# imapclient ships without a py.typed marker, so Pyright/Pylance can't verify
+# argument types against its public API. Mypy is configured to ignore missing
+# imports for the imapclient package via [[tool.mypy.overrides]] in
+# pyproject.toml; Pyright respects file-level pragmas instead. The three
+# suppressed categories cover the false positives that arise when calling
+# search() / fetch() with list-shaped criteria and reading Envelope/BodyData
+# fields. Suppression is scoped to this file so unrelated type bugs elsewhere
+# in the codebase still surface.
 """IMAPClient wrapper for read operations.
 
 Stateless, per-call connection lifecycle. This module is deliberately
