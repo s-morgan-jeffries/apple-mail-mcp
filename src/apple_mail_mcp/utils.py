@@ -6,6 +6,40 @@ import json
 import re
 from typing import Any
 
+_UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+
+
+def is_account_uuid(value: str) -> bool:
+    """True iff the string matches the standard UUID format Mail.app emits.
+
+    Mail.app account display names are user-chosen strings and won't collide
+    with the 8-4-4-4-12 hex-with-hyphens UUID format.
+    """
+    return bool(_UUID_RE.match(value))
+
+
+def applescript_account_clause(account: str) -> str:
+    """Return an AppleScript object specifier for a Mail.app account.
+
+    Returns ``account id "<uuid>"`` when ``account`` matches a UUID,
+    otherwise ``account "<name>"``. Input is always escaped for safe
+    AppleScript embedding regardless of form.
+
+    Args:
+        account: Either a Mail.app account display name (e.g. "Gmail") or
+            its stable UUID (as returned by ``list_accounts``).
+
+    Returns:
+        The AppleScript fragment that resolves to that account, ready to
+        embed in a tell-block.
+    """
+    safe = escape_applescript_string(sanitize_input(account))
+    if is_account_uuid(account):
+        return f'account id "{safe}"'
+    return f'account "{safe}"'
+
 
 def escape_applescript_string(s: str) -> str:
     """

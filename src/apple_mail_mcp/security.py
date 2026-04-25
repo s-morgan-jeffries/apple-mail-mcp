@@ -4,9 +4,11 @@ Security utilities for Apple Mail MCP.
 
 import logging
 import os
+import subprocess
 import time
 from collections import deque
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 from .utils import validate_email
@@ -269,6 +271,55 @@ def _get_test_account() -> str | None:
     return os.environ.get("MAIL_TEST_ACCOUNT")
 
 
+@lru_cache(maxsize=4)
+def _get_test_account_identifiers(test_account_name: str) -> frozenset[str]:
+    """Return the set of identifiers (name + UUID) that match the test account.
+
+    The test account is configured by name via MAIL_TEST_ACCOUNT, but per #61
+    callers may pass either the name or the UUID to account-gated tools.
+    Returns both so the safety gate accepts either form.
+
+    Cached per process, keyed by the test-account name. Tests can clear the
+    cache with ``_get_test_account_identifiers.cache_clear()``. If the UUID
+    lookup fails (account doesn't exist, AppleScript permission denied),
+    falls back to name-only matching with a warning — degraded mode that
+    still enforces the test-account boundary by name.
+    """
+    identifiers: set[str] = {test_account_name}
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                f'tell application "Mail" to return id of account '
+                f'"{test_account_name}"',
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning(
+            "Test-mode safety gate: failed to resolve UUID for account %r "
+            "(%s); falling back to name-only matching",
+            test_account_name, exc,
+        )
+        return frozenset(identifiers)
+
+    if result.returncode == 0:
+        uuid = result.stdout.strip()
+        if uuid:
+            identifiers.add(uuid)
+    else:
+        logger.warning(
+            "Test-mode safety gate: failed to resolve UUID for account %r "
+            "(exit %d): %s; falling back to name-only matching",
+            test_account_name, result.returncode, result.stderr.strip(),
+        )
+    return frozenset(identifiers)
+
+
 def _is_reserved_test_domain(email: str) -> bool:
     """True if email's domain is an RFC 2606 reserved test domain."""
     if "@" not in email:
@@ -321,6 +372,7 @@ def check_test_mode_safety(
         )
 
     # Account-gated operations: verify target account matches MAIL_TEST_ACCOUNT
+    # by either name or UUID (per #61, account-gated tools accept both forms).
     if operation in ACCOUNT_GATED_OPERATIONS and account is not None:
         test_account = _get_test_account()
         if test_account is None:
@@ -328,7 +380,7 @@ def check_test_mode_safety(
                 operation,
                 "MAIL_TEST_MODE is set but MAIL_TEST_ACCOUNT is not",
             )
-        if account != test_account:
+        if account not in _get_test_account_identifiers(test_account):
             return _safety_error(
                 operation,
                 f"Test mode: account '{account}' does not match "

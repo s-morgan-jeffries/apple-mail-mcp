@@ -110,6 +110,35 @@ class TestMoveMessages:
                 account="Gmail"
             )
 
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_with_uuid_uses_account_id_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        uuid = "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        mock_run.return_value = "1"
+        connector.move_messages(
+            message_ids=["12345"],
+            destination_mailbox="Archive",
+            account=uuid,
+        )
+        script = mock_run.call_args[0][0]
+        assert f'set accountRef to account id "{uuid}"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_gmail_mode_with_uuid_uses_account_id_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        uuid = "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        mock_run.return_value = "1"
+        connector.move_messages(
+            message_ids=["12345"],
+            destination_mailbox="Archive",
+            account=uuid,
+            gmail_mode=True,
+        )
+        script = mock_run.call_args[0][0]
+        assert f'set accountRef to account id "{uuid}"' in script
+
 
 class TestFlagMessage:
     """Tests for flagging messages."""
@@ -245,6 +274,16 @@ class TestCreateMailbox:
                 account="Gmail",
                 name="INBOX"  # Already exists
             )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_create_mailbox_with_uuid_uses_account_id_clause(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        uuid = "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        mock_run.return_value = "success"
+        connector.create_mailbox(account=uuid, name="ProjectX")
+        script = mock_run.call_args[0][0]
+        assert f'set accountRef to account id "{uuid}"' in script
 
     def test_create_mailbox_invalid_name(self, connector: AppleMailConnector) -> None:
         """Test error with invalid mailbox name."""

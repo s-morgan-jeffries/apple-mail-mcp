@@ -22,7 +22,12 @@ from .exceptions import (
 )
 from .imap_connector import ImapConnector
 from .keychain import get_imap_password
-from .utils import escape_applescript_string, parse_applescript_json, sanitize_input
+from .utils import (
+    applescript_account_clause,
+    escape_applescript_string,
+    parse_applescript_json,
+    sanitize_input,
+)
 
 # Exception classes that trigger AppleScript fallback per the graceful-
 # degradation invariants (docs/research/imap-auth-options-decision.md).
@@ -251,11 +256,11 @@ class AppleMailConnector:
         Raises:
             MailAccountNotFoundError: If account doesn't exist.
         """
-        account_safe = escape_applescript_string(sanitize_input(account))
+        account_clause = applescript_account_clause(account)
 
         tell_body = f'''
         tell application "Mail"
-            set accountRef to account "{account_safe}"
+            set accountRef to {account_clause}
             set resultData to {{}}
 
             repeat with mb in mailboxes of accountRef
@@ -293,10 +298,10 @@ class AppleMailConnector:
         Raises:
             MailAccountNotFoundError: If the account doesn't exist.
         """
-        account_safe = escape_applescript_string(sanitize_input(account))
+        account_clause = applescript_account_clause(account)
         tell_body = f'''
         tell application "Mail"
-            set acctRef to account "{account_safe}"
+            set acctRef to {account_clause}
             set acctEmails to email addresses of acctRef
             if acctEmails is missing value then set acctEmails to {{}}
             set resultData to {{|host|:(server name of acctRef), |port|:(port of acctRef), |user_name|:(user name of acctRef), |email_addresses|:acctEmails}}
@@ -447,7 +452,7 @@ class AppleMailConnector:
             MailAccountNotFoundError: If account doesn't exist.
             MailMailboxNotFoundError: If mailbox doesn't exist.
         """
-        account_safe = escape_applescript_string(sanitize_input(account))
+        account_clause = applescript_account_clause(account)
         mailbox_safe = escape_applescript_string(sanitize_input(mailbox))
 
         # Build whose clause (server-side filters)
@@ -513,7 +518,7 @@ class AppleMailConnector:
 
         tell_body = f'''
         tell application "Mail"
-            set accountRef to account "{account_safe}"
+            set accountRef to {account_clause}
             set mailboxRef to mailbox "{mailbox_safe}" of accountRef
             set allMatches to messages of mailboxRef{whose_part}
             set totalCount to count of allMatches
@@ -1207,7 +1212,7 @@ class AppleMailConnector:
 
         from .utils import sanitize_input
 
-        account_safe = escape_applescript_string(sanitize_input(account))
+        account_clause = applescript_account_clause(account)
         mailbox_safe = escape_applescript_string(sanitize_input(destination_mailbox))
         id_list = ", ".join(message_ids)
 
@@ -1215,7 +1220,7 @@ class AppleMailConnector:
             # Gmail requires copy + delete approach to properly handle labels
             script = f"""
             tell application "Mail"
-                set accountRef to account "{account_safe}"
+                set accountRef to {account_clause}
                 set destMailbox to mailbox "{mailbox_safe}" of accountRef
                 set idList to {{{id_list}}}
                 set moveCount to 0
@@ -1240,7 +1245,7 @@ class AppleMailConnector:
             # Standard IMAP move
             script = f"""
             tell application "Mail"
-                set accountRef to account "{account_safe}"
+                set accountRef to {account_clause}
                 set destMailbox to mailbox "{mailbox_safe}" of accountRef
                 set idList to {{{id_list}}}
                 set moveCount to 0
@@ -1348,14 +1353,14 @@ class AppleMailConnector:
         if not sanitized_name:
             raise ValueError(f"Invalid mailbox name: {name}")
 
-        account_safe = escape_applescript_string(sanitize_input(account))
+        account_clause = applescript_account_clause(account)
         name_safe = escape_applescript_string(sanitized_name)
 
         if parent_mailbox:
             parent_safe = escape_applescript_string(sanitize_input(parent_mailbox))
             script = f"""
             tell application "Mail"
-                set accountRef to account "{account_safe}"
+                set accountRef to {account_clause}
                 set parentMailbox to mailbox "{parent_safe}" of accountRef
                 make new mailbox at parentMailbox with properties {{name:"{name_safe}"}}
                 return "success"
@@ -1364,7 +1369,7 @@ class AppleMailConnector:
         else:
             script = f"""
             tell application "Mail"
-                set accountRef to account "{account_safe}"
+                set accountRef to {account_clause}
                 make new mailbox at accountRef with properties {{name:"{name_safe}"}}
                 return "success"
             end tell

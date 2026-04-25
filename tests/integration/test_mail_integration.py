@@ -51,6 +51,32 @@ class TestMailIntegration:
         # Should have at least INBOX
         assert len(result) > 0
 
+    def test_list_mailboxes_by_uuid(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """#61: account-gated tools also accept the account UUID.
+
+        Discovers the test account's UUID at runtime via list_accounts,
+        then calls list_mailboxes with the UUID. Results must match
+        calling with the name.
+        """
+        accounts = connector.list_accounts()
+        match = next((a for a in accounts if a["name"] == test_account), None)
+        assert match is not None, f"Test account {test_account!r} not found"
+        uuid = match["id"]
+
+        # Sanity check: it really is a UUID-shaped string.
+        from apple_mail_mcp.utils import is_account_uuid
+        assert is_account_uuid(uuid), f"Expected UUID, got {uuid!r}"
+
+        by_uuid = connector.list_mailboxes(uuid)
+        by_name = connector.list_mailboxes(test_account)
+
+        assert isinstance(by_uuid, list)
+        # Results may not match in order, but both lists should have the same
+        # set of mailbox names.
+        assert {m["name"] for m in by_uuid} == {m["name"] for m in by_name}
+
     def test_search_messages(self, connector: AppleMailConnector, test_account: str) -> None:
         """Test searching messages in real mailbox."""
         result = connector.search_messages(

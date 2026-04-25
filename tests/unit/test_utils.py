@@ -6,8 +6,10 @@ import pytest
 
 from apple_mail_mcp.exceptions import MailAppleScriptError
 from apple_mail_mcp.utils import (
+    applescript_account_clause,
     escape_applescript_string,
     format_applescript_list,
+    is_account_uuid,
     normalize_subject,
     parse_applescript_json,
     parse_applescript_list,
@@ -317,3 +319,52 @@ class TestWalkThreadGraph:
         )
         ids = {c["id"] for c in accepted}
         assert ids == {"a", "b"}
+
+
+class TestIsAccountUUID:
+    @pytest.mark.parametrize("value", [
+        "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5",  # uppercase
+        "dc5ac137-2f7a-4299-b3d0-4d3e06c18dd5",  # lowercase
+        "Dc5Ac137-2F7a-4299-B3d0-4D3e06C18DD5",  # mixed case
+        "00000000-0000-0000-0000-000000000000",  # all zeros
+        "ffffffff-ffff-ffff-ffff-ffffffffffff",  # all f
+    ])
+    def test_recognizes_uuid_formats(self, value: str) -> None:
+        assert is_account_uuid(value) is True
+
+    @pytest.mark.parametrize("value", [
+        "iCloud", "Gmail", "Yahoo!", "Work Account",
+        "MobileMe", "",
+        "DC5AC137-2F7A-4299-B3D0",  # too short
+        "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5-extra",  # too long
+        "DC5AC137_2F7A_4299_B3D0_4D3E06C18DD5",  # underscores not dashes
+        "GHIJKLMN-2F7A-4299-B3D0-4D3E06C18DD5",  # non-hex chars
+        " DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5",  # leading whitespace
+        "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5 ",  # trailing whitespace
+    ])
+    def test_rejects_non_uuid_strings(self, value: str) -> None:
+        assert is_account_uuid(value) is False
+
+
+class TestAppleScriptAccountClause:
+    def test_uuid_input_emits_account_id_clause(self) -> None:
+        result = applescript_account_clause(
+            "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        )
+        assert result == 'account id "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"'
+
+    def test_name_input_emits_account_clause(self) -> None:
+        assert applescript_account_clause("iCloud") == 'account "iCloud"'
+
+    def test_name_with_quote_is_escaped(self) -> None:
+        result = applescript_account_clause('Weird "Name" Acct')
+        assert '\\"Name\\"' in result
+        assert result.startswith('account "')
+        assert not result.startswith('account id')
+
+    def test_lowercase_uuid_works(self) -> None:
+        # Real Mail.app emits uppercase, but accepting either is harmless.
+        result = applescript_account_clause(
+            "dc5ac137-2f7a-4299-b3d0-4d3e06c18dd5"
+        )
+        assert result == 'account id "dc5ac137-2f7a-4299-b3d0-4d3e06c18dd5"'

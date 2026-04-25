@@ -192,7 +192,9 @@ def list_mailboxes(account: str) -> dict[str, Any]:
     List all mailboxes for an account.
 
     Args:
-        account: Account name (e.g., "Gmail", "iCloud")
+        account: Mail.app account display name (e.g., "Gmail", "iCloud") or
+            UUID (from list_accounts). Names are convenient but unstable
+            across renames; UUIDs are stable.
 
     Returns:
         Dictionary containing mailboxes list
@@ -259,7 +261,9 @@ def search_messages(
     Search for messages matching criteria.
 
     Args:
-        account: Account name (e.g., "Gmail", "iCloud").
+        account: Mail.app account display name (e.g., "Gmail", "iCloud") or
+            UUID (from list_accounts). Names are convenient but unstable
+            across renames; UUIDs are stable.
         mailbox: Mailbox name (default: "INBOX").
         sender_contains: Filter by sender email/domain substring.
         subject_contains: Filter by subject keywords substring.
@@ -938,7 +942,9 @@ def move_messages(
     Args:
         message_ids: List of message IDs to move
         destination_mailbox: Name of destination mailbox (use "/" for nested: "Projects/Client Work")
-        account: Account name containing the messages
+        account: Mail.app account display name (e.g., "Gmail", "iCloud") or
+            UUID (from list_accounts) containing the messages. Names are
+            convenient but unstable across renames; UUIDs are stable.
         gmail_mode: Use Gmail-specific move handling (copy + delete) for label-based systems
 
     Returns:
@@ -1089,7 +1095,9 @@ def create_mailbox(
     Create a new mailbox/folder.
 
     Args:
-        account: Account name to create mailbox in
+        account: Mail.app account display name (e.g., "Gmail", "iCloud") or
+            UUID (from list_accounts) to create the mailbox in. Names are
+            convenient but unstable across renames; UUIDs are stable.
         name: Name of the new mailbox
         parent_mailbox: Optional parent mailbox for nesting (None = top-level)
 

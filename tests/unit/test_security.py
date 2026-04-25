@@ -10,6 +10,7 @@ from apple_mail_mcp.security import (
     TIER_LIMITS,
     OperationLogger,
     RateLimiter,
+    _get_test_account_identifiers,
     _is_reserved_test_domain,
     check_rate_limit,
     check_test_mode_safety,
@@ -281,6 +282,9 @@ class TestCheckTestModeSafety:
 
     def setup_method(self) -> None:
         operation_logger.operations.clear()
+        # Clear the per-process UUID-resolution cache so tests don't see
+        # cached identifiers from other tests' mocked subprocess returns.
+        _get_test_account_identifiers.cache_clear()
 
     def test_no_test_mode_returns_none(self, monkeypatch: Any) -> None:
         monkeypatch.delenv("MAIL_TEST_MODE", raising=False)
@@ -316,6 +320,59 @@ class TestCheckTestModeSafety:
         assert result["error_type"] == "safety_violation"
         assert "Gmail" in result["error"]
         assert "TestAccount" in result["error"]
+
+    @patch("apple_mail_mcp.security.subprocess.run")
+    def test_uuid_matching_test_account_returns_none(
+        self, mock_run: Any, monkeypatch: Any
+    ) -> None:
+        """A UUID that resolves to MAIL_TEST_ACCOUNT must be allowed."""
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+        uuid = "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"
+        mock_run.return_value = type(
+            "Result", (), {"returncode": 0, "stdout": uuid + "\n", "stderr": ""}
+        )()
+
+        assert check_test_mode_safety("search_messages", account=uuid) is None
+
+    @patch("apple_mail_mcp.security.subprocess.run")
+    def test_unrelated_uuid_returns_error(
+        self, mock_run: Any, monkeypatch: Any
+    ) -> None:
+        """A UUID that doesn't match the test account's UUID is rejected."""
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+        test_uuid = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+        wrong_uuid = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
+        mock_run.return_value = type(
+            "Result", (), {"returncode": 0, "stdout": test_uuid, "stderr": ""}
+        )()
+
+        result = check_test_mode_safety("search_messages", account=wrong_uuid)
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+
+    @patch("apple_mail_mcp.security.subprocess.run")
+    def test_uuid_lookup_failure_falls_back_to_name_only(
+        self, mock_run: Any, monkeypatch: Any
+    ) -> None:
+        """When UUID lookup fails, name-only matching still enforces the gate."""
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+        # Subprocess returns nonzero — account doesn't exist or AS denied.
+        mock_run.return_value = type(
+            "Result", (), {"returncode": 1, "stdout": "", "stderr": "no such account"}
+        )()
+
+        # Name still allowed.
+        assert check_test_mode_safety("search_messages", account="TestAccount") is None
+        # A random UUID must still be rejected.
+        result = check_test_mode_safety(
+            "search_messages",
+            account="DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5",
+        )
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
 
     def test_send_all_reserved_recipients_ok(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("MAIL_TEST_MODE", "true")
