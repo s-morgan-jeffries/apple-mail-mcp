@@ -318,11 +318,13 @@ class ImapConnector:
             mailboxes = client.list_folders()
             collected: dict[str, dict[str, Any]] = {}
 
-            for entry in mailboxes:
-                # list_folders yields (flags, delimiter, name) tuples.
-                mailbox_name = entry[2] if len(entry) >= 3 else entry[-1]
-                if isinstance(mailbox_name, bytes):
-                    mailbox_name = mailbox_name.decode("utf-8", errors="replace")
+            for _flags, _delimiter, raw_name in mailboxes:
+                # imapclient returns names as str when its decoder succeeds,
+                # bytes/bytearray on failure. Coerce to str either way.
+                if isinstance(raw_name, (bytes, bytearray)):
+                    mailbox_name = raw_name.decode("utf-8", errors="replace")
+                else:
+                    mailbox_name = raw_name
 
                 try:
                     client.select_folder(mailbox_name, readonly=True)
