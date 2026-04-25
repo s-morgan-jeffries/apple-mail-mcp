@@ -76,3 +76,20 @@ class MailKeychainAccessDeniedError(MailKeychainError):
     """
 
     pass
+
+
+class MailRuleNotFoundError(MailError):
+    """Rule index is out of range — no such rule exists in Mail.app."""
+
+    pass
+
+
+class MailUnsupportedRuleActionError(MailError):
+    """update_rule was called on a rule whose existing actions include
+    one that's not modeled in our schema (e.g. run-AppleScript,
+    redirect, reply, play sound). Read access via list_rules is
+    unaffected; only mutating an existing rule with these actions is
+    refused.
+    """
+
+    pass

@@ -168,13 +168,13 @@ class TestAppleMailConnector:
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         mock_run.return_value = (
-            '[{"name":"News From Apple","enabled":false},'
-            '{"name":"Junk filter","enabled":true}]'
+            '[{"index":1,"name":"News From Apple","enabled":false},'
+            '{"index":2,"name":"Junk filter","enabled":true}]'
         )
         result = connector.list_rules()
         assert result == [
-            {"name": "News From Apple", "enabled": False},
-            {"name": "Junk filter", "enabled": True},
+            {"index": 1, "name": "News From Apple", "enabled": False},
+            {"index": 2, "name": "Junk filter", "enabled": True},
         ]
 
     @patch.object(AppleMailConnector, "_run_applescript")
@@ -189,15 +189,31 @@ class TestAppleMailConnector:
     def test_list_rules_allows_duplicate_names(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Mail allows multiple rules with the same name — connector returns both."""
+        """Mail allows multiple rules with the same name — connector returns both
+        with distinct positional indices."""
         mock_run.return_value = (
-            '[{"name":"Send to OmniFocus","enabled":false},'
-            '{"name":"Send to OmniFocus","enabled":true}]'
+            '[{"index":3,"name":"Send to OmniFocus","enabled":false},'
+            '{"index":4,"name":"Send to OmniFocus","enabled":true}]'
         )
         result = connector.list_rules()
         assert len(result) == 2
         assert result[0]["name"] == result[1]["name"]
         assert result[0]["enabled"] != result[1]["enabled"]
+        # The duplicate-name disambiguator: the index field.
+        assert result[0]["index"] != result[1]["index"]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_rules_script_emits_one_based_index(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Per #63, list_rules' return shape must include a 1-based index
+        matching Mail.app's AppleScript ``rule N`` reference."""
+        mock_run.return_value = "[]"
+        connector.list_rules()
+        script = mock_run.call_args[0][0]
+        # Iterates by index, not by reference, so the loop variable is the index.
+        assert "repeat with i from 1 to ruleCount" in script
+        assert "|index|:i" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_rules_script_quotes_keys(
@@ -209,6 +225,7 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         assert "|name|:(name of r)" in script
         assert "|enabled|:(enabled of r)" in script
+        assert "|index|:i" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(

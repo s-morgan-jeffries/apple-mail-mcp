@@ -222,19 +222,27 @@ class AppleMailConnector:
 
         Returns:
             List of rule dicts with keys:
-              - name: rule display name (NOT guaranteed unique — Mail allows duplicates)
-              - enabled: whether the rule is currently enabled
+              - index: 1-based positional index, matching Mail.app's
+                AppleScript ``rule N`` reference. Stable within a single
+                snapshot; can change if the user reorders rules.
+              - name: rule display name (NOT guaranteed unique — Mail
+                allows duplicates).
+              - enabled: whether the rule is currently enabled.
 
         Note:
-            Mail.app does not expose a stable rule id via AppleScript, so rules
-            can only be addressed positionally or by name (with duplicate-name
-            ambiguity). Read-only for now; see the CRUD follow-up issue.
+            Mail.app does not expose a stable rule id via AppleScript;
+            ``index`` is the canonical handle for downstream mutation tools
+            (set_rule_enabled / delete_rule / update_rule). Callers that
+            care about reorder-stability should call ``list_rules`` again
+            immediately before each mutation.
         """
         tell_body = """
         tell application "Mail"
             set resultData to {}
-            repeat with r in rules
-                set ruleRecord to {|name|:(name of r), |enabled|:(enabled of r)}
+            set ruleCount to count of rules
+            repeat with i from 1 to ruleCount
+                set r to rule i
+                set ruleRecord to {|index|:i, |name|:(name of r), |enabled|:(enabled of r)}
                 set end of resultData to ruleRecord
             end repeat
         end tell
