@@ -20,15 +20,29 @@ newlines in the body are preserved.
 
 from __future__ import annotations
 
+import os
 import re
 import string
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .exceptions import (
     MailTemplateInvalidFormatError,
+    MailTemplateInvalidNameError,
     MailTemplateMissingVariableError,
+    MailTemplateNotFoundError,
 )
+
+# Template name validation: alphanumerics, underscore, hyphen; 1-64 chars.
+# Path-traversal protection — names are also used as filename stems, so
+# anything that would let a name escape the templates directory must be
+# rejected here.
+_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+# File extension. Markdown for syntax highlighting in editors; the
+# parser doesn't care.
+_EXT = ".md"
 
 # Identifiers that count as placeholders. Must be a valid Python
 # identifier (letter/underscore start, then alphanumerics/underscores).
@@ -161,3 +175,74 @@ def serialize_template(t: Template) -> str:
     if t.subject is not None:
         header_block = f"subject: {t.subject}\n"
     return f"{header_block}\n{t.body}"
+
+
+def _validate_name(name: str) -> None:
+    if not isinstance(name, str) or not _NAME_RE.match(name):
+        raise MailTemplateInvalidNameError(
+            f"template name {name!r} must match {_NAME_RE.pattern}"
+        )
+
+
+def default_root() -> Path:
+    """Default templates directory, honoring APPLE_MAIL_MCP_HOME."""
+    home_override = os.environ.get("APPLE_MAIL_MCP_HOME")
+    base = Path(home_override) if home_override else Path.home() / ".apple_mail_mcp"
+    return base / "templates"
+
+
+class TemplateStore:
+    """File-backed template store. One file per template at
+    ``<root>/<name>.md``."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = Path(root) if root is not None else default_root()
+
+    def _path_for(self, name: str) -> Path:
+        _validate_name(name)
+        return self.root / f"{name}{_EXT}"
+
+    def list(self) -> list[Template]:
+        """All templates, sorted by name. Missing directory returns
+        empty list. Files that fail to parse are skipped silently
+        here — call get() to surface format errors per-template."""
+        if not self.root.is_dir():
+            return []
+        out: list[Template] = []
+        for entry in sorted(self.root.iterdir(), key=lambda p: p.name):
+            if entry.suffix != _EXT or not entry.is_file():
+                continue
+            name = entry.stem
+            if not _NAME_RE.match(name):
+                continue
+            try:
+                out.append(self.get(name))
+            except MailTemplateInvalidFormatError:
+                continue
+        return out
+
+    def get(self, name: str) -> Template:
+        path = self._path_for(name)
+        if not path.is_file():
+            raise MailTemplateNotFoundError(
+                f"no template named {name!r}"
+            )
+        text = path.read_text(encoding="utf-8")
+        return parse_template_file(text, name=name)
+
+    def save(self, template: Template) -> bool:
+        """Write template to disk. Returns True if newly created,
+        False if it overwrote an existing template."""
+        path = self._path_for(template.name)
+        existed = path.is_file()
+        self.root.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialize_template(template), encoding="utf-8")
+        return not existed
+
+    def delete(self, name: str) -> None:
+        path = self._path_for(name)
+        if not path.is_file():
+            raise MailTemplateNotFoundError(
+                f"no template named {name!r}"
+            )
+        path.unlink()
