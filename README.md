@@ -8,11 +8,15 @@ An MCP server that provides programmatic access to Apple Mail, enabling AI assis
 
 > ⚠️ **Pre-1.0 — expect breaking changes.** The MCP tool surface (tool names, parameters, return shapes) is still evolving as the project matures. Pin to a specific version (for example, `apple-mail-mcp==0.5.0`) and review the [CHANGELOG](CHANGELOG.md) before upgrading. The aim is to reach 1.0 once the v0.6.0 polish work lands.
 
-## Tools (14)
+## Tools (26)
 
 **Core:** list_mailboxes, search_messages, get_message, send_email, mark_as_read
 **Attachments & Management:** send_email_with_attachments, get_attachments, save_attachments, move_messages, flag_message, create_mailbox, delete_messages
 **Reply/Forward:** reply_to_message, forward_message
+**Discovery & Rules:** list_accounts, list_rules, get_thread, set_rule_enabled, create_rule, update_rule, delete_rule
+**Templates:** list_templates, get_template, save_template, delete_template, render_template
+
+See [docs/reference/TOOLS.md](docs/reference/TOOLS.md) for full parameter and return-shape documentation.
 
 ## Prerequisites
 
