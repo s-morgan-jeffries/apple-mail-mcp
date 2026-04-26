@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-26
+
+Major minor release. Fifteen new MCP tools across four feature areas (account discovery, rule management, email templates, IMAP-backed performance), several long-standing AppleScript-injection bugs closed, and contributor-experience tightening prompted by an honest look at how earlier external PRs got handled. The README, CONTRIBUTING.md, and `.github/PULL_REQUEST_TEMPLATE.md` were all reworked to make the project safer and more welcoming to contribute to.
+
+### Added
+
+**Rule CRUD (#63):** `set_rule_enabled`, `create_rule`, `update_rule`, `delete_rule`. Addresses rules by 1-based positional index (rules have no stable id in Mail.app's AppleScript interface). Medium-tier schema: 6 condition fields × 5 operators, AND/OR match logic, 7 actions. Full-replacement semantics for `actions`; condition-replacement is refused with a typed error due to a recursion bug in Mail.app on macOS Tahoe (`-[MFMessageRule(Applescript) removeFromCriteriaAtIndex:]`) that crashes Mail on any condition-deletion path. (#84)
+
+**Email templates (#30):** `list_templates`, `get_template`, `save_template`, `delete_template`, `render_template`. File-per-template storage at `~/.apple_mail_mcp/templates/<name>.md` (overridable via `APPLE_MAIL_MCP_HOME`). Simple `{placeholder}` substitution with reply-context auto-fills (`recipient_name`, `recipient_email`, `original_subject`, `today`). Render-only API — caller passes the result to existing `reply_to_message`/`forward_message`/`send_email`. First persistent-state feature in the project; the `~/.apple_mail_mcp/` convention is documented in CLAUDE.md. (#85)
+
+**Discovery & threads:**
+- `list_accounts` returns each account's id (UUID), display name, email addresses, type, and enabled state (#62, closes #26)
+- `list_rules` lists Mail.app rules with index, name, and enabled state (#64, closes #27)
+- `get_thread` reconstructs conversations using IMAP THREAD when available, falling back to AppleScript header-based reconstruction (#67, #81; closes #29 and #66)
+- `search_messages` gains 4 new filters: `is_flagged`, `date_from`, `date_to`, `has_attachment` (#65, closes #28)
+
+**IMAP-backed performance:**
+- New `imap_connector.py` and `keychain.py` modules. When a Keychain entry exists for an account, search and thread tools transparently use IMAP for server-side execution (~1s vs 1-5s); on any IMAP failure they silently fall back to AppleScript with no functional loss. (#78, #79; closes #40 and #41)
+- IMAP graceful-degradation invariants documented (#71)
+- IMAP auth path decision documented after Keychain-spike findings (#69, #70; closes #39 and #68)
+
+**Account-id (UUID) acceptance:** Account-gated tools now accept either the display name or the stable account UUID (returned by `list_accounts`). Names remain valid for convenience; UUIDs survive renames. (#82, closes #61)
+
+**Documentation & contributor experience:**
+- `docs/guides/SECURITY_CHECKLIST.md` unifies security guidance previously scattered across CLAUDE.md (#93, closes #87)
+- CONTRIBUTING.md adds an acknowledgment to early contributors whose PRs were closed without comment, plus issue-first workflow guidance and granular test requirements (#93, closes #87)
+- PR template surfaces linked-issue and tests-added checks as explicit fields (#95, closes #88)
+- README adds a pre-1.0 warning recommending version pinning (#96, closes #89)
+- Tools count in README and CLAUDE.md brought current (14 → 26)
+
+**Tooling:**
+- `/merge-and-status` slash command now surfaces open PRs from external contributors so they don't sit unreviewed (#94, closes #90)
+
+### Fixed
+
+- **AppleScript injection in 6 connector methods.** `mark_as_read`, `move_messages`, `flag_message`, `delete_messages`, `reply_to_message`, and `forward_message` interpolated raw message IDs into AppleScript without escaping. Each ID is now individually sanitized + escaped + quoted. Original report by [@martparve](https://github.com/martparve) in #34, with regression test guards added in this release.
+- **Crashes on UUID-style message IDs.** `get_message`, `get_attachments`, `_resolve_thread_anchor_applescript`, and `save_attachments` interpolated escaped IDs without surrounding quotes; AppleScript then parsed dashes/dots/`@` in iCloud-format IDs as syntax tokens and errored. Wrapped the escaped value in literal quotes everywhere. (#34, closes #86)
+- Pyright false positives for `imapclient` calls (#83)
+
+### Changed
+
+- GitHub Actions: `actions/checkout` 4 → 6, `astral-sh/setup-uv` 6 → 7 (#13, #14)
+- Coverage now 92% (was 95% in v0.4.1); new connector and template code accounts for the small drop. Floor remains 90%.
+
 ## [0.4.1] - 2026-04-19
 
 Patch release: dep hygiene and v0.4.0 follow-ups. Four connector bugs that unit tests couldn't catch were surfaced by running the three new integration tests against real Mail.app.

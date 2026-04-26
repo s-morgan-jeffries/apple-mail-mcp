@@ -25,23 +25,37 @@ from mcp.client.stdio import stdio_client
 pytestmark = pytest.mark.e2e
 
 EXPECTED_TOOLS = {
+    # Discovery
     "list_accounts",
-    "list_rules",
     "list_mailboxes",
+    "list_rules",
     "search_messages",
     "get_message",
     "get_thread",
-    "send_email",
-    "mark_as_read",
-    "send_email_with_attachments",
     "get_attachments",
+    # Send / reply / forward
+    "send_email",
+    "send_email_with_attachments",
+    "reply_to_message",
+    "forward_message",
+    # Mutations
+    "mark_as_read",
     "save_attachments",
     "move_messages",
     "flag_message",
     "create_mailbox",
     "delete_messages",
-    "reply_to_message",
-    "forward_message",
+    # Rule CRUD (#63)
+    "set_rule_enabled",
+    "create_rule",
+    "update_rule",
+    "delete_rule",
+    # Templates (#30)
+    "list_templates",
+    "get_template",
+    "save_template",
+    "delete_template",
+    "render_template",
 }
 
 # Per #50 acceptance: test must complete within 15 seconds.
