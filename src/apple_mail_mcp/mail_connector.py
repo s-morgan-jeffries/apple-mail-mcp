@@ -1036,7 +1036,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         {content_clause}
 
                         set resultData to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent}}
@@ -1159,8 +1159,11 @@ class AppleMailConnector:
 
         status = "true" if read else "false"
 
-        # Build list of IDs
-        id_list = ", ".join(message_ids)
+        # Build list of IDs (sanitize and escape each)
+        id_list = ", ".join(
+            f'"{escape_applescript_string(sanitize_input(mid))}"'
+            for mid in message_ids
+        )
 
         script = f"""
         tell application "Mail"
@@ -1308,7 +1311,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         set attList to mail attachments of msg
 
                         set resultData to {{}}
@@ -1436,7 +1439,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         set anchorInReplyTo to ""
                         set anchorRefs to ""
                         try
@@ -1645,7 +1648,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         set attList to {index_filter} mail attachments of msg
                         set saveCount to 0
 
@@ -1699,7 +1702,10 @@ class AppleMailConnector:
 
         account_clause = applescript_account_clause(account)
         mailbox_safe = escape_applescript_string(sanitize_input(destination_mailbox))
-        id_list = ", ".join(message_ids)
+        id_list = ", ".join(
+            f'"{escape_applescript_string(sanitize_input(mid))}"'
+            for mid in message_ids
+        )
 
         if gmail_mode:
             # Gmail requires copy + delete approach to properly handle labels
@@ -1782,7 +1788,10 @@ class AppleMailConnector:
 
         flag_index = get_flag_index(flag_color)
         flagged_status = "true" if flag_color != "none" else "false"
-        id_list = ", ".join(message_ids)
+        id_list = ", ".join(
+            f'"{escape_applescript_string(sanitize_input(mid))}"'
+            for mid in message_ids
+        )
 
         script = f"""
         tell application "Mail"
@@ -1893,7 +1902,10 @@ class AppleMailConnector:
                 "Maximum is 100 without skip_bulk_check=True"
             )
 
-        id_list = ", ".join(message_ids)
+        id_list = ", ".join(
+            f'"{escape_applescript_string(sanitize_input(mid))}"'
+            for mid in message_ids
+        )
 
         if permanent:
             # Permanent delete (not recommended, requires extra caution)
@@ -1967,6 +1979,7 @@ class AppleMailConnector:
         """
         from .utils import sanitize_input
 
+        message_id_safe = escape_applescript_string(sanitize_input(message_id))
         body_safe = escape_applescript_string(sanitize_input(body))
         reply_type = "reply to all" if reply_all else "reply"
 
@@ -1974,12 +1987,12 @@ class AppleMailConnector:
         # We'll create a reply and set its content
         script = f"""
         tell application "Mail"
-            set idList to {{"{message_id}"}}
+            set idList to {{"{message_id_safe}"}}
 
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set origMsg to first message of mb whose id is "{message_id}"
+                        set origMsg to first message of mb whose id is "{message_id_safe}"
 
                         -- Create reply message
                         set replyMsg to {reply_type} origMsg
@@ -2052,6 +2065,7 @@ class AppleMailConnector:
                 if not validate_email(email):
                     raise ValueError(f"Invalid BCC email address: {email}")
 
+        message_id_safe = escape_applescript_string(sanitize_input(message_id))
         body_safe = escape_applescript_string(sanitize_input(body))
         to_list = format_applescript_list(to)
         cc_list = format_applescript_list(cc) if cc else '""'
@@ -2062,7 +2076,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set origMsg to first message of mb whose id is "{message_id}"
+                        set origMsg to first message of mb whose id is "{message_id_safe}"
 
                         -- Create forward message
                         set fwdMsg to forward origMsg
