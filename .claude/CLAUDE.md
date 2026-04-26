@@ -23,12 +23,13 @@ make coverage              # Coverage report
 
 **Running the server:** `uv run python -m apple_mail_mcp.server` or via Claude Desktop config.
 
-## API Surface (17 MCP tools)
+## API Surface (26 MCP tools)
 
 **Core (Phase 1):** list_mailboxes, search_messages, get_message, send_email, mark_as_read
 **Attachments & Management (Phase 2):** send_email_with_attachments, get_attachments, save_attachments, move_messages, flag_message, create_mailbox, delete_messages
 **Reply/Forward (Phase 3):** reply_to_message, forward_message
-**Discovery (Phase 4):** list_accounts, list_rules, get_thread
+**Discovery & Rules (Phase 4):** list_accounts, list_rules, get_thread, set_rule_enabled, create_rule, update_rule, delete_rule
+**Templates (Phase 4 / v0.5.0):** list_templates, get_template, save_template, delete_template, render_template
 
 ## Core Principles
 
@@ -60,6 +61,13 @@ make coverage              # Coverage report
 - Send: ~1-2s
 - Read: <1s per message
 - Bulk operations capped at 100 items
+
+## User Data on Disk
+
+- All persistent user data lives under `~/.apple_mail_mcp/`. Override the location with `APPLE_MAIL_MCP_HOME=/some/path` (the subdirectory layout is appended automatically).
+- Current subdirs: `templates/` (one `<name>.md` file per email template, see `src/apple_mail_mcp/templates.py`).
+- Names that get used as filename stems must be regex-validated **before** building any path — see `_validate_name` in `templates.py` for the path-traversal-safe pattern. Don't `Path(user_input)` directly.
+- Storage objects should resolve their root at use time, not import time, so env-var overrides and test-time monkeypatching are honored. Example: `_get_template_store()` in `server.py`.
 
 ## Testing Requirements
 

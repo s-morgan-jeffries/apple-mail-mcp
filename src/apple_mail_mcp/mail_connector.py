@@ -1056,6 +1056,28 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return cast(dict[str, Any], parse_applescript_json(result))
 
+    def auto_template_vars(self, message_id: str | None) -> dict[str, str]:
+        """Build the auto-fill variable dict for render_template.
+
+        With ``message_id``, calls :meth:`get_message` (without content)
+        and extracts ``recipient_name``, ``recipient_email``, and
+        ``original_subject`` from the original sender. Always includes
+        ``today`` (ISO date). User-supplied vars are layered on top of
+        this dict at the call site, so user values win on conflict.
+        """
+        from email.utils import parseaddr
+
+        out: dict[str, str] = {"today": _date.today().isoformat()}
+        if message_id is None:
+            return out
+        msg = self.get_message(message_id, include_content=False)
+        sender_field = str(msg.get("sender") or "")
+        display_name, email_addr = parseaddr(sender_field)
+        out["recipient_email"] = email_addr or sender_field
+        out["recipient_name"] = display_name or out["recipient_email"]
+        out["original_subject"] = str(msg.get("subject") or "")
+        return out
+
     def send_email(
         self,
         subject: str,

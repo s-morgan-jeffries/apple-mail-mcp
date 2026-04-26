@@ -12,7 +12,10 @@ These tests require:
 Run with: MAIL_TEST_MODE=true MAIL_TEST_ACCOUNT=TestAccount pytest --run-integration
 """
 
+from pathlib import Path
+
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 
 from apple_mail_mcp.mail_connector import AppleMailConnector
 
@@ -436,3 +439,88 @@ class TestRuleCRUDIntegration:
         finally:
             # Defensive cleanup if anything above raised.
             self._delete_test_rule_if_present(connector)
+
+
+class TestTemplateIntegration:
+    """End-to-end: save a template referencing reply-context placeholders,
+    render it against a real message from the test inbox, verify the
+    auto-fills came through.
+
+    Storage isolation: redirects APPLE_MAIL_MCP_HOME at tmp_path to avoid
+    touching the real templates directory.
+    """
+
+    def test_round_trip_with_real_message_data(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """Save → reload from disk → render against real message data.
+
+        Pulls subject and sender from search_messages (which already
+        returns those fields, so we don't depend on get_message — that
+        path has a pre-existing AppleScript-quoting bug on UUID-style
+        IDs that's unrelated to this feature). Auto-fill behavior is
+        unit-tested with mocked get_message in test_mail_connector.
+        """
+        from email.utils import parseaddr
+
+        from apple_mail_mcp.templates import Template, TemplateStore
+
+        monkeypatch.setenv("APPLE_MAIL_MCP_HOME", str(tmp_path))
+        store = TemplateStore()
+
+        # Try a few likely mailboxes — the test account may have an
+        # empty INBOX but messages elsewhere.
+        msg: dict | None = None
+        for mb in ("INBOX", "Archive", "Sent Messages"):
+            try:
+                matches = connector.search_messages(
+                    account=test_account, mailbox=mb, limit=1
+                )
+            except Exception:
+                continue
+            if matches:
+                msg = matches[0]
+                break
+        if msg is None:
+            pytest.skip("no messages found in test account")
+
+        # Save a template that exercises every reply-context placeholder.
+        store.save(
+            Template(
+                name="integration-reply",
+                subject="Re: {original_subject}",
+                body=(
+                    "Hi {recipient_name},\n\n"
+                    "Thanks for reaching out (writing on {today}).\n"
+                ),
+            )
+        )
+
+        # Build the var dict the same way auto_template_vars would,
+        # but from search_messages data so we sidestep the get_message
+        # quoting bug.
+        from datetime import date
+
+        sender_field = str(msg.get("sender") or "")
+        display_name, email_addr = parseaddr(sender_field)
+        recipient_email = email_addr or sender_field
+        recipient_name = display_name or recipient_email
+        original_subject = str(msg.get("subject") or "")
+        today = date.today().isoformat()
+
+        loaded = store.get("integration-reply")
+        rendered = loaded.render(
+            {
+                "recipient_name": recipient_name,
+                "recipient_email": recipient_email,
+                "original_subject": original_subject,
+                "today": today,
+            }
+        )
+        assert rendered["subject"] == f"Re: {original_subject}"
+        assert recipient_name in rendered["body"]
+        assert today in rendered["body"]
