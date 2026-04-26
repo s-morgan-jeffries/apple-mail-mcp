@@ -1941,6 +1941,94 @@ class TestAppleMailConnector:
         assert 'subject contains "Re:' not in candidate_script
 
 
+class TestMessageIdAppleScriptInjection:
+    """Regression guards for AppleScript-injection via message IDs.
+
+    Two bug families this class protects against:
+
+    1. Multi-id list methods (mark_as_read, move_messages, flag_message,
+       delete_messages) used to do `", ".join(message_ids)` directly into
+       an AppleScript list literal — a crafted id containing a `"` could
+       escape the list and inject arbitrary script.
+
+    2. Single-id `whose id is "..."` clauses used to interpolate the raw
+       message_id without escaping in reply_to_message and forward_message.
+
+    See PR #34 (martparve) for the original report.
+    """
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_mark_as_read_quotes_and_escapes_each_id(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        # Crafted id with a quote and backslash: a naive join would
+        # break out of the list literal.
+        connector.mark_as_read(['abc"; do evil; --', "back\\slash"])
+        script = mock_run.call_args[0][0]
+        # Both ids appear inside their own quoted string.
+        assert '"abc\\"; do evil; --"' in script
+        assert '"back\\\\slash"' in script
+        # The injected `do evil` must NOT appear unquoted at the script level
+        # (i.e., outside the list).
+        assert "{\"abc\\\"; do evil; --\", \"back\\\\slash\"}" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_quotes_and_escapes_each_id(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.move_messages(['evil"; foo', "ok"], "Gmail", "Archive")
+        script = mock_run.call_args[0][0]
+        assert '"evil\\"; foo"' in script
+        assert '"ok"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_flag_message_quotes_and_escapes_each_id(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.flag_message(['evil"', "ok"], "red")
+        script = mock_run.call_args[0][0]
+        assert '"evil\\""' in script
+        assert '"ok"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_messages_quotes_and_escapes_each_id(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.delete_messages(['evil"', "ok"])
+        script = mock_run.call_args[0][0]
+        assert '"evil\\""' in script
+        assert '"ok"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_to_message_escapes_id(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "msg-id"
+        connector.reply_to_message('craft"ed-id', body="hi")
+        script = mock_run.call_args[0][0]
+        # Quoted and escaped — no raw quote breaks out of the string.
+        assert 'whose id is "craft\\"ed-id"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_forward_message_escapes_id(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "msg-id"
+        connector.forward_message(
+            'craft"ed-id', to=["a@example.com"], body="hi"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'whose id is "craft\\"ed-id"' in script
+
+
 class TestWrapAsJsonScript:
     def test_wrapper_contains_framework_directive(self) -> None:
         script = _wrap_as_json_script('tell application "Mail"\n    set resultData to {}\nend tell')
