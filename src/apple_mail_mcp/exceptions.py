@@ -93,3 +93,37 @@ class MailUnsupportedRuleActionError(MailError):
     """
 
     pass
+
+
+class MailTemplateError(MailError):
+    """Base class for email-template errors."""
+
+    pass
+
+
+class MailTemplateNotFoundError(MailTemplateError):
+    """No template exists with the requested name."""
+
+    pass
+
+
+class MailTemplateInvalidNameError(MailTemplateError):
+    """Template name fails validation (path traversal, invalid chars,
+    too long, or empty). Names must match ^[a-zA-Z0-9_-]{1,64}$."""
+
+    pass
+
+
+class MailTemplateInvalidFormatError(MailTemplateError):
+    """A file in the templates directory could not be parsed as a
+    template (malformed header, unreadable, or empty body)."""
+
+    pass
+
+
+class MailTemplateMissingVariableError(MailTemplateError):
+    """render_template encountered a {placeholder} with no matching
+    auto-fill or user-supplied variable. The exception message names
+    the missing placeholder(s)."""
+
+    pass
