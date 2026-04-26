@@ -6,6 +6,8 @@
 
 An MCP server that provides programmatic access to Apple Mail, enabling AI assistants like Claude to read, send, search, and manage emails on macOS.
 
+> ⚠️ **Pre-1.0 — expect breaking changes.** The MCP tool surface (tool names, parameters, return shapes) is still evolving as the project matures. Pin to a specific version (for example, `apple-mail-mcp==0.5.0`) and review the [CHANGELOG](CHANGELOG.md) before upgrading. The aim is to reach 1.0 once the v0.6.0 polish work lands.
+
 ## Tools (14)
 
 **Core:** list_mailboxes, search_messages, get_message, send_email, mark_as_read
