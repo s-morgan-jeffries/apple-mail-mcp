@@ -29,7 +29,9 @@ from apple_mail_mcp.server import (
     _build_forward_summary,
     _build_send_summary,
     create_mailbox,
+    create_rule,
     delete_messages,
+    delete_rule,
     flag_message,
     forward_message,
     get_attachments,
@@ -45,6 +47,8 @@ from apple_mail_mcp.server import (
     search_messages,
     send_email,
     send_email_with_attachments,
+    set_rule_enabled,
+    update_rule,
 )
 
 
@@ -173,6 +177,159 @@ class TestListRules:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# 0c. Rule mutations: set_rule_enabled, delete_rule, create_rule, update_rule
+# ---------------------------------------------------------------------------
+
+
+class TestSetRuleEnabled:
+    def test_success_disables_rule(self, mock_mail: MagicMock) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "X", "enabled": True},
+            {"index": 2, "name": "News", "enabled": True},
+        ]
+        result = set_rule_enabled(rule_index=2, enabled=False)
+        assert result["success"] is True
+        assert result["rule_index"] == 2
+        assert result["name"] == "News"
+        assert result["enabled"] is False
+        mock_mail.set_rule_enabled.assert_called_once_with(2, False)
+
+    def test_returns_rule_not_found_when_index_missing(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = []
+        result = set_rule_enabled(rule_index=99, enabled=True)
+        assert result["success"] is False
+        assert result["error_type"] == "rule_not_found"
+        mock_mail.set_rule_enabled.assert_not_called()
+
+
+class TestDeleteRule:
+    async def test_success_with_accepted_ctx(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        mock_mail.delete_rule.return_value = "Junk filter"
+        result = await delete_rule(rule_index=1, ctx=mock_ctx_accept)
+        assert result["success"] is True
+        assert result["deleted_name"] == "Junk filter"
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.delete_rule.assert_called_once_with(1)
+
+    async def test_declined_ctx_blocks_delete(
+        self, mock_mail: MagicMock, mock_ctx_decline: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        result = await delete_rule(rule_index=1, ctx=mock_ctx_decline)
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        mock_mail.delete_rule.assert_not_called()
+
+    async def test_returns_rule_not_found_when_index_missing(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = []
+        result = await delete_rule(rule_index=99, ctx=None)
+        assert result["success"] is False
+        assert result["error_type"] == "rule_not_found"
+
+
+class TestCreateRule:
+    def test_success_returns_new_index(self, mock_mail: MagicMock) -> None:
+        mock_mail.create_rule.return_value = 6
+        result = create_rule(
+            name="My New Rule",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "X"}
+            ],
+            actions={"mark_read": True},
+        )
+        assert result["success"] is True
+        assert result["rule_index"] == 6
+        assert result["name"] == "My New Rule"
+
+    def test_no_elicitation_for_create(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        """create_rule is additive — no confirmation prompt."""
+        # create_rule is sync, takes no ctx, so this just confirms it
+        # works without one.
+        mock_mail.create_rule.return_value = 1
+        result = create_rule(
+            name="X",
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "Y"}
+            ],
+            actions={"delete": True},
+        )
+        assert result["success"] is True
+        # No elicit call possible — sync function doesn't accept ctx.
+
+    def test_validation_error_returns_validation_type(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.create_rule.side_effect = ValueError("invalid field")
+        result = create_rule(
+            name="X",
+            conditions=[
+                {"field": "bogus", "operator": "contains", "value": "Y"}
+            ],
+            actions={"delete": True},
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+
+
+class TestUpdateRule:
+    async def test_success_with_accepted_ctx(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        result = await update_rule(
+            rule_index=1, enabled=False, ctx=mock_ctx_accept
+        )
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.update_rule.assert_called_once()
+
+    async def test_declined_ctx_blocks_update(
+        self, mock_mail: MagicMock, mock_ctx_decline: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "X", "enabled": True},
+        ]
+        result = await update_rule(
+            rule_index=1, enabled=False, ctx=mock_ctx_decline
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        mock_mail.update_rule.assert_not_called()
+
+    async def test_returns_unsupported_action_error_type(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailUnsupportedRuleActionError
+
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "X", "enabled": True},
+        ]
+        mock_mail.update_rule.side_effect = MailUnsupportedRuleActionError(
+            "uses run-script"
+        )
+        result = await update_rule(
+            rule_index=1, enabled=False, ctx=mock_ctx_accept
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "unsupported_rule_action"
 
 
 # ---------------------------------------------------------------------------

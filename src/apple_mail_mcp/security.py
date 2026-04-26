@@ -133,6 +133,10 @@ OPERATION_TIERS: dict[str, str] = {
     "flag_message": "expensive_ops",
     "create_mailbox": "expensive_ops",
     "delete_messages": "expensive_ops",
+    "set_rule_enabled": "expensive_ops",
+    "delete_rule": "expensive_ops",
+    "create_rule": "expensive_ops",
+    "update_rule": "expensive_ops",
     "reply_to_message": "expensive_ops",
     "send_email": "sends",
     "send_email_with_attachments": "sends",
@@ -262,6 +266,18 @@ SEND_OPERATIONS = {
     "forward_message",
 }
 
+# Rule-mutation operations: in test mode, may only target rules whose
+# names start with the test prefix below. Protects the user's real rules
+# during integration testing.
+RULE_GATED_OPERATIONS = {
+    "set_rule_enabled",
+    "create_rule",
+    "update_rule",
+    "delete_rule",
+}
+
+RULE_TEST_PREFIX = "[apple-mail-mcp-test]"
+
 
 def _is_test_mode_enabled() -> bool:
     return os.environ.get("MAIL_TEST_MODE", "").lower() == "true"
@@ -349,6 +365,7 @@ def check_test_mode_safety(
     operation: str,
     account: str | None = None,
     recipients: list[str] | None = None,
+    rule_name: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Enforce test-mode safety checks. Returns None if allowed (or no test mode),
@@ -358,6 +375,9 @@ def check_test_mode_safety(
     - Account-gated operations must target MAIL_TEST_ACCOUNT.
     - Send operations must send only to RFC 2606 reserved domains.
     - reply_to_message is blocked (can't inspect original recipients here).
+    - Rule-mutation operations must target rules whose names start with
+      RULE_TEST_PREFIX (protects the user's real rules during integration
+      testing).
     """
     if not _is_test_mode_enabled():
         return None
@@ -385,6 +405,19 @@ def check_test_mode_safety(
                 operation,
                 f"Test mode: account '{account}' does not match "
                 f"MAIL_TEST_ACCOUNT='{test_account}'",
+            )
+
+    # Rule-mutation operations: verify the target rule's name starts with
+    # the test prefix. The caller (server tool wrapper) is responsible for
+    # resolving rule_index → rule_name before calling, since the safety gate
+    # has no Mail.app access of its own.
+    if operation in RULE_GATED_OPERATIONS and rule_name is not None:
+        if not rule_name.startswith(RULE_TEST_PREFIX):
+            return _safety_error(
+                operation,
+                f"Test mode: rule mutations are restricted to rules whose "
+                f"name starts with {RULE_TEST_PREFIX!r}. Got rule_name="
+                f"{rule_name!r}.",
             )
 
     # Send operations: verify every recipient is on a reserved test domain

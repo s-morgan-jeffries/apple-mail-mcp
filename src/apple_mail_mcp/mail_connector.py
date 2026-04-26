@@ -19,14 +19,18 @@ from .exceptions import (
     MailKeychainEntryNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
+    MailRuleNotFoundError,
+    MailUnsupportedRuleActionError,
 )
 from .imap_connector import ImapConnector
 from .keychain import get_imap_password
 from .utils import (
     applescript_account_clause,
     escape_applescript_string,
+    get_flag_index,
     parse_applescript_json,
     sanitize_input,
+    validate_email,
 )
 
 # Exception classes that trigger AppleScript fallback per the graceful-
@@ -47,6 +51,33 @@ logger = logging.getLogger(__name__)
 # Strict ISO 8601 YYYY-MM-DD — search_messages's date_from/date_to filters
 # reject anything else to prevent AppleScript injection via the date clause.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+# MCP-tool field name → Mail.app AppleScript `rule type` enum identifier.
+# Verified against Mail.app's running rules: 'from header', 'subject header',
+# 'message content' all confirmed live. Other values follow the same naming
+# convention per Mail.app's AppleScript dictionary; verified via integration
+# test on live rule creation.
+_RULE_FIELD_MAP = {
+    "from": "from header",
+    "to": "to header",
+    "subject": "subject header",
+    "body": "message content",
+    "any_recipient": "any recipient",
+    "header_name": "header key",
+}
+
+# MCP-tool operator name → Mail.app AppleScript `qualifier` enum identifier.
+# 'does contain value', 'equal to value', 'begins with value' verified live
+# against the user's existing rules. Others follow Mail.app's documented
+# naming.
+_RULE_OPERATOR_MAP = {
+    "contains": "does contain value",
+    "does_not_contain": "does not contain value",
+    "begins_with": "begins with value",
+    "ends_with": "ends with value",
+    "equals": "equal to value",
+}
 
 
 def _wrap_as_json_script(body: str) -> str:
@@ -175,6 +206,8 @@ class AppleMailConnector:
                     raise MailMailboxNotFoundError(error_msg)
                 elif "Can't get message" in normalized:
                     raise MailMessageNotFoundError(error_msg)
+                elif "Can't get rule" in normalized:
+                    raise MailRuleNotFoundError(error_msg)
                 else:
                     raise MailAppleScriptError(error_msg)
 
@@ -222,19 +255,27 @@ class AppleMailConnector:
 
         Returns:
             List of rule dicts with keys:
-              - name: rule display name (NOT guaranteed unique — Mail allows duplicates)
-              - enabled: whether the rule is currently enabled
+              - index: 1-based positional index, matching Mail.app's
+                AppleScript ``rule N`` reference. Stable within a single
+                snapshot; can change if the user reorders rules.
+              - name: rule display name (NOT guaranteed unique — Mail
+                allows duplicates).
+              - enabled: whether the rule is currently enabled.
 
         Note:
-            Mail.app does not expose a stable rule id via AppleScript, so rules
-            can only be addressed positionally or by name (with duplicate-name
-            ambiguity). Read-only for now; see the CRUD follow-up issue.
+            Mail.app does not expose a stable rule id via AppleScript;
+            ``index`` is the canonical handle for downstream mutation tools
+            (set_rule_enabled / delete_rule / update_rule). Callers that
+            care about reorder-stability should call ``list_rules`` again
+            immediately before each mutation.
         """
         tell_body = """
         tell application "Mail"
             set resultData to {}
-            repeat with r in rules
-                set ruleRecord to {|name|:(name of r), |enabled|:(enabled of r)}
+            set ruleCount to count of rules
+            repeat with i from 1 to ruleCount
+                set r to rule i
+                set ruleRecord to {|index|:i, |name|:(name of r), |enabled|:(enabled of r)}
                 set end of resultData to ruleRecord
             end repeat
         end tell
@@ -243,6 +284,428 @@ class AppleMailConnector:
         script = _wrap_as_json_script(tell_body)
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
+
+    def set_rule_enabled(self, rule_index: int, enabled: bool) -> None:
+        """Toggle the enabled state of a rule by 1-based index.
+
+        Args:
+            rule_index: 1-based positional index, as returned by ``list_rules``.
+            enabled: New enabled state.
+
+        Raises:
+            MailRuleNotFoundError: If rule_index is out of range (≤0 or
+                greater than the number of existing rules).
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        enabled_str = "true" if enabled else "false"
+        script = (
+            f'tell application "Mail" to '
+            f"set enabled of rule {rule_index} to {enabled_str}"
+        )
+        self._run_applescript(script)
+
+    def _validate_rule_condition(self, cond: dict[str, Any]) -> None:
+        """Validate a single RuleCondition dict.
+
+        Required keys: field (in _RULE_FIELD_MAP), operator (in
+        _RULE_OPERATOR_MAP), value (non-empty str). header_name required
+        iff field == 'header_name'.
+        """
+        if "field" not in cond or cond["field"] not in _RULE_FIELD_MAP:
+            raise ValueError(
+                f"condition.field must be one of {sorted(_RULE_FIELD_MAP)}, "
+                f"got {cond.get('field')!r}"
+            )
+        if (
+            "operator" not in cond
+            or cond["operator"] not in _RULE_OPERATOR_MAP
+        ):
+            raise ValueError(
+                f"condition.operator must be one of "
+                f"{sorted(_RULE_OPERATOR_MAP)}, got {cond.get('operator')!r}"
+            )
+        if not cond.get("value") or not isinstance(cond["value"], str):
+            raise ValueError("condition.value must be a non-empty string")
+        if cond["field"] == "header_name":
+            if not cond.get("header_name"):
+                raise ValueError(
+                    "condition.header_name is required when field is "
+                    "'header_name'"
+                )
+
+    def _validate_rule_actions(self, actions: dict[str, Any]) -> None:
+        """Validate a RuleActions dict has at least one meaningful entry,
+        flag_color (if any) is valid, and forward_to emails are valid."""
+        meaningful_keys = {
+            "move_to", "copy_to", "mark_read", "mark_flagged",
+            "delete", "forward_to",
+        }
+        # Strip falsy bools / empty containers — they're no-ops, not actions.
+        active = {
+            k: v for k, v in actions.items()
+            if k in meaningful_keys and v
+        }
+        if not active:
+            raise ValueError(
+                "actions must include at least one of "
+                f"{sorted(meaningful_keys)} with a truthy value"
+            )
+        if "flag_color" in actions and actions["flag_color"]:
+            # get_flag_index raises ValueError on bad input.
+            get_flag_index(actions["flag_color"])
+        if active.get("forward_to"):
+            for addr in active["forward_to"]:
+                if not isinstance(addr, str) or not validate_email(addr):
+                    raise ValueError(
+                        f"forward_to entries must be valid email "
+                        f"addresses; got {addr!r}"
+                    )
+        for mb_key in ("move_to", "copy_to"):
+            if mb_key in active:
+                ref = active[mb_key]
+                if (
+                    not isinstance(ref, dict)
+                    or not ref.get("account")
+                    or not ref.get("mailbox")
+                ):
+                    raise ValueError(
+                        f"actions.{mb_key} must be a dict with "
+                        f"'account' and 'mailbox' keys, got {ref!r}"
+                    )
+
+    def _build_action_lines(self, actions: dict[str, Any]) -> list[str]:
+        """Translate a validated RuleActions dict into AppleScript lines.
+
+        Each line operates on a variable named ``newRule`` (or ``r`` for
+        update_rule's reuse). Caller picks the target variable name and
+        substitutes.
+        """
+        lines: list[str] = []
+        if actions.get("move_to"):
+            mb_safe = escape_applescript_string(
+                sanitize_input(actions["move_to"]["mailbox"])
+            )
+            acct_clause = applescript_account_clause(
+                actions["move_to"]["account"]
+            )
+            lines.append("set should move message of newRule to true")
+            lines.append(
+                f'set move message of newRule to mailbox "{mb_safe}" '
+                f"of {acct_clause}"
+            )
+        if actions.get("copy_to"):
+            mb_safe = escape_applescript_string(
+                sanitize_input(actions["copy_to"]["mailbox"])
+            )
+            acct_clause = applescript_account_clause(
+                actions["copy_to"]["account"]
+            )
+            lines.append("set should copy message of newRule to true")
+            lines.append(
+                f'set copy message of newRule to mailbox "{mb_safe}" '
+                f"of {acct_clause}"
+            )
+        if actions.get("mark_read"):
+            lines.append("set mark read of newRule to true")
+        if actions.get("mark_flagged"):
+            lines.append("set mark flagged of newRule to true")
+            if actions.get("flag_color"):
+                idx = get_flag_index(actions["flag_color"])
+                lines.append(
+                    f"set mark flag index of newRule to {idx}"
+                )
+        if actions.get("delete"):
+            lines.append("set delete message of newRule to true")
+        if actions.get("forward_to"):
+            recipients = ", ".join(actions["forward_to"])
+            recipients_safe = escape_applescript_string(recipients)
+            lines.append(
+                f'set forward message of newRule to "{recipients_safe}"'
+            )
+        return lines
+
+    def create_rule(
+        self,
+        name: str,
+        conditions: list[dict[str, Any]],
+        actions: dict[str, Any],
+        match_logic: str = "all",
+        enabled: bool = True,
+    ) -> int:
+        """Create a new Mail.app rule. Returns the new rule's 1-based index.
+
+        Args:
+            name: Rule display name.
+            conditions: List of RuleCondition dicts. At least one required.
+            actions: RuleActions dict. At least one action must be set.
+            match_logic: 'all' (AND) or 'any' (OR) across conditions.
+            enabled: Whether the rule is enabled on creation.
+
+        Returns:
+            1-based positional index of the newly-created rule (Mail.app
+            appends new rules to the end, so this equals the new total
+            count of rules).
+
+        Raises:
+            ValueError: If any input fails schema validation.
+        """
+        if not name or not isinstance(name, str):
+            raise ValueError("name must be a non-empty string")
+        if not conditions:
+            raise ValueError("conditions must have at least one entry")
+        if match_logic not in ("all", "any"):
+            raise ValueError(
+                f"match_logic must be 'all' or 'any', got {match_logic!r}"
+            )
+        for cond in conditions:
+            self._validate_rule_condition(cond)
+        self._validate_rule_actions(actions)
+
+        name_safe = escape_applescript_string(sanitize_input(name))
+        all_conditions = "true" if match_logic == "all" else "false"
+        enabled_str = "true" if enabled else "false"
+
+        condition_lines: list[str] = []
+        for cond in conditions:
+            rule_type = _RULE_FIELD_MAP[cond["field"]]
+            qualifier = _RULE_OPERATOR_MAP[cond["operator"]]
+            expr_safe = escape_applescript_string(
+                sanitize_input(cond["value"])
+            )
+            if cond["field"] == "header_name":
+                header_safe = escape_applescript_string(
+                    sanitize_input(cond["header_name"])
+                )
+                condition_lines.append(
+                    f"make new rule condition with properties "
+                    f"{{rule type:{rule_type}, qualifier:{qualifier}, "
+                    f'expression:"{expr_safe}", header:"{header_safe}"}} '
+                    f"at end of rule conditions of newRule"
+                )
+            else:
+                condition_lines.append(
+                    f"make new rule condition with properties "
+                    f"{{rule type:{rule_type}, qualifier:{qualifier}, "
+                    f'expression:"{expr_safe}"}} '
+                    f"at end of rule conditions of newRule"
+                )
+
+        action_lines = self._build_action_lines(actions)
+
+        body = (
+            f'set newRule to make new rule with properties '
+            f'{{name:"{name_safe}"}}\n'
+            f"set all conditions must be met of newRule to {all_conditions}\n"
+            + "\n".join(condition_lines) + "\n"
+            + "\n".join(action_lines) + "\n"
+            f"set enabled of newRule to {enabled_str}\n"
+            f"return (count of rules) as text"
+        )
+        script = f'tell application "Mail"\n{body}\nend tell'
+        return int(self._run_applescript(script))
+
+    def update_rule(
+        self,
+        rule_index: int,
+        name: str | None = None,
+        enabled: bool | None = None,
+        conditions: list[dict[str, Any]] | None = None,
+        actions: dict[str, Any] | None = None,
+        match_logic: str | None = None,
+    ) -> None:
+        """Update an existing Mail.app rule (patch-style for top-level fields,
+        full replacement for conditions/actions when provided).
+
+        Calls ``_check_supported_actions`` first; refuses to update any rule
+        whose existing action set includes something outside our schema
+        (run-AppleScript, redirect, reply text, etc.) — we cannot safely
+        partial-update because the unsupported actions would be silently
+        dropped or misrepresented.
+
+        Args:
+            rule_index: 1-based positional index from ``list_rules``.
+            name: New name (only set if not None).
+            enabled: New enabled state (only set if not None).
+            conditions: If provided, REPLACES all existing conditions wholesale.
+            actions: If provided, REPLACES all action flags wholesale —
+                unprovided actions are reset to off.
+            match_logic: 'all' | 'any', only set if not None.
+
+        Raises:
+            ValueError: If any provided input fails schema validation.
+            MailRuleNotFoundError: If rule_index is out of range.
+            MailUnsupportedRuleActionError: If the rule currently has an
+                action outside the supported schema.
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        if match_logic is not None and match_logic not in ("all", "any"):
+            raise ValueError(
+                f"match_logic must be 'all' or 'any', got {match_logic!r}"
+            )
+        if conditions is not None:
+            # Mail.app on macOS Tahoe (16.0 / macOS 26) has a recursion bug
+            # in -[MFMessageRule(Applescript) removeFromCriteriaAtIndex:].
+            # ANY AppleScript path that removes a rule condition (delete by
+            # index, delete every, or assigning a new list to `rule
+            # conditions`) hits the same broken accessor and crashes Mail.
+            # Verified with a one-line minimal repro:
+            #     tell application "Mail" to delete rule condition 1 of rule "X"
+            # Until Apple fixes this, replacing conditions in place is not
+            # implementable; users must delete and recreate the rule.
+            raise MailUnsupportedRuleActionError(
+                "Replacing rule conditions is not supported: Mail.app on "
+                "macOS Tahoe has a recursion bug in its AppleScript handler "
+                "for rule-condition deletion (-[MFMessageRule(Applescript) "
+                "removeFromCriteriaAtIndex:]) that crashes Mail. To change "
+                "conditions, delete the rule and recreate it with create_rule."
+            )
+        if actions is not None:
+            self._validate_rule_actions(actions)
+        if name is not None and (not isinstance(name, str) or not name):
+            raise ValueError("name, if provided, must be a non-empty string")
+
+        # Refuse to patch rules whose existing actions we don't fully model.
+        self._check_supported_actions(rule_index)
+
+        # Renaming a rule invalidates the local AppleScript variable
+        # bound to it (Mail.app tries to resolve the variable by the old
+        # name on subsequent property accesses, which now fails). Defer
+        # any rename to the very end so all other property changes
+        # operate on a stable reference.
+        body_parts: list[str] = [
+            f"set newRule to rule {rule_index}",
+        ]
+
+        if match_logic is not None:
+            body_parts.append(
+                f"set all conditions must be met of newRule to "
+                f"{'true' if match_logic == 'all' else 'false'}"
+            )
+        if actions is not None:
+            # Reset all supported action flags first; then apply provided ones.
+            # `set forward message ... to ""` raises -10000 when the value is
+            # already empty (Tahoe quirk), so gate the reset on a length check.
+            body_parts.extend([
+                "set should move message of newRule to false",
+                "set should copy message of newRule to false",
+                "set mark read of newRule to false",
+                "set mark flagged of newRule to false",
+                "set mark flag index of newRule to -1",
+                "set delete message of newRule to false",
+                'if forward message of newRule is not "" then '
+                'set forward message of newRule to ""',
+            ])
+            body_parts.extend(self._build_action_lines(actions))
+        # `enabled` must come AFTER the action-reset block: setting enabled
+        # before resets causes the reset to silently revert it (Tahoe quirk).
+        if enabled is not None:
+            body_parts.append(
+                f"set enabled of newRule to "
+                f"{'true' if enabled else 'false'}"
+            )
+        # Rename last — see comment above.
+        if name is not None:
+            name_safe = escape_applescript_string(sanitize_input(name))
+            body_parts.append(f'set name of newRule to "{name_safe}"')
+
+        if len(body_parts) == 1:
+            # Only the rule lookup, no actual updates — caller passed nothing.
+            return
+        script = (
+            'tell application "Mail"\n'
+            + "\n".join(body_parts)
+            + "\nend tell"
+        )
+        self._run_applescript(script)
+
+    def _check_supported_actions(self, rule_index: int) -> None:
+        """Verify a rule's existing actions are all in our schema.
+
+        Used by ``update_rule`` before applying changes — if the rule
+        currently has any action set that we don't model (run-AppleScript,
+        redirect, reply text, play sound, highlight color, forward text),
+        we can't safely partial-update because we'd silently drop or
+        misrepresent that action. Read access via ``list_rules`` is
+        unaffected.
+
+        Raises:
+            MailRuleNotFoundError: If rule_index is out of range.
+            MailUnsupportedRuleActionError: If any action outside the
+                medium-tier schema is currently set on the rule.
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        tell_body = f'''
+        tell application "Mail"
+            set r to rule {rule_index}
+            set resultData to {{|run_script_set|:(run script of r is not missing value), |play_sound_set|:(play sound of r is not missing value), |redirect_set|:((redirect message of r) is not ""), |forward_text_set|:((forward text of r) is not ""), |reply_text_set|:((reply text of r) is not ""), |highlight_text|:(highlight text using color of r), |color_message|:((color message of r) as text)}}
+        end tell
+        '''
+        script = _wrap_as_json_script(tell_body)
+        raw = self._run_applescript(script)
+        parsed = cast(dict[str, Any], parse_applescript_json(raw))
+
+        unsupported: list[str] = []
+        if parsed.get("run_script_set"):
+            unsupported.append("run script")
+        if parsed.get("play_sound_set"):
+            unsupported.append("play sound")
+        if parsed.get("redirect_set"):
+            unsupported.append("redirect message")
+        if parsed.get("forward_text_set"):
+            unsupported.append("forward text")
+        if parsed.get("reply_text_set"):
+            unsupported.append("reply text")
+        if parsed.get("highlight_text"):
+            unsupported.append("highlight text using color")
+        if parsed.get("color_message", "none") != "none":
+            unsupported.append("color message")
+
+        if unsupported:
+            raise MailUnsupportedRuleActionError(
+                f"rule {rule_index} uses actions outside the supported "
+                f"schema: {', '.join(unsupported)}. Edit this rule in "
+                f"Mail.app's Rules pane instead."
+            )
+
+    def delete_rule(self, rule_index: int) -> str:
+        """Delete a rule by 1-based index.
+
+        Reads the rule's name in the same AppleScript call so callers
+        (typically the server layer's elicitation summary) can echo the
+        deleted name. After deletion, downstream rule indices shift down
+        by one — callers should re-call ``list_rules`` before any further
+        rule operations.
+
+        Args:
+            rule_index: 1-based positional index, as returned by ``list_rules``.
+
+        Returns:
+            The name of the deleted rule (for confirmation / logging).
+
+        Raises:
+            MailRuleNotFoundError: If rule_index is out of range.
+        """
+        if rule_index < 1:
+            raise MailRuleNotFoundError(
+                f"rule_index must be 1-based and positive, got {rule_index}"
+            )
+        script = (
+            f'tell application "Mail"\n'
+            f"    set deletedName to name of rule {rule_index}\n"
+            f"    delete rule {rule_index}\n"
+            f"    return deletedName\n"
+            f"end tell"
+        )
+        return self._run_applescript(script)
 
     def list_mailboxes(self, account: str) -> list[dict[str, Any]]:
         """List all mailboxes for an account.

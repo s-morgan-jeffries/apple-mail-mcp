@@ -3,7 +3,7 @@ FastMCP server for Apple Mail integration.
 """
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 from fastmcp.server.elicitation import AcceptedElicitation
@@ -13,6 +13,8 @@ from .exceptions import (
     MailAppleScriptError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
+    MailRuleNotFoundError,
+    MailUnsupportedRuleActionError,
 )
 from .mail_connector import AppleMailConnector
 from .security import (
@@ -179,6 +181,357 @@ def list_rules() -> dict[str, Any]:
 
     except Exception as e:
         logger.error(f"Error listing rules: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+def _resolve_rule_name(rule_index: int) -> str | None:
+    """Look up a rule's name from its 1-based index via list_rules.
+
+    Used by the rule mutation tools to feed the safety gate. Returns None
+    if the rule doesn't exist (caller surfaces a typed error).
+    """
+    rules = mail.list_rules()
+    for r in rules:
+        if r.get("index") == rule_index:
+            return cast(str, r.get("name", ""))
+    return None
+
+
+@mcp.tool()
+def set_rule_enabled(rule_index: int, enabled: bool) -> dict[str, Any]:
+    """
+    Enable or disable a Mail.app rule by 1-based positional index.
+
+    Trivially reversible — no confirmation prompt. The index is the one
+    returned by ``list_rules``; if you've changed rule order in Mail.app
+    since the last list_rules call, re-list before calling this.
+
+    Args:
+        rule_index: 1-based positional index from list_rules.
+        enabled: True to enable, False to disable.
+
+    Returns:
+        Dictionary with success status and the rule's name.
+    """
+    try:
+        rate_err = check_rate_limit(
+            "set_rule_enabled", {"rule_index": rule_index}
+        )
+        if rate_err:
+            return rate_err
+
+        rule_name = _resolve_rule_name(rule_index)
+        if rule_name is None:
+            return {
+                "success": False,
+                "error": f"No rule at index {rule_index}",
+                "error_type": "rule_not_found",
+            }
+
+        safety_err = check_test_mode_safety(
+            "set_rule_enabled", rule_name=rule_name
+        )
+        if safety_err:
+            return safety_err
+
+        mail.set_rule_enabled(rule_index, enabled)
+        operation_logger.log_operation(
+            "set_rule_enabled",
+            {"rule_index": rule_index, "enabled": enabled, "name": rule_name},
+            "success",
+        )
+        return {
+            "success": True,
+            "rule_index": rule_index,
+            "name": rule_name,
+            "enabled": enabled,
+        }
+
+    except MailRuleNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "rule_not_found",
+        }
+    except Exception as e:
+        logger.error(f"Error in set_rule_enabled: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
+async def delete_rule(
+    rule_index: int,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """
+    Delete a Mail.app rule by 1-based positional index.
+
+    Destructive — requires user confirmation via MCP elicitation before
+    running. Cannot be undone (Mail.app does not version rule history).
+
+    Args:
+        rule_index: 1-based positional index from list_rules.
+
+    Returns:
+        Dictionary with success status and the deleted rule's name.
+
+    Note:
+        After deletion, downstream rule indices shift down by one. Re-call
+        list_rules before any further rule operations.
+    """
+    try:
+        rate_err = check_rate_limit(
+            "delete_rule", {"rule_index": rule_index}
+        )
+        if rate_err:
+            return rate_err
+
+        rule_name = _resolve_rule_name(rule_index)
+        if rule_name is None:
+            return {
+                "success": False,
+                "error": f"No rule at index {rule_index}",
+                "error_type": "rule_not_found",
+            }
+
+        safety_err = check_test_mode_safety(
+            "delete_rule", rule_name=rule_name
+        )
+        if safety_err:
+            return safety_err
+
+        summary = (
+            f"Delete Mail.app rule '{rule_name}' (index {rule_index})? "
+            f"This cannot be undone."
+        )
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "delete_rule", {"rule_index": rule_index}
+        )
+        if cancel_err:
+            return cancel_err
+
+        deleted = mail.delete_rule(rule_index)
+        operation_logger.log_operation(
+            "delete_rule",
+            {"rule_index": rule_index, "deleted_name": deleted},
+            "success",
+        )
+        return {
+            "success": True,
+            "rule_index": rule_index,
+            "deleted_name": deleted,
+        }
+
+    except MailRuleNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "rule_not_found",
+        }
+    except Exception as e:
+        logger.error(f"Error in delete_rule: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
+def create_rule(
+    name: str,
+    conditions: list[dict[str, Any]],
+    actions: dict[str, Any],
+    match_logic: str = "all",
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """
+    Create a new Mail.app rule.
+
+    Additive — no confirmation prompt. Mail.app appends new rules to the
+    end of the rule list, so the returned ``rule_index`` equals the new
+    total rule count.
+
+    Args:
+        name: Rule display name. Need not be unique.
+        conditions: List of condition dicts (at least one required). Each:
+            - field: 'from' | 'to' | 'subject' | 'body' | 'any_recipient' |
+                'header_name'
+            - operator: 'contains' | 'does_not_contain' | 'begins_with' |
+                'ends_with' | 'equals'
+            - value: substring or value to match
+            - header_name: required iff field == 'header_name'
+        actions: Dict with at least one truthy entry from:
+            - move_to: {"account": str, "mailbox": str}
+            - copy_to: {"account": str, "mailbox": str}
+            - mark_read: bool
+            - mark_flagged: bool (with optional flag_color enum)
+            - flag_color: 'none' | 'red' | 'orange' | 'yellow' | 'green' |
+                'blue' | 'purple' | 'gray'
+            - delete: bool
+            - forward_to: list[str] of email addresses
+        match_logic: 'all' (AND across conditions) or 'any' (OR). Default 'all'.
+        enabled: Whether the rule is enabled on creation. Default True.
+
+    Returns:
+        Dictionary with success status, rule_index, and name.
+    """
+    try:
+        rate_err = check_rate_limit("create_rule", {"name": name})
+        if rate_err:
+            return rate_err
+
+        safety_err = check_test_mode_safety(
+            "create_rule", rule_name=name
+        )
+        if safety_err:
+            return safety_err
+
+        new_index = mail.create_rule(
+            name=name,
+            conditions=conditions,
+            actions=actions,
+            match_logic=match_logic,
+            enabled=enabled,
+        )
+        operation_logger.log_operation(
+            "create_rule",
+            {"name": name, "rule_index": new_index},
+            "success",
+        )
+        return {
+            "success": True,
+            "rule_index": new_index,
+            "name": name,
+        }
+
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "validation_error",
+        }
+    except Exception as e:
+        logger.error(f"Error in create_rule: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
+async def update_rule(
+    rule_index: int,
+    name: str | None = None,
+    enabled: bool | None = None,
+    conditions: list[dict[str, Any]] | None = None,
+    actions: dict[str, Any] | None = None,
+    match_logic: str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """
+    Update an existing Mail.app rule (patch semantics).
+
+    Destructive — requires user confirmation via MCP elicitation before
+    running, because the previous condition/action state is irrecoverable
+    once replaced. Patch semantics: only fields you provide are changed.
+    ``conditions`` and ``actions``, when provided, REPLACE their respective
+    structures wholesale (not merged).
+
+    Refuses to update any rule whose existing actions include something
+    outside the supported schema (run-AppleScript, redirect, reply text,
+    play sound, custom highlight color); raises
+    MailUnsupportedRuleActionError. Edit such rules in Mail.app's UI.
+
+    Args:
+        rule_index: 1-based positional index from list_rules.
+        name: New name (only set if not None).
+        enabled: New enabled state (only set if not None).
+        conditions: If provided, REPLACES all existing conditions.
+        actions: If provided, REPLACES all action flags wholesale.
+        match_logic: 'all' or 'any', only set if not None.
+
+    Returns:
+        Dictionary with success status.
+    """
+    try:
+        rate_err = check_rate_limit(
+            "update_rule", {"rule_index": rule_index}
+        )
+        if rate_err:
+            return rate_err
+
+        rule_name = _resolve_rule_name(rule_index)
+        if rule_name is None:
+            return {
+                "success": False,
+                "error": f"No rule at index {rule_index}",
+                "error_type": "rule_not_found",
+            }
+
+        safety_err = check_test_mode_safety(
+            "update_rule", rule_name=rule_name
+        )
+        if safety_err:
+            return safety_err
+
+        summary = (
+            f"Update Mail.app rule '{rule_name}' (index {rule_index})? "
+            f"Previous condition/action state cannot be recovered."
+        )
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "update_rule", {"rule_index": rule_index}
+        )
+        if cancel_err:
+            return cancel_err
+
+        mail.update_rule(
+            rule_index=rule_index,
+            name=name,
+            enabled=enabled,
+            conditions=conditions,
+            actions=actions,
+            match_logic=match_logic,
+        )
+        operation_logger.log_operation(
+            "update_rule",
+            {"rule_index": rule_index, "previous_name": rule_name},
+            "success",
+        )
+        return {
+            "success": True,
+            "rule_index": rule_index,
+        }
+
+    except MailRuleNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "rule_not_found",
+        }
+    except MailUnsupportedRuleActionError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unsupported_rule_action",
+        }
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "validation_error",
+        }
+    except Exception as e:
+        logger.error(f"Error in update_rule: {e}")
         return {
             "success": False,
             "error": str(e),

@@ -321,3 +321,118 @@ class TestErrorHandling:
                 account=test_account,
                 mailbox="NonExistentMailbox12345"
             )
+
+
+class TestRuleCRUDIntegration:
+    """End-to-end CRUD on a test-prefixed Mail.app rule.
+
+    Self-cleaning: always deletes the test rule at the end via try/finally,
+    even if intermediate assertions fail. Idempotent: a leftover from a
+    previous failed run is detected and removed at the start.
+
+    Refers to a rule whose name starts with '[apple-mail-mcp-test]' —
+    this is the test prefix the safety gate uses, but the connector
+    itself doesn't enforce it. We use a recognizable name so manual
+    cleanup is easy if all else fails.
+    """
+
+    TEST_RULE_NAME = "[apple-mail-mcp-test] integration test rule"
+
+    def _delete_test_rule_if_present(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """Find and delete any rule with TEST_RULE_NAME, regardless of state."""
+        for r in connector.list_rules():
+            if r["name"] == self.TEST_RULE_NAME:
+                connector.delete_rule(r["index"])
+
+    def test_full_crud_cycle(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """Create → list → enable-toggle → update → delete a test rule."""
+        # Pre-clean: in case a previous run left a leftover.
+        self._delete_test_rule_if_present(connector)
+
+        try:
+            # 1. CREATE
+            new_index = connector.create_rule(
+                name=self.TEST_RULE_NAME,
+                conditions=[
+                    {
+                        "field": "subject",
+                        "operator": "contains",
+                        "value": "this-string-will-not-match-anything-zzz",
+                    }
+                ],
+                actions={"mark_read": True},
+                match_logic="all",
+                enabled=True,
+            )
+            assert new_index >= 1
+
+            # 2. LIST: verify it's there with expected index, name, enabled.
+            rules = connector.list_rules()
+            test_rule = next(
+                (r for r in rules if r["name"] == self.TEST_RULE_NAME),
+                None,
+            )
+            assert test_rule is not None, (
+                f"Created rule not found in list_rules output. "
+                f"Saw: {[r['name'] for r in rules]}"
+            )
+            assert test_rule["index"] == new_index
+            assert test_rule["enabled"] is True
+
+            # 3. SET_RULE_ENABLED: toggle off.
+            connector.set_rule_enabled(new_index, enabled=False)
+            rules = connector.list_rules()
+            test_rule = next(
+                r for r in rules if r["name"] == self.TEST_RULE_NAME
+            )
+            assert test_rule["enabled"] is False
+
+            # 4. UPDATE: rename + re-enable + change actions + match_logic.
+            # NOTE: `conditions=` deliberately not exercised here — Mail.app
+            # on macOS Tahoe has a recursion bug in
+            # removeFromCriteriaAtIndex: that crashes Mail on any path that
+            # removes a rule condition. The connector refuses `conditions=`
+            # with MailUnsupportedRuleActionError; see test_mail_connector
+            # for unit coverage of the refusal.
+            renamed = self.TEST_RULE_NAME + " v2"
+            connector.update_rule(
+                rule_index=new_index,
+                name=renamed,
+                enabled=True,
+                match_logic="any",
+                actions={"mark_flagged": True, "flag_color": "red"},
+            )
+            rules = connector.list_rules()
+            updated_rule = next(
+                (r for r in rules if r["name"] == renamed), None
+            )
+            assert updated_rule is not None, (
+                f"Updated rule with new name not found. "
+                f"Saw: {[r['name'] for r in rules]}"
+            )
+            assert updated_rule["enabled"] is True
+
+            # Restore the original name so cleanup finds it.
+            connector.update_rule(rule_index=updated_rule["index"], name=self.TEST_RULE_NAME)
+
+            # 5. DELETE: remove it. delete_rule returns the rule's name.
+            test_rule = next(
+                r for r in connector.list_rules()
+                if r["name"] == self.TEST_RULE_NAME
+            )
+            deleted_name = connector.delete_rule(test_rule["index"])
+            assert deleted_name == self.TEST_RULE_NAME
+
+            # 6. VERIFY GONE
+            rules_after = connector.list_rules()
+            names_after = [r["name"] for r in rules_after]
+            assert self.TEST_RULE_NAME not in names_after, (
+                f"Test rule still in list after delete: {names_after}"
+            )
+        finally:
+            # Defensive cleanup if anything above raised.
+            self._delete_test_rule_if_present(connector)
