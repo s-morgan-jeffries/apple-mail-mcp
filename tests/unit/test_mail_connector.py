@@ -1964,3 +1964,54 @@ class TestWrapAsJsonScript:
         body_idx = script.index(body)
         epilogue_idx = script.index("NSJSONSerialization")
         assert framework_idx < body_idx < epilogue_idx
+
+
+class TestAutoTemplateVars:
+    """auto_template_vars() builds the auto-fill dict for render_template."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    def test_no_message_id_returns_only_today(
+        self, connector: AppleMailConnector
+    ) -> None:
+        result = connector.auto_template_vars(message_id=None)
+        assert set(result.keys()) == {"today"}
+        # ISO date format
+        assert len(result["today"]) == 10
+        assert result["today"][4] == "-" and result["today"][7] == "-"
+
+    @patch.object(AppleMailConnector, "get_message")
+    def test_with_message_id_extracts_sender_fields(
+        self, mock_get: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_get.return_value = {
+            "id": "abc",
+            "subject": "Project Q3 plan",
+            "sender": "Alice Smith <alice@example.com>",
+            "content": "...",
+        }
+        result = connector.auto_template_vars(message_id="abc")
+        assert result["recipient_name"] == "Alice Smith"
+        assert result["recipient_email"] == "alice@example.com"
+        assert result["original_subject"] == "Project Q3 plan"
+        assert "today" in result
+        # Confirm we called get_message without fetching content
+        mock_get.assert_called_once_with("abc", include_content=False)
+
+    @patch.object(AppleMailConnector, "get_message")
+    def test_sender_without_display_name_falls_back_to_email(
+        self, mock_get: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        # Sender field is just an email, no display name
+        mock_get.return_value = {
+            "id": "x",
+            "subject": "hi",
+            "sender": "bob@example.com",
+            "content": "",
+        }
+        result = connector.auto_template_vars(message_id="x")
+        # When no display name, recipient_name falls back to the email
+        assert result["recipient_name"] == "bob@example.com"
+        assert result["recipient_email"] == "bob@example.com"
