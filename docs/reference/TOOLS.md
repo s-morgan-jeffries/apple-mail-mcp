@@ -1038,7 +1038,7 @@ print(f"Thread has {thread['count']} messages")
 
 ### list_rules
 
-List all Mail.app rules (read-only). Returns each rule's name and enabled state.
+List all Mail.app rules. Returns each rule's 1-based positional index, name, and enabled state. The `index` is the handle the mutation tools (`set_rule_enabled`, `delete_rule`, `update_rule`) use to address a specific rule.
 
 **Parameters:** None.
 
@@ -1048,8 +1048,8 @@ List all Mail.app rules (read-only). Returns each rule's name and enabled state.
 {
   "success": true,
   "rules": [
-    {"name": "Junk filter", "enabled": true},
-    {"name": "News From Apple", "enabled": false}
+    {"index": 1, "name": "Junk filter", "enabled": true},
+    {"index": 2, "name": "News From Apple", "enabled": false}
   ],
   "count": 2
 }
@@ -1057,13 +1057,105 @@ List all Mail.app rules (read-only). Returns each rule's name and enabled state.
 
 **Field notes:**
 
-- `name`: Rule display name. **Not guaranteed unique** — Mail.app allows multiple rules with the same name.
+- `index`: 1-based positional index, matching Mail.app's AppleScript reference (`rule N`). Indexes can shift if rules are reordered or deleted in Mail's UI between calls — re-fetch the list before mutating.
+- `name`: Rule display name. **Not guaranteed unique** — Mail.app allows multiple rules with the same name. Use `index`, not `name`, for unambiguous addressing.
 - `enabled`: Reflects the rule's toggle in Mail.app's Rules preferences.
+
+---
+
+### set_rule_enabled
+
+Toggle a rule's enabled state.
+
+**Parameters:**
+
+- `rule_index` (int, required): 1-based index from `list_rules`.
+- `enabled` (bool, required): `true` to enable, `false` to disable.
+
+**Returns:**
+
+```json
+{"success": true, "rule_index": 3, "enabled": false}
+```
+
+No confirmation prompt — the change is trivially reversible by toggling again.
+
+---
+
+### create_rule
+
+Create a new rule. Appended at the end of the rules list.
+
+**Parameters:**
+
+- `name` (str, required): Display name. Need not be unique.
+- `conditions` (list, required, ≥1): List of `{field, operator, value}` records. `field` ∈ `from`, `to`, `subject`, `body`, `any_recipient`, `header_name`. `operator` ∈ `contains`, `does_not_contain`, `begins_with`, `ends_with`, `equals`. When `field=="header_name"`, an additional `header_name` key is required to specify which header to test.
+- `actions` (dict, required, ≥1 action): Any subset of `move_to`, `copy_to`, `mark_read`, `mark_flagged`, `flag_color`, `delete`, `forward_to`. `move_to`/`copy_to` take `{account, mailbox}`. `flag_color` ∈ `none`, `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `gray` and is only meaningful with `mark_flagged: true`. `forward_to` is a list of email addresses.
+- `match_logic` (str, default `"all"`): `"all"` requires every condition; `"any"` requires at least one.
+- `enabled` (bool, default `true`): Whether the rule is active immediately.
+
+**Returns:**
+
+```json
+{"success": true, "rule_index": 7, "name": "From OmniFocus support"}
+```
+
+No confirmation prompt — creation is additive and the rule can be deleted afterward.
+
+**Example:**
+
+```python
+create_rule(
+    name="File OmniFocus replies",
+    conditions=[{"field": "from", "operator": "contains", "value": "@omnifocus.com"}],
+    actions={"move_to": {"account": "Personal", "mailbox": "Support"}, "mark_read": True},
+)
+```
+
+---
+
+### update_rule
+
+Patch a rule's properties. Only the fields you pass are changed.
+
+**Parameters:**
+
+- `rule_index` (int, required): 1-based index from `list_rules`.
+- `name` (str, optional): New display name.
+- `enabled` (bool, optional): New enabled state.
+- `match_logic` (str, optional): `"all"` or `"any"`.
+- `actions` (dict, optional): When provided, **replaces** the rule's actions wholesale (per the same schema as `create_rule`'s `actions`).
+
+**Confirmation:** elicits user confirmation before applying the change.
+
+**Returns:**
+
+```json
+{"success": true, "rule_index": 7}
+```
 
 **Limitations:**
 
-- Read-only. Mutation (enable/disable, create, update, delete) is tracked as a separate enhancement.
-- Rules have no stable id via AppleScript. Addressing a specific rule for future mutation would require positional (index) or name-based (ambiguous) handles.
+- **`conditions` cannot be replaced.** Mail.app on macOS Tahoe (16.0 / macOS 26) has a recursion bug in `-[MFMessageRule(Applescript) removeFromCriteriaAtIndex:]`: any AppleScript path that removes a rule condition (delete by index, delete every, or assignment of a new list) crashes Mail. `update_rule` raises `MailUnsupportedRuleActionError` if `conditions=` is passed. To change a rule's conditions, delete it with `delete_rule` and recreate with `create_rule`.
+- Rules whose existing actions include unsupported types (`run AppleScript`, `redirect message`, `play sound`, `notify`, `reply text`, color-message highlights) raise `MailUnsupportedRuleActionError` to avoid clobbering settings outside our schema.
+
+---
+
+### delete_rule
+
+Delete a rule by index.
+
+**Parameters:**
+
+- `rule_index` (int, required): 1-based index from `list_rules`.
+
+**Confirmation:** elicits user confirmation before deletion.
+
+**Returns:**
+
+```json
+{"success": true, "rule_index": 7, "name": "File OmniFocus replies"}
+```
 
 ---
 

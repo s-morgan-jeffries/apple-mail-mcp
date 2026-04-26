@@ -660,7 +660,7 @@ class TestAppleMailConnector:
         assert 'set name of newRule to "Renamed"' in update_script
         # Patch semantics: enabled/match_logic/conditions/actions not touched.
         assert "set enabled of newRule" not in update_script
-        assert "delete every rule condition" not in update_script
+        assert "set rule conditions of newRule" not in update_script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_update_rule_enabled_only_changes_enabled(
@@ -675,23 +675,21 @@ class TestAppleMailConnector:
         assert "set enabled of newRule to false" in update_script
         assert "set name of newRule" not in update_script
 
-    @patch.object(AppleMailConnector, "_run_applescript")
-    def test_update_rule_conditions_replaces_existing(
-        self, mock_run: MagicMock, connector: AppleMailConnector
+    def test_update_rule_conditions_refused_due_to_mail_bug(
+        self, connector: AppleMailConnector
     ) -> None:
-        mock_run.side_effect = [
-            self._supported_actions_clean_response(),
-            "",
-        ]
-        connector.update_rule(
-            rule_index=4,
-            conditions=[
-                {"field": "from", "operator": "contains", "value": "@x.com"}
-            ],
-        )
-        update_script = mock_run.call_args_list[1][0][0]
-        assert "delete every rule condition of newRule" in update_script
-        assert "rule type:from header" in update_script
+        from apple_mail_mcp.exceptions import MailUnsupportedRuleActionError
+        # Mail.app on macOS Tahoe has a recursion bug in
+        # removeFromCriteriaAtIndex: that crashes Mail on any AppleScript
+        # path that removes a rule condition. update_rule must refuse
+        # `conditions=` with a typed error instead of attempting it.
+        with pytest.raises(MailUnsupportedRuleActionError, match="Tahoe"):
+            connector.update_rule(
+                rule_index=4,
+                conditions=[
+                    {"field": "from", "operator": "contains", "value": "@x.com"}
+                ],
+            )
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_update_rule_actions_resets_then_applies(
@@ -760,12 +758,6 @@ class TestAppleMailConnector:
     ) -> None:
         with pytest.raises(ValueError, match="name"):
             connector.update_rule(rule_index=2, name="")
-
-    def test_update_rule_rejects_empty_conditions(
-        self, connector: AppleMailConnector
-    ) -> None:
-        with pytest.raises(ValueError, match="conditions"):
-            connector.update_rule(rule_index=2, conditions=[])
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_accounts_script_quotes_name_key(

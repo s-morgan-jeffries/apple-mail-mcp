@@ -549,12 +549,22 @@ class AppleMailConnector:
                 f"match_logic must be 'all' or 'any', got {match_logic!r}"
             )
         if conditions is not None:
-            if not conditions:
-                raise ValueError(
-                    "conditions, if provided, must have at least one entry"
-                )
-            for cond in conditions:
-                self._validate_rule_condition(cond)
+            # Mail.app on macOS Tahoe (16.0 / macOS 26) has a recursion bug
+            # in -[MFMessageRule(Applescript) removeFromCriteriaAtIndex:].
+            # ANY AppleScript path that removes a rule condition (delete by
+            # index, delete every, or assigning a new list to `rule
+            # conditions`) hits the same broken accessor and crashes Mail.
+            # Verified with a one-line minimal repro:
+            #     tell application "Mail" to delete rule condition 1 of rule "X"
+            # Until Apple fixes this, replacing conditions in place is not
+            # implementable; users must delete and recreate the rule.
+            raise MailUnsupportedRuleActionError(
+                "Replacing rule conditions is not supported: Mail.app on "
+                "macOS Tahoe has a recursion bug in its AppleScript handler "
+                "for rule-condition deletion (-[MFMessageRule(Applescript) "
+                "removeFromCriteriaAtIndex:]) that crashes Mail. To change "
+                "conditions, delete the rule and recreate it with create_rule."
+            )
         if actions is not None:
             self._validate_rule_actions(actions)
         if name is not None and (not isinstance(name, str) or not name):
@@ -572,43 +582,15 @@ class AppleMailConnector:
             f"set newRule to rule {rule_index}",
         ]
 
-        if enabled is not None:
-            body_parts.append(
-                f"set enabled of newRule to "
-                f"{'true' if enabled else 'false'}"
-            )
         if match_logic is not None:
             body_parts.append(
                 f"set all conditions must be met of newRule to "
                 f"{'true' if match_logic == 'all' else 'false'}"
             )
-        if conditions is not None:
-            body_parts.append("delete every rule condition of newRule")
-            for cond in conditions:
-                rule_type = _RULE_FIELD_MAP[cond["field"]]
-                qualifier = _RULE_OPERATOR_MAP[cond["operator"]]
-                expr_safe = escape_applescript_string(
-                    sanitize_input(cond["value"])
-                )
-                if cond["field"] == "header_name":
-                    header_safe = escape_applescript_string(
-                        sanitize_input(cond["header_name"])
-                    )
-                    body_parts.append(
-                        f"make new rule condition with properties "
-                        f"{{rule type:{rule_type}, qualifier:{qualifier}, "
-                        f'expression:"{expr_safe}", header:"{header_safe}"}} '
-                        f"at end of rule conditions of newRule"
-                    )
-                else:
-                    body_parts.append(
-                        f"make new rule condition with properties "
-                        f"{{rule type:{rule_type}, qualifier:{qualifier}, "
-                        f'expression:"{expr_safe}"}} '
-                        f"at end of rule conditions of newRule"
-                    )
         if actions is not None:
             # Reset all supported action flags first; then apply provided ones.
+            # `set forward message ... to ""` raises -10000 when the value is
+            # already empty (Tahoe quirk), so gate the reset on a length check.
             body_parts.extend([
                 "set should move message of newRule to false",
                 "set should copy message of newRule to false",
@@ -616,9 +598,17 @@ class AppleMailConnector:
                 "set mark flagged of newRule to false",
                 "set mark flag index of newRule to -1",
                 "set delete message of newRule to false",
+                'if forward message of newRule is not "" then '
                 'set forward message of newRule to ""',
             ])
             body_parts.extend(self._build_action_lines(actions))
+        # `enabled` must come AFTER the action-reset block: setting enabled
+        # before resets causes the reset to silently revert it (Tahoe quirk).
+        if enabled is not None:
+            body_parts.append(
+                f"set enabled of newRule to "
+                f"{'true' if enabled else 'false'}"
+            )
         # Rename last — see comment above.
         if name is not None:
             name_safe = escape_applescript_string(sanitize_input(name))

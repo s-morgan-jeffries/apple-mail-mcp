@@ -391,19 +391,20 @@ class TestRuleCRUDIntegration:
             )
             assert test_rule["enabled"] is False
 
-            # 4. UPDATE: rename + re-enable + replace conditions.
+            # 4. UPDATE: rename + re-enable + change actions + match_logic.
+            # NOTE: `conditions=` deliberately not exercised here — Mail.app
+            # on macOS Tahoe has a recursion bug in
+            # removeFromCriteriaAtIndex: that crashes Mail on any path that
+            # removes a rule condition. The connector refuses `conditions=`
+            # with MailUnsupportedRuleActionError; see test_mail_connector
+            # for unit coverage of the refusal.
             renamed = self.TEST_RULE_NAME + " v2"
             connector.update_rule(
                 rule_index=new_index,
                 name=renamed,
                 enabled=True,
-                conditions=[
-                    {
-                        "field": "from",
-                        "operator": "begins_with",
-                        "value": "noreply-",
-                    }
-                ],
+                match_logic="any",
+                actions={"mark_flagged": True, "flag_color": "red"},
             )
             rules = connector.list_rules()
             updated_rule = next(
