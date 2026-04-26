@@ -227,6 +227,8 @@ class TestCheckRateLimit:
             "delete_messages", "reply_to_message", "send_email",
             "send_email_with_attachments", "forward_message",
             "set_rule_enabled", "delete_rule", "create_rule", "update_rule",
+            "list_templates", "get_template", "save_template",
+            "delete_template", "render_template",
         }
         assert set(OPERATION_TIERS.keys()) == expected_ops
 

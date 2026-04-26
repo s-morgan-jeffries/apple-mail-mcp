@@ -14,9 +14,15 @@ from .exceptions import (
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
     MailRuleNotFoundError,
+    MailTemplateError,
+    MailTemplateInvalidFormatError,
+    MailTemplateInvalidNameError,
+    MailTemplateMissingVariableError,
+    MailTemplateNotFoundError,
     MailUnsupportedRuleActionError,
 )
 from .mail_connector import AppleMailConnector
+from .templates import Template, TemplateStore
 from .security import (
     check_rate_limit,
     check_test_mode_safety,
@@ -1775,6 +1781,244 @@ async def forward_message(
             "error": str(e),
             "error_type": "unknown",
         }
+
+
+# ---------------------------------------------------------------------
+# Email templates (#30) — see docs/reference/TOOLS.md for the file format
+# ---------------------------------------------------------------------
+
+# Single shared store; root resolves at call-time via env override so tests
+# and unusual setups can redirect.
+def _get_template_store() -> TemplateStore:
+    """Return the active TemplateStore. Re-resolved per call so the
+    APPLE_MAIL_MCP_HOME env var (and test-time monkeypatching) take
+    effect at use time, not import time."""
+    return TemplateStore()
+
+
+def _template_error_response(e: MailTemplateError) -> dict[str, Any]:
+    """Map a template exception to the standard {success, error, error_type}
+    response shape."""
+    if isinstance(e, MailTemplateNotFoundError):
+        et = "template_not_found"
+    elif isinstance(e, MailTemplateInvalidNameError):
+        et = "invalid_template_name"
+    elif isinstance(e, MailTemplateInvalidFormatError):
+        et = "invalid_template_format"
+    elif isinstance(e, MailTemplateMissingVariableError):
+        et = "missing_template_variable"
+    else:
+        et = "template_error"
+    return {"success": False, "error": str(e), "error_type": et}
+
+
+@mcp.tool()
+def list_templates() -> dict[str, Any]:
+    """List all stored email templates.
+
+    Templates live as files at ~/.apple_mail_mcp/templates/<name>.md.
+    Override the location with the APPLE_MAIL_MCP_HOME environment
+    variable.
+
+    Returns:
+        Dictionary with each template's name and subject (or null if
+        no subject header is set).
+    """
+    try:
+        rate_err = check_rate_limit("list_templates", {})
+        if rate_err:
+            return rate_err
+        templates = _get_template_store().list()
+        operation_logger.log_operation("list_templates", {}, "success")
+        return {
+            "success": True,
+            "templates": [
+                {"name": t.name, "subject": t.subject} for t in templates
+            ],
+            "count": len(templates),
+        }
+    except Exception as e:
+        logger.error(f"Error in list_templates: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
+
+
+@mcp.tool()
+def get_template(name: str) -> dict[str, Any]:
+    """Read a single template by name.
+
+    Args:
+        name: Template name (alphanumerics, underscore, hyphen; 1-64 chars).
+
+    Returns:
+        Dictionary with name, subject (may be null), body, and the sorted
+        list of placeholder names found in subject + body.
+    """
+    try:
+        rate_err = check_rate_limit("get_template", {"name": name})
+        if rate_err:
+            return rate_err
+        t = _get_template_store().get(name)
+        operation_logger.log_operation("get_template", {"name": name}, "success")
+        return {
+            "success": True,
+            "name": t.name,
+            "subject": t.subject,
+            "body": t.body,
+            "placeholders": t.placeholders(),
+        }
+    except MailTemplateError as e:
+        return _template_error_response(e)
+    except Exception as e:
+        logger.error(f"Error in get_template: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
+
+
+@mcp.tool()
+def save_template(
+    name: str, body: str, subject: str | None = None
+) -> dict[str, Any]:
+    """Create or overwrite a template.
+
+    Args:
+        name: Template name (alphanumerics, underscore, hyphen; 1-64 chars).
+        body: Template body text. May contain {placeholder} tokens.
+        subject: Optional subject template. May also contain placeholders.
+
+    Returns:
+        Dictionary with the template name and a `created` flag (true for
+        new templates, false when an existing template was overwritten).
+
+    No confirmation prompt — additive (or self-overwrite, which is the
+    explicit user intent for an idempotent save).
+    """
+    try:
+        rate_err = check_rate_limit("save_template", {"name": name})
+        if rate_err:
+            return rate_err
+        if not isinstance(body, str) or not body.strip():
+            return {
+                "success": False,
+                "error": "body must be a non-empty string",
+                "error_type": "validation_error",
+            }
+        # Normalize body to end with a newline so on-disk files stay tidy.
+        normalized_body = body if body.endswith("\n") else body + "\n"
+        template = Template(
+            name=name, subject=subject, body=normalized_body
+        )
+        created = _get_template_store().save(template)
+        operation_logger.log_operation(
+            "save_template", {"name": name, "created": created}, "success"
+        )
+        return {"success": True, "name": name, "created": created}
+    except MailTemplateError as e:
+        return _template_error_response(e)
+    except Exception as e:
+        logger.error(f"Error in save_template: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
+
+
+@mcp.tool()
+async def delete_template(
+    name: str, ctx: Context | None = None
+) -> dict[str, Any]:
+    """Delete a template by name.
+
+    Destructive — requires user confirmation via MCP elicitation before
+    running.
+
+    Args:
+        name: Template name to delete.
+
+    Returns:
+        Dictionary with success status and the deleted template's name.
+    """
+    try:
+        rate_err = check_rate_limit("delete_template", {"name": name})
+        if rate_err:
+            return rate_err
+        # Verify it exists before asking the user — saves them a useless
+        # confirmation prompt for a non-existent name.
+        _get_template_store().get(name)
+
+        summary = (
+            f"Delete email template '{name}'? "
+            f"This removes the file at ~/.apple_mail_mcp/templates/{name}.md."
+        )
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "delete_template", {"name": name}
+        )
+        if cancel_err:
+            return cancel_err
+
+        _get_template_store().delete(name)
+        operation_logger.log_operation(
+            "delete_template", {"name": name}, "success"
+        )
+        return {"success": True, "name": name}
+    except MailTemplateError as e:
+        return _template_error_response(e)
+    except Exception as e:
+        logger.error(f"Error in delete_template: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
+
+
+@mcp.tool()
+def render_template(
+    name: str,
+    message_id: str | None = None,
+    vars: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Render a template into ready-to-send subject and body text.
+
+    No side effects — caller is responsible for passing the rendered
+    text to reply_to_message, forward_message, or send_email.
+
+    With ``message_id``, the original sender's display name and email,
+    the original subject, and today's date are auto-populated as
+    ``recipient_name``, ``recipient_email``, ``original_subject``, and
+    ``today``. Without ``message_id``, only ``today`` is auto-filled.
+    User-supplied ``vars`` always override auto-fills on conflict.
+
+    Args:
+        name: Template name to render.
+        message_id: Optional source-message id for reply context.
+        vars: Optional dict of variable overrides / additional values.
+
+    Returns:
+        Dictionary with the rendered subject (may be null), body, and
+        the merged variable dict that was used.
+    """
+    try:
+        rate_err = check_rate_limit("render_template", {"name": name})
+        if rate_err:
+            return rate_err
+        template = _get_template_store().get(name)
+        auto_vars = mail.auto_template_vars(message_id)
+        merged: dict[str, str] = {**auto_vars, **(vars or {})}
+        rendered = template.render(merged)
+        operation_logger.log_operation(
+            "render_template",
+            {"name": name, "message_id": message_id},
+            "success",
+        )
+        return {
+            "success": True,
+            "subject": rendered["subject"],
+            "body": rendered["body"],
+            "used_vars": merged,
+        }
+    except MailTemplateError as e:
+        return _template_error_response(e)
+    except MailMessageNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "message_not_found",
+        }
+    except Exception as e:
+        logger.error(f"Error in render_template: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
 
 
 def main() -> None:

@@ -32,18 +32,23 @@ from apple_mail_mcp.server import (
     create_rule,
     delete_messages,
     delete_rule,
+    delete_template,
     flag_message,
     forward_message,
     get_attachments,
     get_message,
+    get_template,
     get_thread,
     list_accounts,
     list_mailboxes,
     list_rules,
+    list_templates,
     mark_as_read,
     move_messages,
+    render_template,
     reply_to_message,
     save_attachments,
+    save_template,
     search_messages,
     send_email,
     send_email_with_attachments,
@@ -1661,3 +1666,227 @@ class TestSafetyGate:
         result = list_mailboxes("Gmail")
 
         assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Email templates (#30)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated_templates(tmp_path: Any, monkeypatch: Any) -> Any:
+    """Redirect template storage to a tmp dir for the duration of the test."""
+    monkeypatch.setenv("APPLE_MAIL_MCP_HOME", str(tmp_path))
+    return tmp_path / "templates"
+
+
+class TestListTemplates:
+    def test_empty_when_no_templates(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        result = list_templates()
+        assert result == {"success": True, "templates": [], "count": 0}
+
+    def test_returns_saved_templates_sorted(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        save_template(name="zebra", body="z\n", subject="Z")
+        save_template(name="alpha", body="a\n")
+        result = list_templates()
+        assert result["count"] == 2
+        assert [t["name"] for t in result["templates"]] == ["alpha", "zebra"]
+        assert result["templates"][1]["subject"] == "Z"
+        assert result["templates"][0]["subject"] is None
+
+
+class TestGetTemplate:
+    def test_returns_template_and_placeholders(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        save_template(
+            name="t1",
+            body="Hi {recipient_name}, today is {today}.\n",
+            subject="Re: {original_subject}",
+        )
+        result = get_template("t1")
+        assert result["success"] is True
+        assert result["name"] == "t1"
+        assert result["subject"] == "Re: {original_subject}"
+        assert result["body"] == "Hi {recipient_name}, today is {today}.\n"
+        assert result["placeholders"] == [
+            "original_subject",
+            "recipient_name",
+            "today",
+        ]
+
+    def test_missing_returns_typed_error(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        result = get_template("missing")
+        assert result["success"] is False
+        assert result["error_type"] == "template_not_found"
+
+    def test_invalid_name_returns_typed_error(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        result = get_template("../etc/passwd")
+        assert result["success"] is False
+        assert result["error_type"] == "invalid_template_name"
+
+
+class TestSaveTemplate:
+    def test_create_returns_created_true(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        result = save_template(name="new", body="hi\n")
+        assert result == {"success": True, "name": "new", "created": True}
+
+    def test_overwrite_returns_created_false(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        save_template(name="x", body="v1\n")
+        result = save_template(name="x", body="v2\n")
+        assert result == {"success": True, "name": "x", "created": False}
+
+    def test_empty_body_rejected(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        result = save_template(name="x", body="   ")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+
+    def test_invalid_name_returns_typed_error(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        result = save_template(name="bad name with spaces", body="ok\n")
+        assert result["success"] is False
+        assert result["error_type"] == "invalid_template_name"
+
+    def test_normalizes_missing_trailing_newline(
+        self, isolated_templates: Any, mock_logger: MagicMock
+    ) -> None:
+        save_template(name="x", body="no trailing newline")
+        loaded = get_template("x")
+        assert loaded["body"].endswith("\n")
+
+
+class TestDeleteTemplate:
+    async def test_success_with_accepted_ctx(
+        self,
+        isolated_templates: Any,
+        mock_ctx_accept: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        save_template(name="goner", body="bye\n")
+        result = await delete_template("goner", ctx=mock_ctx_accept)
+        assert result == {"success": True, "name": "goner"}
+        mock_ctx_accept.elicit.assert_awaited_once()
+        # Confirm it was actually deleted from disk:
+        assert get_template("goner")["error_type"] == "template_not_found"
+
+    async def test_decline_returns_cancelled(
+        self,
+        isolated_templates: Any,
+        mock_ctx_decline: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        save_template(name="keep", body="x\n")
+        result = await delete_template("keep", ctx=mock_ctx_decline)
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        # Still on disk:
+        assert get_template("keep")["success"] is True
+
+    async def test_nonexistent_skips_elicit(
+        self,
+        isolated_templates: Any,
+        mock_ctx_accept: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        # Confirm we don't bother the user when the template doesn't exist.
+        result = await delete_template("never-existed", ctx=mock_ctx_accept)
+        assert result["success"] is False
+        assert result["error_type"] == "template_not_found"
+        mock_ctx_accept.elicit.assert_not_awaited()
+
+
+class TestRenderTemplate:
+    def test_renders_with_user_supplied_vars_only(
+        self,
+        isolated_templates: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        # No message_id — auto_template_vars returns just {today: ...}.
+        mock_mail.auto_template_vars.return_value = {"today": "2026-04-25"}
+        save_template(
+            name="r",
+            body="Hi {name}, today is {today}.\n",
+        )
+        result = render_template(name="r", vars={"name": "Alice"})
+        assert result["success"] is True
+        assert result["subject"] is None
+        assert result["body"] == "Hi Alice, today is 2026-04-25.\n"
+        assert result["used_vars"] == {"today": "2026-04-25", "name": "Alice"}
+
+    def test_uses_message_id_for_auto_fills(
+        self,
+        isolated_templates: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        mock_mail.auto_template_vars.return_value = {
+            "today": "2026-04-25",
+            "recipient_name": "Bob Builder",
+            "recipient_email": "bob@example.com",
+            "original_subject": "Project X",
+        }
+        save_template(
+            name="reply",
+            subject="Re: {original_subject}",
+            body="Hi {recipient_name},\nThanks for your note.\n",
+        )
+        result = render_template(name="reply", message_id="abc-123")
+        mock_mail.auto_template_vars.assert_called_once_with("abc-123")
+        assert result["subject"] == "Re: Project X"
+        assert result["body"].startswith("Hi Bob Builder")
+
+    def test_user_vars_override_auto_fills(
+        self,
+        isolated_templates: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        mock_mail.auto_template_vars.return_value = {
+            "today": "2026-04-25",
+            "recipient_name": "Auto Name",
+        }
+        save_template(name="t", body="Hello {recipient_name}.\n")
+        result = render_template(
+            name="t", message_id="x", vars={"recipient_name": "Override"}
+        )
+        assert "Override" in result["body"]
+        assert "Auto Name" not in result["body"]
+
+    def test_missing_var_returns_typed_error(
+        self,
+        isolated_templates: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        mock_mail.auto_template_vars.return_value = {"today": "x"}
+        save_template(name="t", body="Need {something_else}.\n")
+        result = render_template(name="t")
+        assert result["success"] is False
+        assert result["error_type"] == "missing_template_variable"
+        assert "something_else" in result["error"]
+
+    def test_template_not_found_returns_typed_error(
+        self,
+        isolated_templates: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        result = render_template(name="never-existed")
+        assert result["success"] is False
+        assert result["error_type"] == "template_not_found"

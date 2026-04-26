@@ -141,6 +141,12 @@ OPERATION_TIERS: dict[str, str] = {
     "send_email": "sends",
     "send_email_with_attachments": "sends",
     "forward_message": "sends",
+    # Email templates (#30) — local file I/O only, never touches Mail.app.
+    "list_templates": "cheap_reads",
+    "get_template": "cheap_reads",
+    "save_template": "cheap_reads",
+    "delete_template": "cheap_reads",
+    "render_template": "cheap_reads",
 }
 
 
