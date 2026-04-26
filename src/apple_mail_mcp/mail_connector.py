@@ -1036,7 +1036,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         {content_clause}
 
                         set resultData to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent}}
@@ -1311,7 +1311,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         set attList to mail attachments of msg
 
                         set resultData to {{}}
@@ -1439,7 +1439,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         set anchorInReplyTo to ""
                         set anchorRefs to ""
                         try
@@ -1648,7 +1648,7 @@ class AppleMailConnector:
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
                     try
-                        set msg to first message of mb whose id is {message_id_safe}
+                        set msg to first message of mb whose id is "{message_id_safe}"
                         set attList to {index_filter} mail attachments of msg
                         set saveCount to 0
 
