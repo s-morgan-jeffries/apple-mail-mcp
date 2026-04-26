@@ -22,7 +22,6 @@ from .exceptions import (
     MailUnsupportedRuleActionError,
 )
 from .mail_connector import AppleMailConnector
-from .templates import Template, TemplateStore
 from .security import (
     check_rate_limit,
     check_test_mode_safety,
@@ -30,6 +29,7 @@ from .security import (
     validate_bulk_operation,
     validate_send_operation,
 )
+from .templates import Template, TemplateStore
 
 # Configure logging
 logging.basicConfig(

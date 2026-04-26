@@ -1200,12 +1200,156 @@ list_mailboxes(first_enabled["name"])
 
 ---
 
+## Email Templates (v0.5.0)
+
+Store and reuse common reply / forward / send bodies. Templates live as
+plain-text files on disk that you can edit in any editor; the tools
+provide a programmatic CRUD layer plus a render step that does
+placeholder substitution and pulls reply-context fields out of a
+referenced message.
+
+### Storage
+
+Templates are files at `~/.apple_mail_mcp/templates/<name>.md`. Override
+the location with the `APPLE_MAIL_MCP_HOME` environment variable
+(`templates/` is appended automatically). The directory is created on
+first save.
+
+### File format
+
+```
+subject: Re: {original_subject}
+
+Hi {recipient_name},
+
+Thanks for reaching out.
+```
+
+The optional header block (`key: value` lines) is terminated by a blank
+line; everything after is the body. The only recognized header in v1 is
+`subject:`. Placeholders use Python `str.format` syntax: `{name}`. To
+include a literal brace, double it: `{{` / `}}`.
+
+### Placeholder substitution
+
+`render_template` returns the rendered subject (or null) and body. The
+following variables are auto-populated:
+
+| Variable | When | Source |
+|----------|------|--------|
+| `today` | always | Current date, ISO format `YYYY-MM-DD` |
+| `recipient_name` | when `message_id` provided | Display name parsed from the original sender |
+| `recipient_email` | when `message_id` provided | Email parsed from the original sender |
+| `original_subject` | when `message_id` provided | The original message's subject |
+
+User-supplied `vars` always override auto-fills on conflict. Any
+placeholder that's neither auto-populated nor user-supplied raises
+`MailTemplateMissingVariableError` listing every unfilled name.
+
+### list_templates
+
+List all stored templates. Returns each template's name and subject
+(may be null).
+
+```json
+{
+  "success": true,
+  "templates": [
+    {"name": "polite-decline", "subject": "Re: {original_subject}"},
+    {"name": "status-update", "subject": null}
+  ],
+  "count": 2
+}
+```
+
+### get_template
+
+Read a single template by name. Returns name, subject (may be null),
+body, and the sorted list of placeholders found across subject + body.
+
+```json
+{
+  "success": true,
+  "name": "polite-decline",
+  "subject": "Re: {original_subject}",
+  "body": "Hi {recipient_name},\n\nUnfortunately I won't be able to take this on.\n",
+  "placeholders": ["original_subject", "recipient_name"]
+}
+```
+
+### save_template
+
+Create or overwrite a template. Returns `created: true` for new
+templates, `created: false` when an existing template was overwritten.
+
+```python
+save_template(
+    name="polite-decline",
+    body="Hi {recipient_name},\n\nUnfortunately I won't be able to take this on.\n",
+    subject="Re: {original_subject}",
+)
+```
+
+No confirmation prompt — additive (or self-overwrite, which is the
+explicit intent of an idempotent save). Names must match
+`^[a-zA-Z0-9_-]{1,64}$`; anything outside that range (spaces, slashes,
+dots, oversized) raises `invalid_template_name`.
+
+### delete_template
+
+Remove a template by name. **Elicits user confirmation** before deleting.
+
+```json
+{"success": true, "name": "polite-decline"}
+```
+
+### render_template
+
+Render a template into ready-to-send text. **No side effects** — the
+caller passes the rendered subject + body to `reply_to_message`,
+`forward_message`, or `send_email` to actually send.
+
+```python
+# Render a reply template against a real message:
+rendered = render_template(
+    name="polite-decline",
+    message_id="<abc@example.com>",
+)
+# rendered = {
+#   "success": True,
+#   "subject": "Re: Project X update",
+#   "body": "Hi Alice,\n\nUnfortunately I won't be able to...",
+#   "used_vars": {"today": "2026-04-25", "recipient_name": "Alice", ...}
+# }
+reply_to_message(
+    message_id="<abc@example.com>",
+    body=rendered["body"],
+)
+
+# Or for a fresh send with custom vars:
+rendered = render_template(
+    name="status-update",
+    vars={"project": "Q3 plan", "status": "on track"},
+)
+send_email(
+    to=["alice@example.com"],
+    subject=rendered["subject"] or "Status update",
+    body=rendered["body"],
+)
+```
+
+User-supplied `vars` override auto-fills. Missing placeholders return
+`missing_template_variable` error. Bad message IDs surface as
+`message_not_found`.
+
+---
+
 ## API Stability
 
 - **Phase 1 (v0.1.x)**: Core tools stable
 - **Phase 2 (v0.2.x)**: Attachments + management
 - **Phase 3 (v0.3.x)**: Reply/forward
-- **Phase 4 (v0.5.x)**: Discovery (list_accounts)
+- **Phase 4 (v0.5.x)**: Discovery (list_accounts), email templates
 - **Phase 5+**: Further enhancements, backward compatible
 
 Breaking changes will only occur in major versions (1.0.0, 2.0.0, etc.).
