@@ -37,7 +37,7 @@ make coverage              # Coverage report
 - **Backend + frontend together** — Every feature touches `mail_connector.py` AND `server.py`. Verify with `check_client_server_parity.sh`.
 - **Sanitize everything twice** — All user input: `sanitize_input()` then `escape_applescript_string()` before AppleScript.
 - **Structured responses** — Every tool returns `{"success": bool, ...}`. Errors include `error` and `error_type`.
-- **Security checklist per feature** — Input validation, escaping, path traversal, rate limiting, audit logging.
+- **Security checklist per feature** — see [`docs/guides/SECURITY_CHECKLIST.md`](../docs/guides/SECURITY_CHECKLIST.md) for the canonical reference (5 concerns: input sanitization, AppleScript escaping, path-traversal-safe name validation, rate limiting, audit logging). Don't duplicate guidance here; link out instead.
 - **If you touched AppleScript, write integration tests** — Unit tests mock `_run_applescript()` and CANNOT catch AppleScript bugs.
 
 ## AppleScript Gotchas
