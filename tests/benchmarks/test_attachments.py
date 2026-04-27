@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -14,16 +13,6 @@ from .conftest import (
     assert_within_baseline,
     measure_median,
 )
-
-
-@pytest.fixture(scope="module")
-def connector() -> AppleMailConnector:
-    return AppleMailConnector(timeout=120)
-
-
-@pytest.fixture(scope="module")
-def test_account() -> str:
-    return os.getenv("MAIL_TEST_ACCOUNT", "iCloud")
 
 
 @pytest.fixture(scope="module")

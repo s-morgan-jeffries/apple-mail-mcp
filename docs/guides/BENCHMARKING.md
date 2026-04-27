@@ -37,6 +37,12 @@ Benchmarks measure real Mail.app behavior, so they need real data:
 
 If a precondition isn't met, the benchmark skips with a clear message rather than failing. This is by design — running a smaller bulk benchmark on 5 messages would defeat the point (the scaling signal is what matters).
 
+## Bulk benchmarks (mark_as_read, move_messages) currently skip
+
+The bulk-operation benchmarks rely on `move_messages` to populate the bench mailbox. `move_messages` in the connector currently scans every account × every mailbox to find each message ID — on a configuration with 4 accounts and ~115 total mailboxes (typical when Gmail is enabled, since it surfaces 90+ labels), that's 5,750 IMAP searches per call. The fixture setup times out and the bulk benchmarks skip with a clear message pointing at issue #103.
+
+Once #103 ships an optimized bulk path with a `source_mailbox` parameter, the fixture will succeed and bulk baselines can be captured via `make benchmark-baseline`. No code changes are needed in the benchmarks themselves — the suite is wired and ready.
+
 ## How baselines are stored
 
 `tests/benchmarks/baseline.json` holds one number per benchmark — the median wall-clock seconds observed at capture time:

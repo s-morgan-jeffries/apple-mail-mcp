@@ -1,23 +1,19 @@
 """Benchmarks for bulk-mutation operations.
 
-These benchmarks DO mutate Mail.app state, but they revert their changes
-in a finally block so the suite is idempotent.
+These benchmarks DO mutate Mail.app state, but the `bench_messages`
+fixture in conftest.py handles setup (move BULK_SIZE messages into
+[apple-mail-mcp-bench]) and teardown (move them all back to source).
+The benchmarks themselves operate on the bench mailbox so test data
+is isolated from real mail.
 
-The setup story is honest: real benchmarks require real test data. Each
-test fixture documents what state it expects and skips with a clear
-message if the precondition isn't met.
-
-v1 covers `mark_as_read` only. `move_messages` is intentionally deferred
-to a follow-up — IMAP UIDs change on move, which makes the round-trip-
-then-revert pattern fragile. A future PR can add it once a stable
-fixture-mailbox setup is documented.
+Two benchmarks here:
+- `mark_as_read_50_msgs` — bulk read-state toggle (single AppleScript
+  call covering all N messages; the key scaling-pattern signal)
+- `move_messages_50_msgs` — bulk move (round-trip: bench → source → bench
+  per iteration, leaving state unchanged at iteration end)
 """
 
 from __future__ import annotations
-
-import os
-
-import pytest
 
 from apple_mail_mcp.mail_connector import AppleMailConnector
 
@@ -27,76 +23,82 @@ from .conftest import (
     measure_median,
 )
 
-BULK_SIZE = 50
-
-
-@pytest.fixture(scope="module")
-def connector() -> AppleMailConnector:
-    return AppleMailConnector(timeout=120)
-
-
-@pytest.fixture(scope="module")
-def test_account() -> str:
-    return os.getenv("MAIL_TEST_ACCOUNT", "iCloud")
-
-
-@pytest.fixture(scope="module")
-def bulk_message_ids(
-    connector: AppleMailConnector, test_account: str
-) -> list[str]:
-    """Return a list of at least BULK_SIZE message IDs from the test
-    account. Used as the inputs for bulk benchmarks.
-
-    Skips the module if fewer than BULK_SIZE messages are available — the
-    benchmarks are about scaling behavior, so a small N defeats the point.
-    """
-    for mb in ("INBOX", "Archive", "Sent Messages"):
-        try:
-            results = connector.search_messages(
-                account=test_account, mailbox=mb, limit=BULK_SIZE
-            )
-        except Exception:
-            continue
-        if len(results) >= BULK_SIZE:
-            return [r["id"] for r in results]
-    pytest.skip(
-        f"Need at least {BULK_SIZE} messages in account {test_account!r} "
-        f"(across INBOX/Archive/Sent Messages) for bulk benchmarks."
-    )
-
 
 def test_mark_as_read_50_msgs(
     connector: AppleMailConnector,
-    bulk_message_ids: list[str],
+    bench_messages: list[str],
     baselines: dict[str, float],
     capture_mode: bool,
 ) -> None:
-    """Baseline: bulk-mark-read against BULK_SIZE messages.
+    """Baseline: bulk-mark-read against BULK_SIZE messages in the bench
+    mailbox.
 
     Each iteration toggles read→unread→read on the same message set.
-    The benchmark measures the full round-trip (both directions go
-    through the same AppleScript path; the per-call cost is what we
-    care about for scaling, not the direction).
-
-    Final state: every message in `bulk_message_ids` ends up read.
-    For messages that were already read before the test, this is a
-    no-op net change. For any that were unread before the test, they
-    end up read — a small accepted side effect of running a benchmark
-    against real data.
+    Final state of each iteration matches the message's starting state
+    in the bench mailbox.
     """
     name = "mark_as_read_50_msgs"
 
     def run() -> None:
-        connector.mark_as_read(bulk_message_ids, read=False)
-        connector.mark_as_read(bulk_message_ids, read=True)
+        connector.mark_as_read(bench_messages, read=False)
+        connector.mark_as_read(bench_messages, read=True)
 
-    try:
-        result: BenchmarkResult = measure_median(run, name=name)
-        assert_within_baseline(name, result, baselines, capture_mode)
-    finally:
-        # Defensive: if a run crashed partway, force-mark-read to leave
-        # the test account in a consistent state.
-        try:
-            connector.mark_as_read(bulk_message_ids, read=True)
-        except Exception:
-            pass
+    result: BenchmarkResult = measure_median(run, name=name)
+    assert_within_baseline(name, result, baselines, capture_mode)
+
+
+def test_move_messages_50_msgs(
+    connector: AppleMailConnector,
+    test_account: str,
+    bench_source: str,
+    bench_mailbox: str,
+    bench_messages: list[str],
+    baselines: dict[str, float],
+    capture_mode: bool,
+) -> None:
+    """Baseline: bulk-move BULK_SIZE messages.
+
+    Each iteration moves bench → source → bench. Two move calls per
+    iteration; we measure the round-trip and report it as
+    move_messages_50_msgs (the per-direction time is half this median).
+
+    IDs change on each move (IMAP UID semantics), so the test re-fetches
+    after each direction. The fixture's teardown drains whatever's left
+    in bench_mailbox back to source, which handles a partial-failure
+    iteration cleanly.
+    """
+    name = "move_messages_50_msgs"
+
+    # Mutable list so we can update IDs across iterations.
+    current_ids = list(bench_messages)
+
+    def run() -> None:
+        # Move bench → source
+        connector.move_messages(
+            current_ids,
+            destination_mailbox=bench_source,
+            account=test_account,
+        )
+        # IDs are now stale. Find the BULK_SIZE most recent in source —
+        # those are the ones we just moved.
+        in_source = connector.search_messages(
+            account=test_account, mailbox=bench_source, limit=len(current_ids)
+        )
+        moved_ids = [m["id"] for m in in_source[: len(current_ids)]]
+
+        # Move source → bench
+        connector.move_messages(
+            moved_ids,
+            destination_mailbox=bench_mailbox,
+            account=test_account,
+        )
+        # Re-fetch bench IDs for the next iteration.
+        in_bench = connector.search_messages(
+            account=test_account, mailbox=bench_mailbox, limit=len(current_ids)
+        )
+        current_ids[:] = [m["id"] for m in in_bench[: len(current_ids)]]
+
+    # 3 runs (not 5) — each run is two moves on 50 messages, so the
+    # benchmark is already slow.
+    result: BenchmarkResult = measure_median(run, name=name, runs=3)
+    assert_within_baseline(name, result, baselines, capture_mode)

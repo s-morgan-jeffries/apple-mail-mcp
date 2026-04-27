@@ -18,17 +18,24 @@ five runs is used as the headline number — see `measure_median`.
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from apple_mail_mcp.exceptions import MailAppleScriptError
+from apple_mail_mcp.mail_connector import AppleMailConnector
+
 REGRESSION_RATIO = 5.0
 DEFAULT_RUNS = 5
 BASELINE_PATH = Path(__file__).parent / "baseline.json"
+
+BENCH_MAILBOX_NAME = "[apple-mail-mcp-bench]"
+BULK_SIZE = 50
 
 
 # ---------------------------------------------------------------------------
@@ -185,3 +192,147 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         f"\nbaseline.json updated with {len(_captured)} entries: "
         f"{sorted(_captured.keys())}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures: connector, test account, bench mailbox
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def connector() -> AppleMailConnector:
+    """Single connector reused across the entire benchmark session.
+
+    Generous timeout (10 min) because some setup operations on full
+    accounts can be slow — `move_messages` in particular scans every
+    account×mailbox pair to find each message ID (see #32). The benchmarks
+    themselves are much faster than this; the long timeout is for fixture
+    setup and teardown."""
+    return AppleMailConnector(timeout=600)
+
+
+@pytest.fixture(scope="session")
+def test_account() -> str:
+    """Account name from MAIL_TEST_ACCOUNT (defaults to 'iCloud')."""
+    return os.getenv("MAIL_TEST_ACCOUNT", "iCloud")
+
+
+@pytest.fixture(scope="session")
+def bench_source(
+    connector: AppleMailConnector, test_account: str
+) -> str:
+    """First mailbox in the test account that has at least BULK_SIZE
+    messages. Used as the source pool for bulk fixtures and as the
+    move-back destination during teardown.
+
+    Skips the entire benchmark session if no mailbox has enough
+    messages — see BENCHMARKING.md for setup."""
+    for mb in ("INBOX", "Archive", "Sent Messages"):
+        try:
+            results = connector.search_messages(
+                account=test_account, mailbox=mb, limit=BULK_SIZE
+            )
+        except Exception:
+            continue
+        if len(results) >= BULK_SIZE:
+            return mb
+    pytest.skip(
+        f"Need at least {BULK_SIZE} messages in account {test_account!r} "
+        f"(across INBOX/Archive/Sent Messages). See "
+        f"docs/guides/BENCHMARKING.md for setup."
+    )
+
+
+@pytest.fixture(scope="session")
+def bench_mailbox(
+    connector: AppleMailConnector, test_account: str
+) -> str:
+    """Ensure the [apple-mail-mcp-bench] mailbox exists in the test
+    account; create it via create_mailbox if missing. Returns its name."""
+    mailboxes = connector.list_mailboxes(test_account)
+    names = {mb["name"] for mb in mailboxes}
+    if BENCH_MAILBOX_NAME not in names:
+        connector.create_mailbox(account=test_account, name=BENCH_MAILBOX_NAME)
+    return BENCH_MAILBOX_NAME
+
+
+@pytest.fixture
+def bench_messages(
+    connector: AppleMailConnector,
+    test_account: str,
+    bench_source: str,
+    bench_mailbox: str,
+) -> Iterator[list[str]]:
+    """Populate bench_mailbox with BULK_SIZE messages from bench_source,
+    yield their (post-move) IDs, then move every remaining message in
+    bench_mailbox back to bench_source.
+
+    The teardown searches bench_mailbox at the end (rather than tracking
+    IDs through the test) so that benchmarks which move messages around
+    still leave bench_mailbox empty when they're done.
+
+    First-run safety: if bench_mailbox already has leftover messages
+    from a previous crashed run, those are drained back to bench_source
+    before the fresh BULK_SIZE messages are moved in. This makes the
+    fixture idempotent."""
+
+    def _drain_bench_to_source() -> None:
+        """Move every message currently in bench_mailbox back to source."""
+        # Drain in chunks of BULK_SIZE so we don't try to move 1000s in
+        # one shot if something has gone wrong.
+        while True:
+            leftover = connector.search_messages(
+                account=test_account, mailbox=bench_mailbox, limit=BULK_SIZE
+            )
+            if not leftover:
+                break
+            try:
+                connector.move_messages(
+                    [m["id"] for m in leftover],
+                    destination_mailbox=bench_source,
+                    account=test_account,
+                )
+            except Exception:
+                # If move fails, break to avoid an infinite loop; the
+                # teardown will surface the issue.
+                break
+
+    # Pre-clean any leftover from a prior failed run.
+    _drain_bench_to_source()
+
+    # Move BULK_SIZE fresh messages from source into bench.
+    source_msgs = connector.search_messages(
+        account=test_account, mailbox=bench_source, limit=BULK_SIZE
+    )
+    if len(source_msgs) < BULK_SIZE:
+        pytest.skip(
+            f"bench_source {bench_source!r} returned only {len(source_msgs)} "
+            f"messages; need {BULK_SIZE}."
+        )
+    try:
+        connector.move_messages(
+            [m["id"] for m in source_msgs],
+            destination_mailbox=bench_mailbox,
+            account=test_account,
+        )
+    except MailAppleScriptError as e:
+        # The bulk-operation cubic-loop bug (#103) makes move_messages
+        # impractically slow on accounts with many mailboxes (e.g.,
+        # Gmail with 90+ labels in the configuration). Once #103 is
+        # fixed, this fixture (and the bulk benchmarks that depend on
+        # it) will succeed automatically.
+        pytest.skip(
+            f"bench_messages setup timed out: {e}. Likely blocked by #103 "
+            f"(bulk operations scan all accounts × all mailboxes). The "
+            f"bulk benchmarks will activate once that perf bug is fixed."
+        )
+
+    # IDs change on move (IMAP UID semantics). Re-fetch.
+    in_bench = connector.search_messages(
+        account=test_account, mailbox=bench_mailbox, limit=BULK_SIZE
+    )
+    bench_ids = [m["id"] for m in in_bench[:BULK_SIZE]]
+
+    try:
+        yield bench_ids
+    finally:
+        _drain_bench_to_source()

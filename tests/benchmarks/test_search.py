@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from apple_mail_mcp.mail_connector import AppleMailConnector
@@ -16,25 +14,17 @@ from .conftest import (
 
 
 @pytest.fixture(scope="module")
-def connector() -> AppleMailConnector:
-    return AppleMailConnector(timeout=120)
-
-
-@pytest.fixture(scope="module")
-def test_account() -> str:
-    return os.getenv("MAIL_TEST_ACCOUNT", "iCloud")
-
-
-@pytest.fixture(scope="module")
 def benchmark_mailbox(
     connector: AppleMailConnector, test_account: str
 ) -> str:
     """Pick a mailbox in the test account that has at least 1 message.
 
-    Tries INBOX, Archive, Sent Messages in that order. Skips the entire
-    module if none have messages — benchmarks are meaningless without
-    data to search through.
-    """
+    Tries INBOX, Archive, Sent Messages in that order. Skips if none
+    have messages — search benchmarks are meaningless without data.
+
+    Note: this is intentionally separate from `bench_source` (which
+    requires BULK_SIZE messages). Search benchmarks work on any size of
+    mailbox."""
     for mb in ("INBOX", "Archive", "Sent Messages"):
         try:
             results = connector.search_messages(
