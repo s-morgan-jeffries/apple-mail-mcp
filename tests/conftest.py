@@ -11,6 +11,21 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Run integration tests (requires Apple Mail setup)",
     )
+    parser.addoption(
+        "--run-benchmark",
+        action="store_true",
+        default=False,
+        help="Run benchmark tests (requires Apple Mail setup; produces timings)",
+    )
+    parser.addoption(
+        "--capture-baseline",
+        action="store_true",
+        default=False,
+        help=(
+            "When running benchmarks, write observed timings to baseline.json "
+            "instead of comparing against it. Use after intentional perf changes."
+        ),
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
