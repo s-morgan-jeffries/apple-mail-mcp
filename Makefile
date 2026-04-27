@@ -36,6 +36,13 @@ test-integration:
 test-e2e:
 	MAIL_TEST_MODE=true uv run pytest tests/e2e/ -v
 
+benchmark:
+	MAIL_TEST_MODE=true uv run pytest tests/benchmarks/ --run-benchmark -v -s
+
+benchmark-baseline:
+	@echo "Re-capturing baselines into tests/benchmarks/baseline.json..."
+	MAIL_TEST_MODE=true uv run pytest tests/benchmarks/ --run-benchmark --capture-baseline -v -s
+
 test-verbose:
 	uv run pytest tests/ -m "not integration and not e2e and not benchmark" -v --tb=long
 
