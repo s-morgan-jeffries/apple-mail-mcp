@@ -4,17 +4,11 @@ set -euo pipefail
 
 echo "Checking dependencies for vulnerabilities..."
 
-if ! command -v pip-audit &> /dev/null; then
-    if command -v uv &> /dev/null; then
-        echo "Installing pip-audit..."
-        uv pip install pip-audit -q
-    else
-        echo "Error: pip-audit not found. Install with: pip install pip-audit"
-        exit 1
-    fi
-fi
-
-pip-audit 2>&1 || {
+# pip-audit is declared in pyproject.toml's dev dep group, so `uv sync --dev`
+# installs it into .venv. `uv run` resolves it from there — calling bare
+# `pip-audit` (or trying to install it ad-hoc) doesn't work because the
+# .venv bin isn't on the script-runtime PATH.
+uv run pip-audit 2>&1 || {
     echo ""
     echo "WARNING: Vulnerability scan found issues. Review and update dependencies."
     exit 1
