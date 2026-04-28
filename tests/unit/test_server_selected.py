@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from apple_mail_mcp.server import get_selected_messages
 
 

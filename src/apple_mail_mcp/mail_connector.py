@@ -2135,37 +2135,34 @@ class AppleMailConnector:
             include_content: Include message body (default: True)
 
         Returns:
-            List of message dicts (same structure as get_message), empty if nothing selected
+            List of message dicts (same structure as get_message). Empty list if
+            no messages are selected.
 
         Raises:
             MailAppleScriptError: If AppleScript execution fails
         """
-        id_script = """
+        # Single AppleScript pass: enumerate `selection`, build a list of records,
+        # and let _wrap_as_json_script emit the NSJSONSerialization epilogue.
+        # This is one osascript call regardless of how many messages are
+        # selected — N round-trips would cost 100-300ms each.
+        content_clause = (
+            "set msgContent to content of msg"
+            if include_content
+            else 'set msgContent to ""'
+        )
+
+        tell_body = f"""
         tell application "Mail"
+            set resultData to {{}}
             set sel to selection
-            if (count of sel) is 0 then return ""
-            set idList to {}
             repeat with msg in sel
-                set end of idList to (id of msg as rich text)
+                {content_clause}
+                set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent}}
+                set end of resultData to msgRecord
             end repeat
-            set AppleScript's text item delimiters to ","
-            set result to idList as rich text
-            return result
         end tell
         """
 
-        raw_ids = self._run_applescript(id_script).strip()
-        if not raw_ids:
-            return []
-
-        message_ids = [mid.strip() for mid in raw_ids.split(",") if mid.strip()]
-
-        messages = []
-        for message_id in message_ids:
-            try:
-                msg = self.get_message(message_id, include_content=include_content)
-                messages.append(msg)
-            except MailMessageNotFoundError:
-                logger.warning(f"Selected message {message_id} could not be retrieved")
-
-        return messages
+        script = _wrap_as_json_script(tell_body)
+        result = self._run_applescript(script)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))
