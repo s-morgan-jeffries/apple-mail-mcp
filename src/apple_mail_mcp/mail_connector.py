@@ -118,6 +118,76 @@ def _wrap_as_json_script(body: str) -> str:
     )
 
 
+def _bulk_repeat_block(
+    *,
+    account: str | None,
+    source_mailbox: str | None,
+    inner: str,
+    counter_var: str,
+) -> str:
+    """Emit the AppleScript repeat block for a bulk-mutation operation.
+
+    When `account` and `source_mailbox` are both provided, emits a narrow
+    O(N) loop scoped to a single mailbox. When both are None, falls back
+    to the legacy O(N × accounts × mailboxes) cross-scan for backwards
+    compatibility. Any partial-pair raises ValueError — a mailbox name
+    without an account is ambiguous (the same name can exist across
+    multiple accounts).
+
+    Args:
+        account: Account name or UUID, or None.
+        source_mailbox: Source mailbox name, or None.
+        inner: AppleScript statement(s) to run inside the loop AFTER
+            `set msg to first message of mb whose id is msgId`. Must NOT
+            include the counter increment — that's appended automatically.
+        counter_var: Name of the AppleScript counter variable (e.g.
+            "updateCount", "moveCount") that gets incremented per success.
+
+    Returns:
+        AppleScript fragment ready to interpolate into a `tell application
+        "Mail"` block. Indented for readability when embedded.
+
+    Raises:
+        ValueError: If exactly one of `account`/`source_mailbox` is given.
+    """
+    if (account is None) != (source_mailbox is None):
+        missing = "source_mailbox" if account is not None else "account"
+        raise ValueError(
+            f"account and source_mailbox must be provided together; "
+            f"missing {missing}"
+        )
+
+    if account is not None and source_mailbox is not None:
+        # Narrow path: single mailbox, single loop. O(N).
+        account_clause = applescript_account_clause(account)
+        mb_safe = escape_applescript_string(sanitize_input(source_mailbox))
+        return (
+            f'            set sourceMb to mailbox "{mb_safe}" of {account_clause}\n'
+            f"            repeat with msgId in idList\n"
+            f"                try\n"
+            f"                    set msg to first message of sourceMb whose id is msgId\n"
+            f"                    {inner}\n"
+            f"                    set {counter_var} to {counter_var} + 1\n"
+            f"                end try\n"
+            f"            end repeat"
+        )
+
+    # Cross-scan path (legacy / backwards compat). O(N × M × K).
+    return (
+        f"            repeat with msgId in idList\n"
+        f"                repeat with acc in accounts\n"
+        f"                    repeat with mb in mailboxes of acc\n"
+        f"                        try\n"
+        f"                            set msg to first message of mb whose id is msgId\n"
+        f"                            {inner}\n"
+        f"                            set {counter_var} to {counter_var} + 1\n"
+        f"                        end try\n"
+        f"                    end repeat\n"
+        f"                end repeat\n"
+        f"            end repeat"
+    )
+
+
 class AppleMailConnector:
     """Interface to Apple Mail via AppleScript."""
 
@@ -1140,24 +1210,42 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return result == "sent"
 
-    def mark_as_read(self, message_ids: list[str], read: bool = True) -> int:
+    def mark_as_read(
+        self,
+        message_ids: list[str],
+        read: bool = True,
+        *,
+        account: str | None = None,
+        source_mailbox: str | None = None,
+    ) -> int:
         """
         Mark messages as read or unread.
 
         Args:
             message_ids: List of message IDs
             read: True for read, False for unread
+            account: Optional account name (or UUID) the messages live in.
+                Must be provided together with `source_mailbox`. When both
+                are given, the AppleScript narrows the scan to that single
+                mailbox — O(N) instead of the default cross-scan O(N × M × K).
+            source_mailbox: Optional source mailbox name; see `account`.
 
         Returns:
             Number of messages updated
 
         Raises:
+            ValueError: If exactly one of `account`/`source_mailbox` is given.
             MailAppleScriptError: If operation fails
         """
         if not message_ids:
             return 0
 
-        status = "true" if read else "false"
+        repeat_block = _bulk_repeat_block(
+            account=account,
+            source_mailbox=source_mailbox,
+            inner=f"set read status of msg to {'true' if read else 'false'}",
+            counter_var="updateCount",
+        )
 
         # Build list of IDs (sanitize and escape each)
         id_list = ", ".join(
@@ -1170,17 +1258,7 @@ class AppleMailConnector:
             set idList to {{{id_list}}}
             set updateCount to 0
 
-            repeat with msgId in idList
-                repeat with acc in accounts
-                    repeat with mb in mailboxes of acc
-                        try
-                            set msg to first message of mb whose id is msgId
-                            set read status of msg to {status}
-                            set updateCount to updateCount + 1
-                        end try
-                    end repeat
-                end repeat
-            end repeat
+{repeat_block}
 
             return updateCount
         end tell

@@ -2108,6 +2108,62 @@ class TestMessageIdAppleScriptInjection:
         assert 'whose id is "craft\\"ed-id"' in script
 
 
+class TestBulkOpsSourceMailbox:
+    """Regression guards for #103: bulk-mutation methods accept paired
+    `account` + `source_mailbox` parameters that narrow the AppleScript
+    scan from O(N × accounts × mailboxes) to O(N).
+
+    Both params must be provided together (a mailbox name without an
+    account is ambiguous because the same name can exist across accounts).
+    Either alone raises ValueError.
+    """
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    # ------ mark_as_read ------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_mark_as_read_narrow_path_uses_single_loop(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "2"
+        connector.mark_as_read(
+            ["abc", "def"], account="Gmail", source_mailbox="INBOX"
+        )
+        script = mock_run.call_args[0][0]
+        # Narrow scope: single mailbox of a specific account.
+        assert 'mailbox "INBOX" of' in script
+        assert 'account "Gmail"' in script
+        # Cross-scan loops MUST be gone.
+        assert "repeat with acc in accounts" not in script
+        assert "repeat with mb in mailboxes" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_mark_as_read_no_params_keeps_cross_scan_path(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.mark_as_read(["abc"])
+        script = mock_run.call_args[0][0]
+        # Backwards-compat: existing slow path preserved.
+        assert "repeat with acc in accounts" in script
+        assert "repeat with mb in mailboxes" in script
+
+    def test_mark_as_read_account_without_source_mailbox_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="source_mailbox"):
+            connector.mark_as_read(["x"], account="Gmail")
+
+    def test_mark_as_read_source_mailbox_without_account_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="account"):
+            connector.mark_as_read(["x"], source_mailbox="INBOX")
+
+
 class TestWhoseIdQuoting:
     """Regression guards for #86: `whose id is X` must wrap X in quotes
     even when X is already escape_applescript_string'd.
