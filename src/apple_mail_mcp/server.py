@@ -920,13 +920,24 @@ async def send_email(
 
 
 @mcp.tool()
-def mark_as_read(message_ids: list[str], read: bool = True) -> dict[str, Any]:
+def mark_as_read(
+    message_ids: list[str],
+    read: bool = True,
+    account: str | None = None,
+    source_mailbox: str | None = None,
+) -> dict[str, Any]:
     """
     Mark messages as read or unread.
 
     Args:
         message_ids: List of message IDs to update
         read: True to mark as read, False to mark as unread (default: true)
+        account: Optional account name (or UUID) the messages live in.
+            Must be provided together with `source_mailbox`. When both
+            are given, the operation is much faster — single mailbox
+            scan instead of cross-account search.
+        source_mailbox: Optional source mailbox name (e.g. "INBOX").
+            See `account`.
 
     Returns:
         Dictionary indicating success and number of messages updated
@@ -934,6 +945,8 @@ def mark_as_read(message_ids: list[str], read: bool = True) -> dict[str, Any]:
     Example:
         >>> mark_as_read(["12345", "12346"], read=True)
         {"success": True, "updated": 2}
+        >>> mark_as_read(["12345"], account="Gmail", source_mailbox="INBOX")
+        {"success": True, "updated": 1}
     """
     try:
         rate_err = check_rate_limit("mark_as_read", {"count": len(message_ids)})
@@ -952,7 +965,12 @@ def mark_as_read(message_ids: list[str], read: bool = True) -> dict[str, Any]:
 
         logger.info(f"Marking {len(message_ids)} messages as {'read' if read else 'unread'}")
 
-        count = mail.mark_as_read(message_ids, read=read)
+        count = mail.mark_as_read(
+            message_ids,
+            read=read,
+            account=account,
+            source_mailbox=source_mailbox,
+        )
 
         operation_logger.log_operation(
             "mark_as_read",
@@ -1336,6 +1354,7 @@ def move_messages(
     destination_mailbox: str,
     account: str,
     gmail_mode: bool = False,
+    source_mailbox: str | None = None,
 ) -> dict[str, Any]:
     """
     Move messages to a different mailbox/folder.
@@ -1347,6 +1366,10 @@ def move_messages(
             UUID (from list_accounts) containing the messages. Names are
             convenient but unstable across renames; UUIDs are stable.
         gmail_mode: Use Gmail-specific move handling (copy + delete) for label-based systems
+        source_mailbox: Optional source mailbox name. When provided, the
+            operation is much faster — single mailbox scan instead of
+            cross-account search. Source is assumed to be in the same
+            `account` as the destination.
 
     Returns:
         Dictionary with success status and number of messages moved
@@ -1355,7 +1378,8 @@ def move_messages(
         move_messages(
             message_ids=["12345", "12346"],
             destination_mailbox="Archive",
-            account="Gmail"
+            account="Gmail",
+            source_mailbox="INBOX",
         )
     """
     try:
@@ -1384,6 +1408,7 @@ def move_messages(
             destination_mailbox=destination_mailbox,
             account=account,
             gmail_mode=gmail_mode,
+            source_mailbox=source_mailbox,
         )
 
         return {
@@ -1420,6 +1445,8 @@ def move_messages(
 def flag_message(
     message_ids: list[str],
     flag_color: str,
+    account: str | None = None,
+    source_mailbox: str | None = None,
 ) -> dict[str, Any]:
     """
     Set flag color on messages.
@@ -1427,6 +1454,10 @@ def flag_message(
     Args:
         message_ids: List of message IDs to flag
         flag_color: Flag color name (none, orange, red, yellow, blue, green, purple, gray)
+        account: Optional account name (or UUID) the messages live in.
+            Must be provided together with `source_mailbox`. When both
+            are given, the operation is much faster.
+        source_mailbox: Optional source mailbox name; see `account`.
 
     Returns:
         Dictionary with success status and number of messages flagged
@@ -1434,7 +1465,9 @@ def flag_message(
     Example:
         flag_message(
             message_ids=["12345"],
-            flag_color="red"
+            flag_color="red",
+            account="Gmail",
+            source_mailbox="INBOX",
         )
     """
     try:
@@ -1455,6 +1488,8 @@ def flag_message(
         count = mail.flag_message(
             message_ids=message_ids,
             flag_color=flag_color,
+            account=account,
+            source_mailbox=source_mailbox,
         )
 
         return {
@@ -1578,6 +1613,8 @@ def create_mailbox(
 def delete_messages(
     message_ids: list[str],
     permanent: bool = False,
+    account: str | None = None,
+    source_mailbox: str | None = None,
 ) -> dict[str, Any]:
     """
     Delete messages (move to trash or permanently delete).
@@ -1585,6 +1622,10 @@ def delete_messages(
     Args:
         message_ids: List of message IDs to delete
         permanent: If True, permanently delete; if False, move to Trash (default: False)
+        account: Optional account name (or UUID) the messages live in.
+            Must be provided together with `source_mailbox`. When both
+            are given, the operation is much faster.
+        source_mailbox: Optional source mailbox name; see `account`.
 
     Returns:
         Dictionary with success status and number of messages deleted
@@ -1592,7 +1633,9 @@ def delete_messages(
     Example:
         delete_messages(
             message_ids=["12345"],
-            permanent=False  # Move to trash
+            permanent=False,  # Move to trash
+            account="Gmail",
+            source_mailbox="INBOX",
         )
 
     Note:
@@ -1627,6 +1670,8 @@ def delete_messages(
             message_ids=message_ids,
             permanent=permanent,
             skip_bulk_check=False,  # Enforce limit
+            account=account,
+            source_mailbox=source_mailbox,
         )
 
         return {
