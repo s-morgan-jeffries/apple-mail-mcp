@@ -5,6 +5,7 @@ AppleScript-based connector for Apple Mail.
 import logging
 import re
 import subprocess
+import time
 from datetime import date as _date
 from datetime import timedelta as _timedelta
 from pathlib import Path
@@ -51,6 +52,13 @@ logger = logging.getLogger(__name__)
 # Strict ISO 8601 YYYY-MM-DD — search_messages's date_from/date_to filters
 # reject anything else to prevent AppleScript injection via the date clause.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Threshold (seconds) above which the AppleScript search path emits an
+# INFO-level recommendation to enable IMAP delegation. Calibrated against
+# the post-#32 baseline: a 50-message search on a 200+ msg mailbox runs
+# in well under a second; sustained >5s suggests the user is hitting the
+# AppleScript fallback against a mailbox where IMAP would help.
+_SLOW_SEARCH_THRESHOLD_SEC = 5.0
 
 
 # MCP-tool field name → Mail.app AppleScript `rule type` enum identifier.
@@ -935,18 +943,31 @@ class AppleMailConnector:
         except _IMAP_FALLBACK_EXCS as exc:
             self._log_imap_fallback(account, exc)
             # fall through to AppleScript
-        return self._search_messages_applescript(
-            account,
-            mailbox,
-            sender_contains,
-            subject_contains,
-            read_status,
-            is_flagged,
-            date_from,
-            date_to,
-            has_attachment,
-            limit,
-        )
+
+        start = time.perf_counter()
+        try:
+            return self._search_messages_applescript(
+                account,
+                mailbox,
+                sender_contains,
+                subject_contains,
+                read_status,
+                is_flagged,
+                date_from,
+                date_to,
+                has_attachment,
+                limit,
+            )
+        finally:
+            elapsed = time.perf_counter() - start
+            if elapsed > _SLOW_SEARCH_THRESHOLD_SEC:
+                logger.info(
+                    "AppleScript search took %.1fs on account=%r mailbox=%r. "
+                    "For large mailboxes, enabling IMAP delegation is "
+                    "substantially faster — see the 'Optional: faster "
+                    "search via IMAP' section in the project README.",
+                    elapsed, account, mailbox,
+                )
 
     def _search_messages_applescript(
         self,

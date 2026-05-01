@@ -1753,6 +1753,75 @@ class TestAppleMailConnector:
         script = mock_run.call_args[0][0]
         assert f'set accountRef to account id "{uuid}"' in script
 
+    def test_search_messages_logs_imap_hint_when_applescript_path_is_slow(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """If AppleScript search exceeds the 5s threshold, log INFO hint to enable IMAP."""
+        from apple_mail_mcp import mail_connector as mc_mod
+
+        # perf_counter is called twice per search: start, then in finally. Side
+        # effects let us simulate a 6.0s elapsed time without real sleeping.
+        with patch.object(connector, "_imap_search",
+                          side_effect=MailKeychainEntryNotFoundError("no entry")), \
+             patch.object(connector, "_search_messages_applescript",
+                          return_value=[]), \
+             patch.object(mc_mod.time, "perf_counter", side_effect=[0.0, 6.0]), \
+             caplog.at_level(logging.INFO, logger="apple_mail_mcp.mail_connector"):
+            connector.search_messages("iCloud", "INBOX")
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "AppleScript search took" in r.getMessage()
+        ]
+        assert len(info_records) == 1
+        msg = info_records[0].getMessage()
+        assert "6.0s" in msg
+        assert "iCloud" in msg
+        assert "INBOX" in msg
+        # Hint must point users at IMAP setup.
+        assert "IMAP" in msg
+
+    def test_search_messages_does_not_log_imap_hint_when_applescript_path_is_fast(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Under the 5s threshold, no INFO hint — keeps logs quiet on small mailboxes."""
+        from apple_mail_mcp import mail_connector as mc_mod
+
+        with patch.object(connector, "_imap_search",
+                          side_effect=MailKeychainEntryNotFoundError("no entry")), \
+             patch.object(connector, "_search_messages_applescript",
+                          return_value=[]), \
+             patch.object(mc_mod.time, "perf_counter", side_effect=[0.0, 1.5]), \
+             caplog.at_level(logging.INFO, logger="apple_mail_mcp.mail_connector"):
+            connector.search_messages("iCloud", "INBOX")
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "AppleScript search took" in r.getMessage()
+        ]
+        assert info_records == []
+
+    def test_search_messages_logs_imap_hint_even_when_applescript_raises(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The threshold log fires from finally — slow failures should still log."""
+        from apple_mail_mcp import mail_connector as mc_mod
+
+        with patch.object(connector, "_imap_search",
+                          side_effect=MailKeychainEntryNotFoundError("no entry")), \
+             patch.object(connector, "_search_messages_applescript",
+                          side_effect=MailAppleScriptError("timeout")), \
+             patch.object(mc_mod.time, "perf_counter", side_effect=[0.0, 7.5]), \
+             caplog.at_level(logging.INFO, logger="apple_mail_mcp.mail_connector"):
+            with pytest.raises(MailAppleScriptError):
+                connector.search_messages("iCloud", "INBOX")
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "AppleScript search took" in r.getMessage()
+        ]
+        assert len(info_records) == 1
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_message(
         self, mock_run: MagicMock, connector: AppleMailConnector
