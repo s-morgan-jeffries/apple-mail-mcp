@@ -2,6 +2,7 @@
   "mark_as_read_50_msgs": 3.65,
   "move_messages_50_msgs": 17.167,
   "save_attachments_one_file": 0.432,
-  "search_messages_no_filter": 1.987,
-  "search_messages_with_sender_filter": 59.964
+  "search_messages_no_filter": 2.526,
+  "search_messages_with_sender_filter": 2.691,
+  "search_messages_with_zero_matches": 144.304
 }

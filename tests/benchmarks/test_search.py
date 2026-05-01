@@ -69,16 +69,47 @@ def test_search_messages_with_sender_filter(
     baselines: dict[str, float],
     capture_mode: bool,
 ) -> None:
-    """Baseline: filtered search — exercises the `whose sender contains`
-    server-side filter path. Filter is intentionally permissive ("@") so
-    most messages match; we want to time the filter machinery, not the
-    "no results" fast-path."""
+    """Baseline: filtered search with a permissive filter ('@' in sender) so
+    most messages match — exercises the per-message AppleScript IF filter
+    machinery (post-#32) plus property fetching for the limit-bounded result
+    set. Pre-#32 this used `whose sender contains` and was 60s+ on a 200+
+    msg folder; the reverse-iteration rewrite drops it to single-digit s."""
     name = "search_messages_with_sender_filter"
     result: BenchmarkResult = measure_median(
         lambda: connector.search_messages(
             account=test_account,
             mailbox=benchmark_mailbox,
             sender_contains="@",
+            limit=10,
+        ),
+        name=name,
+    )
+    assert_within_baseline(name, result, baselines, capture_mode)
+
+
+def test_search_messages_with_zero_matches(
+    connector: AppleMailConnector,
+    test_account: str,
+    benchmark_mailbox: str,
+    baselines: dict[str, float],
+    capture_mode: bool,
+) -> None:
+    """Baseline: filtered search where NO messages match — exercises the
+    full-scan worst case for the per-message IF-filter path.
+
+    Pre-#32 the `whose <selective filter>` evaluator scanned every message
+    in the mailbox before returning empty, just like the no-match case here
+    does post-#32. The expectation is that this scales linearly with mailbox
+    size and stays bounded; if it regresses dramatically that signals the
+    iteration cost of `messages of mailboxRef` itself has changed."""
+    name = "search_messages_with_zero_matches"
+    # A subject substring that's vanishingly unlikely to appear in real mail.
+    sentinel = "zzzz_apple_mail_mcp_no_match_sentinel_qqqq"
+    result: BenchmarkResult = measure_median(
+        lambda: connector.search_messages(
+            account=test_account,
+            mailbox=benchmark_mailbox,
+            subject_contains=sentinel,
             limit=10,
         ),
         name=name,
