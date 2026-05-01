@@ -2126,3 +2126,43 @@ class AppleMailConnector:
 
         result = self._run_applescript(script)
         return result
+
+    def get_selected_messages(self, include_content: bool = True) -> list[dict[str, Any]]:
+        """
+        Get messages currently selected in Apple Mail.
+
+        Args:
+            include_content: Include message body (default: True)
+
+        Returns:
+            List of message dicts (same structure as get_message). Empty list if
+            no messages are selected.
+
+        Raises:
+            MailAppleScriptError: If AppleScript execution fails
+        """
+        # Single AppleScript pass: enumerate `selection`, build a list of records,
+        # and let _wrap_as_json_script emit the NSJSONSerialization epilogue.
+        # This is one osascript call regardless of how many messages are
+        # selected — N round-trips would cost 100-300ms each.
+        content_clause = (
+            "set msgContent to content of msg"
+            if include_content
+            else 'set msgContent to ""'
+        )
+
+        tell_body = f"""
+        tell application "Mail"
+            set resultData to {{}}
+            set sel to selection
+            repeat with msg in sel
+                {content_clause}
+                set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent}}
+                set end of resultData to msgRecord
+            end repeat
+        end tell
+        """
+
+        script = _wrap_as_json_script(tell_body)
+        result = self._run_applescript(script)
+        return cast(list[dict[str, Any]], parse_applescript_json(result))

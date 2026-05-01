@@ -1825,6 +1825,83 @@ class TestAppleMailConnector:
         call_args = mock_run.call_args[0][0]
         assert "set read status of msg to false" in call_args
 
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_selected_messages_single(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Test getting a single selected message."""
+        # Modernized: single AppleScript call returns JSON array of records.
+        mock_run.return_value = (
+            '[{"id":"12345","subject":"Selected Subject",'
+            '"sender":"sender@example.com",'
+            '"date_received":"Mon Jan 1 2024",'
+            '"read_status":true,"flagged":false,"content":"Body text"}]'
+        )
+
+        result = connector.get_selected_messages(include_content=True)
+
+        assert len(result) == 1
+        assert result[0]["id"] == "12345"
+        assert result[0]["subject"] == "Selected Subject"
+        assert result[0]["sender"] == "sender@example.com"
+        assert result[0]["content"] == "Body text"
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_selected_messages_multiple(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Test getting multiple selected messages."""
+        mock_run.return_value = (
+            '[{"id":"111","subject":"Subject One","sender":"a@example.com",'
+            '"date_received":"Mon Jan 1 2024","read_status":true,'
+            '"flagged":false,"content":"Body one"},'
+            '{"id":"222","subject":"Subject Two","sender":"b@example.com",'
+            '"date_received":"Tue Jan 2 2024","read_status":false,'
+            '"flagged":true,"content":"Body two"}]'
+        )
+
+        result = connector.get_selected_messages(include_content=True)
+
+        assert len(result) == 2
+        assert result[0]["id"] == "111"
+        assert result[1]["id"] == "222"
+        assert result[1]["flagged"] is True
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_selected_messages_none_selected(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Test when no message is selected — script returns empty JSON array."""
+        mock_run.return_value = "[]"
+
+        result = connector.get_selected_messages()
+
+        assert result == []
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_selected_messages_no_content(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Test that include_content=False emits the no-content branch in
+        the AppleScript and the returned record has empty content."""
+        mock_run.return_value = (
+            '[{"id":"12345","subject":"Subject",'
+            '"sender":"sender@example.com",'
+            '"date_received":"Mon Jan 1 2024",'
+            '"read_status":false,"flagged":false,"content":""}]'
+        )
+
+        result = connector.get_selected_messages(include_content=False)
+
+        # Verify the script took the no-content branch (no `set msgContent
+        # to content of msg`).
+        script = mock_run.call_args[0][0]
+        assert 'set msgContent to ""' in script
+        assert "set msgContent to content of msg" not in script
+
+        assert len(result) == 1
+        assert result[0]["content"] == ""
+
     def test_mark_as_read_empty_list(self, connector: AppleMailConnector) -> None:
         """Test marking with empty list."""
         result = connector.mark_as_read([])
