@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=0.2.0",
+    "fastmcp>=3.2.4",
     "imapclient>=3.0.0",
 ]
 
