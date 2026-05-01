@@ -26,22 +26,33 @@ from .conftest import (
 
 def test_mark_as_read_50_msgs(
     connector: AppleMailConnector,
+    test_account: str,
+    bench_mailbox: str,
     bench_messages: list[str],
     baselines: dict[str, float],
     capture_mode: bool,
 ) -> None:
     """Baseline: bulk-mark-read against BULK_SIZE messages in the bench
-    mailbox.
+    mailbox, using the narrow-path source_mailbox parameter from #103.
 
     Each iteration toggles read→unread→read on the same message set.
-    Final state of each iteration matches the message's starting state
-    in the bench mailbox.
+    Final state of each iteration matches the message's starting state.
     """
     name = "mark_as_read_50_msgs"
 
     def run() -> None:
-        connector.mark_as_read(bench_messages, read=False)
-        connector.mark_as_read(bench_messages, read=True)
+        connector.mark_as_read(
+            bench_messages,
+            read=False,
+            account=test_account,
+            source_mailbox=bench_mailbox,
+        )
+        connector.mark_as_read(
+            bench_messages,
+            read=True,
+            account=test_account,
+            source_mailbox=bench_mailbox,
+        )
 
     result: BenchmarkResult = measure_median(run, name=name)
     assert_within_baseline(name, result, baselines, capture_mode)
@@ -56,7 +67,8 @@ def test_move_messages_50_msgs(
     baselines: dict[str, float],
     capture_mode: bool,
 ) -> None:
-    """Baseline: bulk-move BULK_SIZE messages.
+    """Baseline: bulk-move BULK_SIZE messages, using narrow-path
+    source_mailbox in both directions.
 
     Each iteration moves bench → source → bench. Two move calls per
     iteration; we measure the round-trip and report it as
@@ -73,11 +85,12 @@ def test_move_messages_50_msgs(
     current_ids = list(bench_messages)
 
     def run() -> None:
-        # Move bench → source
+        # Move bench → source (narrow source-scan)
         connector.move_messages(
             current_ids,
             destination_mailbox=bench_source,
             account=test_account,
+            source_mailbox=bench_mailbox,
         )
         # IDs are now stale. Find the BULK_SIZE most recent in source —
         # those are the ones we just moved.
@@ -86,11 +99,12 @@ def test_move_messages_50_msgs(
         )
         moved_ids = [m["id"] for m in in_source[: len(current_ids)]]
 
-        # Move source → bench
+        # Move source → bench (narrow source-scan)
         connector.move_messages(
             moved_ids,
             destination_mailbox=bench_mailbox,
             account=test_account,
+            source_mailbox=bench_source,
         )
         # Re-fetch bench IDs for the next iteration.
         in_bench = connector.search_messages(
@@ -98,7 +112,6 @@ def test_move_messages_50_msgs(
         )
         current_ids[:] = [m["id"] for m in in_bench[: len(current_ids)]]
 
-    # 3 runs (not 5) — each run is two moves on 50 messages, so the
-    # benchmark is already slow.
+    # 3 runs (not 5) — each run is two moves on 50 messages.
     result: BenchmarkResult = measure_median(run, name=name, runs=3)
     assert_within_baseline(name, result, baselines, capture_mode)

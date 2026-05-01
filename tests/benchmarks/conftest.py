@@ -290,6 +290,7 @@ def bench_messages(
                     [m["id"] for m in leftover],
                     destination_mailbox=bench_source,
                     account=test_account,
+                    source_mailbox=bench_mailbox,
                 )
             except Exception:
                 # If move fails, break to avoid an infinite loop; the
@@ -313,6 +314,7 @@ def bench_messages(
             [m["id"] for m in source_msgs],
             destination_mailbox=bench_mailbox,
             account=test_account,
+            source_mailbox=bench_source,
         )
     except MailAppleScriptError as e:
         # The bulk-operation cubic-loop bug (#103) makes move_messages
