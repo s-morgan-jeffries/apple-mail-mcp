@@ -38,7 +38,7 @@ dev = [
     "radon>=6.0.0",
     "pip-audit>=2.7.0",
     "ruff>=0.4.0",
-    "mypy>=1.10.0",
+    "mypy>=1.20.2",
 ]
 research = [
     "imapclient>=3.0.0",
@@ -52,7 +52,7 @@ dev = [
     "radon>=6.0.0",
     "pip-audit>=2.7.0",
     "ruff>=0.4.0",
-    "mypy>=1.10.0",
+    "mypy>=1.20.2",
 ]
 
 [project.scripts]
