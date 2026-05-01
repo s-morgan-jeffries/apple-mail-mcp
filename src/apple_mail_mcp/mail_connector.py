@@ -1756,6 +1756,8 @@ class AppleMailConnector:
         destination_mailbox: str,
         account: str,
         gmail_mode: bool = False,
+        *,
+        source_mailbox: str | None = None,
     ) -> int:
         """
         Move messages to a different mailbox.
@@ -1763,8 +1765,14 @@ class AppleMailConnector:
         Args:
             message_ids: List of message IDs to move
             destination_mailbox: Name of destination mailbox
-            account: Account name
+            account: Account name (or UUID) hosting the destination mailbox
             gmail_mode: Use Gmail-specific handling (copy + delete)
+            source_mailbox: Optional source mailbox name to narrow the
+                AppleScript scan to one mailbox (O(N) instead of O(N × M × K)).
+                When provided, source is assumed to be in the same `account`
+                as the destination — the common case. To move across
+                accounts, omit `source_mailbox` to fall back to the
+                cross-scan path.
 
         Returns:
             Number of messages moved
@@ -1786,54 +1794,33 @@ class AppleMailConnector:
         )
 
         if gmail_mode:
-            # Gmail requires copy + delete approach to properly handle labels
-            script = f"""
-            tell application "Mail"
-                set accountRef to {account_clause}
-                set destMailbox to mailbox "{mailbox_safe}" of accountRef
-                set idList to {{{id_list}}}
-                set moveCount to 0
-
-                repeat with msgId in idList
-                    repeat with acc in accounts
-                        repeat with mb in mailboxes of acc
-                            try
-                                set msg to first message of mb whose id is msgId
-                                duplicate msg to destMailbox
-                                delete msg
-                                set moveCount to moveCount + 1
-                            end try
-                        end repeat
-                    end repeat
-                end repeat
-
-                return moveCount
-            end tell
-            """
+            inner = "duplicate msg to destMailbox\n                    delete msg"
         else:
-            # Standard IMAP move
-            script = f"""
-            tell application "Mail"
-                set accountRef to {account_clause}
-                set destMailbox to mailbox "{mailbox_safe}" of accountRef
-                set idList to {{{id_list}}}
-                set moveCount to 0
+            inner = "set mailbox of msg to destMailbox"
 
-                repeat with msgId in idList
-                    repeat with acc in accounts
-                        repeat with mb in mailboxes of acc
-                            try
-                                set msg to first message of mb whose id is msgId
-                                set mailbox of msg to destMailbox
-                                set moveCount to moveCount + 1
-                            end try
-                        end repeat
-                    end repeat
-                end repeat
+        # `account` is required by this method (it's where the destination
+        # lives), so source_mailbox is the only "optional" half here. Pass
+        # account through only when the caller explicitly wants the narrow
+        # source-scan path.
+        repeat_block = _bulk_repeat_block(
+            account=account if source_mailbox is not None else None,
+            source_mailbox=source_mailbox,
+            inner=inner,
+            counter_var="moveCount",
+        )
 
-                return moveCount
-            end tell
-            """
+        script = f"""
+        tell application "Mail"
+            set accountRef to {account_clause}
+            set destMailbox to mailbox "{mailbox_safe}" of accountRef
+            set idList to {{{id_list}}}
+            set moveCount to 0
+
+{repeat_block}
+
+            return moveCount
+        end tell
+        """
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
