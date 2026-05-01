@@ -5,6 +5,7 @@ AppleScript-based connector for Apple Mail.
 import logging
 import re
 import subprocess
+import time
 from datetime import date as _date
 from datetime import timedelta as _timedelta
 from pathlib import Path
@@ -51,6 +52,13 @@ logger = logging.getLogger(__name__)
 # Strict ISO 8601 YYYY-MM-DD — search_messages's date_from/date_to filters
 # reject anything else to prevent AppleScript injection via the date clause.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Threshold (seconds) above which the AppleScript search path emits an
+# INFO-level recommendation to enable IMAP delegation. Calibrated against
+# the post-#32 baseline: a 50-message search on a 200+ msg mailbox runs
+# in well under a second; sustained >5s suggests the user is hitting the
+# AppleScript fallback against a mailbox where IMAP would help.
+_SLOW_SEARCH_THRESHOLD_SEC = 5.0
 
 
 # MCP-tool field name → Mail.app AppleScript `rule type` enum identifier.
@@ -935,18 +943,31 @@ class AppleMailConnector:
         except _IMAP_FALLBACK_EXCS as exc:
             self._log_imap_fallback(account, exc)
             # fall through to AppleScript
-        return self._search_messages_applescript(
-            account,
-            mailbox,
-            sender_contains,
-            subject_contains,
-            read_status,
-            is_flagged,
-            date_from,
-            date_to,
-            has_attachment,
-            limit,
-        )
+
+        start = time.perf_counter()
+        try:
+            return self._search_messages_applescript(
+                account,
+                mailbox,
+                sender_contains,
+                subject_contains,
+                read_status,
+                is_flagged,
+                date_from,
+                date_to,
+                has_attachment,
+                limit,
+            )
+        finally:
+            elapsed = time.perf_counter() - start
+            if elapsed > _SLOW_SEARCH_THRESHOLD_SEC:
+                logger.info(
+                    "AppleScript search took %.1fs on account=%r mailbox=%r. "
+                    "For large mailboxes, enabling IMAP delegation is "
+                    "substantially faster — see the 'Optional: faster "
+                    "search via IMAP' section in the project README.",
+                    elapsed, account, mailbox,
+                )
 
     def _search_messages_applescript(
         self,
@@ -992,30 +1013,61 @@ class AppleMailConnector:
         account_clause = applescript_account_clause(account)
         mailbox_safe = escape_applescript_string(sanitize_input(mailbox))
 
-        # Build whose clause (server-side filters)
-        conditions: list[str] = []
+        # Build per-message AppleScript IF filters instead of a `whose` clause.
+        #
+        # Empirical finding (probes against an 8443-message Sent folder on
+        # MobileMe): `messages of mb whose <filter>` triggers Mail.app's
+        # internal predicate evaluator across the entire mailbox before any
+        # iteration starts — measured >120s timeout for permissive filters
+        # and effectively unbounded for selective ones. Manual indexed
+        # iteration with the same filter as an IF body completes in ~1s for
+        # the same query.
+        #
+        # The pattern: iterate `messages of mailboxRef` in REVERSE order
+        # (newest first, matching typical user intent for mail), apply
+        # filter expressions per-message, short-circuit when matchCount
+        # reaches limit. Cost is bounded by `min(filter_misses + limit, N)`
+        # times per-message-property-fetch — typically dominated by the
+        # first few hundred recent messages, which Mail caches locally.
+        filter_checks: list[str] = []
+
         if sender_contains:
             sender_safe = escape_applescript_string(sanitize_input(sender_contains))
-            conditions.append(f'sender contains "{sender_safe}"')
+            filter_checks.append(
+                f'if (sender of msg) does not contain "{sender_safe}" '
+                f'then set includeThis to false'
+            )
 
         if subject_contains:
             subject_safe = escape_applescript_string(sanitize_input(subject_contains))
-            conditions.append(f'subject contains "{subject_safe}"')
+            filter_checks.append(
+                f'if (subject of msg) does not contain "{subject_safe}" '
+                f'then set includeThis to false'
+            )
 
         if read_status is not None:
-            status = "true" if read_status else "false"
-            conditions.append(f"read status is {status}")
+            target = "true" if read_status else "false"
+            filter_checks.append(
+                f'if (read status of msg) is not {target} '
+                f'then set includeThis to false'
+            )
 
         if is_flagged is not None:
-            status = "true" if is_flagged else "false"
-            conditions.append(f"flagged status is {status}")
+            target = "true" if is_flagged else "false"
+            filter_checks.append(
+                f'if (flagged status of msg) is not {target} '
+                f'then set includeThis to false'
+            )
 
         if date_from is not None:
             if not _ISO_DATE_RE.match(date_from):
                 raise ValueError(
                     f"date_from must be ISO 8601 YYYY-MM-DD, got: {date_from!r}"
                 )
-            conditions.append(f'date received >= (date "{date_from}")')
+            filter_checks.append(
+                f'if (date received of msg) < (date "{date_from}") '
+                f'then set includeThis to false'
+            )
 
         if date_to is not None:
             if not _ISO_DATE_RE.match(date_to):
@@ -1027,48 +1079,48 @@ class AppleMailConnector:
             next_day = (
                 _date.fromisoformat(date_to) + _timedelta(days=1)
             ).isoformat()
-            conditions.append(f'date received < (date "{next_day}")')
-
-        # AppleScript rejects `whose true` ("Illegal comparison or logical").
-        # When no filters are supplied, drop the `whose` clause entirely.
-        whose_part = f" whose {' and '.join(conditions)}" if conditions else ""
-
-        # `has_attachment` can't go in the whose clause — Mail rejects
-        # `(count of mail attachments) > 0` and `exists mail attachment` with
-        # type-specifier errors. Applied post-whose inside the repeat.
-        if has_attachment is None:
-            attachment_check = ""
-        elif has_attachment:
-            attachment_check = (
-                "if (count of mail attachments of msg) = 0 then "
-                "set includeThis to false"
-            )
-        else:
-            attachment_check = (
-                "if (count of mail attachments of msg) > 0 then "
-                "set includeThis to false"
+            filter_checks.append(
+                f'if (date received of msg) >= (date "{next_day}") '
+                f'then set includeThis to false'
             )
 
-        # Per-match limit is applied after all filters (whose + attachment
-        # post-filter) so the caller gets up to `limit` final matches.
+        if has_attachment is True:
+            filter_checks.append(
+                "if (count of mail attachments of msg) = 0 "
+                "then set includeThis to false"
+            )
+        elif has_attachment is False:
+            filter_checks.append(
+                "if (count of mail attachments of msg) > 0 "
+                "then set includeThis to false"
+            )
+
+        # Render filter checks each on their own line, indented for the loop.
+        filter_block = "\n                ".join(filter_checks) if filter_checks else ""
+
+        # Per-match limit short-circuits the loop. With no limit, we collect
+        # everything (newest-first) — same observable behavior as before
+        # except for ordering (was oldest-first).
         effective_limit = str(limit) if limit else "999999999"
 
         tell_body = f'''
         tell application "Mail"
             set accountRef to {account_clause}
             set mailboxRef to mailbox "{mailbox_safe}" of accountRef
-            set allMatches to messages of mailboxRef{whose_part}
-            set totalCount to count of allMatches
+            set msgs to messages of mailboxRef
+            set total to count of msgs
 
             set resultData to {{}}
-            repeat with i from 1 to totalCount
-                set msg to item i of allMatches
+            set matchCount to 0
+            repeat with i from total to 1 by -1
+                if matchCount >= {effective_limit} then exit repeat
+                set msg to item i of msgs
                 set includeThis to true
-                {attachment_check}
+                {filter_block}
                 if includeThis then
                     set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg)}}
                     set end of resultData to msgRecord
-                    if (count of resultData) >= {effective_limit} then exit repeat
+                    set matchCount to matchCount + 1
                 end if
             end repeat
         end tell

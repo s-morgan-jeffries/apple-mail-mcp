@@ -1532,7 +1532,15 @@ class TestAppleMailConnector:
     def test_search_messages_with_filters(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Test message search with filters."""
+        """Test message search with filters.
+
+        Per #32, filters are now applied as per-message IF expressions
+        instead of a `whose` clause — `whose` is unusably slow against
+        large IMAP mailboxes (>120s timeout on 8000+ messages). The new
+        pattern iterates messages in reverse (newest-first) and checks
+        each filter against the message; the script short-circuits when
+        matchCount reaches the limit.
+        """
         mock_run.return_value = "[]"
 
         connector._search_messages_applescript(
@@ -1544,15 +1552,30 @@ class TestAppleMailConnector:
             limit=10
         )
 
-        # Verify the script includes filter conditions
+        # Filter conditions appear as IF clauses, not in a `whose` clause.
         call_args = mock_run.call_args[0][0]
-        assert 'sender contains "john@example.com"' in call_args
-        assert 'subject contains "meeting"' in call_args
-        assert "read status is false" in call_args
+        assert (
+            'if (sender of msg) does not contain "john@example.com" '
+            'then set includeThis to false'
+            in call_args
+        )
+        assert (
+            'if (subject of msg) does not contain "meeting" '
+            'then set includeThis to false'
+            in call_args
+        )
+        assert (
+            "if (read status of msg) is not false "
+            "then set includeThis to false"
+            in call_args
+        )
         # Limit is enforced by accumulating matches and exiting the repeat
-        # when count of resultData reaches the bound. `items 1 thru N of`
-        # is avoided — Mail rejects it on live message collection references.
-        assert "if (count of resultData) >= 10 then exit repeat" in call_args
+        # when matchCount reaches the bound.
+        assert "if matchCount >= 10 then exit repeat" in call_args
+        # Reverse iteration (newest first).
+        assert "repeat with i from total to 1 by -1" in call_args
+        # No `whose` clause anywhere.
+        assert "whose" not in call_args
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_without_filters_omits_whose_clause(
@@ -1578,40 +1601,56 @@ class TestAppleMailConnector:
     ) -> None:
         """Mail rejects `items 1 thru N of (messages ...)` with error -1728.
 
-        The limit must be enforced via `count of` + indexed `item i of`, not
-        by slicing the live message collection reference.
+        The limit must be enforced via a counter-driven exit, not by slicing
+        the live message collection reference.
         """
         mock_run.return_value = "[]"
         connector._search_messages_applescript("Gmail", "INBOX", limit=5)
         script = mock_run.call_args[0][0]
         assert "items 1 thru" not in script
-        assert "if (count of resultData) >= 5 then exit repeat" in script
+        assert "if matchCount >= 5 then exit repeat" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_search_messages_is_flagged_in_whose_clause(
+    def test_search_messages_is_flagged_filter(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
+        """is_flagged is applied inside the loop via an includeThis IF expression."""
         mock_run.return_value = "[]"
         connector._search_messages_applescript("Gmail", "INBOX", is_flagged=True)
         script = mock_run.call_args[0][0]
-        assert "flagged status is true" in script
+        assert (
+            "if (flagged status of msg) is not true then set includeThis to false"
+            in script
+        )
 
         connector._search_messages_applescript("Gmail", "INBOX", is_flagged=False)
         script = mock_run.call_args[0][0]
-        assert "flagged status is false" in script
+        assert (
+            "if (flagged status of msg) is not false then set includeThis to false"
+            in script
+        )
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_search_messages_date_range_in_whose_clause(
+    def test_search_messages_date_range_filter(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
+        """date_from/date_to are applied via inverted IF expressions inside the loop."""
         mock_run.return_value = "[]"
         connector._search_messages_applescript(
             "Gmail", "INBOX", date_from="2026-04-01", date_to="2026-04-15"
         )
         script = mock_run.call_args[0][0]
-        assert 'date received >= (date "2026-04-01")' in script
+        # The IF expressions are the inverse of the inclusion condition: skip if BEFORE
+        # date_from, skip if ON-OR-AFTER date_to+1.
+        assert (
+            'if (date received of msg) < (date "2026-04-01") then set includeThis to false'
+            in script
+        )
         # date_to gets +1 day so the full day is inclusive
-        assert 'date received < (date "2026-04-16")' in script
+        assert (
+            'if (date received of msg) >= (date "2026-04-16") then set includeThis to false'
+            in script
+        )
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_rejects_malformed_date_from(
@@ -1640,20 +1679,15 @@ class TestAppleMailConnector:
     def test_search_messages_has_attachment_true_post_filters(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """has_attachment=True can't go in whose — applied inside the loop."""
+        """has_attachment=True applied inside the loop as an includeThis IF."""
         mock_run.return_value = "[]"
-        # Combine with a read_status filter so the whose clause exists and the
-        # "count attachments not in whose" assertion is meaningful.
         connector._search_messages_applescript(
             "Gmail", "INBOX", read_status=True, has_attachment=True
         )
         script = mock_run.call_args[0][0]
-        # The attachment check MUST NOT appear in the whose clause line.
-        whose_line = [
-            ln for ln in script.splitlines() if "whose" in ln and "messages of" in ln
-        ][0]
-        assert "mail attachments" not in whose_line
-        # But it MUST appear as a post-filter inside the loop.
+        # The whole script no longer uses `whose`; all filters live inside the loop.
+        assert "whose" not in script
+        # The attachment IF expression must appear as a post-filter inside the loop.
         assert (
             "if (count of mail attachments of msg) = 0 then set includeThis to false"
             in script
@@ -1718,6 +1752,75 @@ class TestAppleMailConnector:
         connector._search_messages_applescript(uuid, "INBOX")
         script = mock_run.call_args[0][0]
         assert f'set accountRef to account id "{uuid}"' in script
+
+    def test_search_messages_logs_imap_hint_when_applescript_path_is_slow(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """If AppleScript search exceeds the 5s threshold, log INFO hint to enable IMAP."""
+        from apple_mail_mcp import mail_connector as mc_mod
+
+        # perf_counter is called twice per search: start, then in finally. Side
+        # effects let us simulate a 6.0s elapsed time without real sleeping.
+        with patch.object(connector, "_imap_search",
+                          side_effect=MailKeychainEntryNotFoundError("no entry")), \
+             patch.object(connector, "_search_messages_applescript",
+                          return_value=[]), \
+             patch.object(mc_mod.time, "perf_counter", side_effect=[0.0, 6.0]), \
+             caplog.at_level(logging.INFO, logger="apple_mail_mcp.mail_connector"):
+            connector.search_messages("iCloud", "INBOX")
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "AppleScript search took" in r.getMessage()
+        ]
+        assert len(info_records) == 1
+        msg = info_records[0].getMessage()
+        assert "6.0s" in msg
+        assert "iCloud" in msg
+        assert "INBOX" in msg
+        # Hint must point users at IMAP setup.
+        assert "IMAP" in msg
+
+    def test_search_messages_does_not_log_imap_hint_when_applescript_path_is_fast(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Under the 5s threshold, no INFO hint — keeps logs quiet on small mailboxes."""
+        from apple_mail_mcp import mail_connector as mc_mod
+
+        with patch.object(connector, "_imap_search",
+                          side_effect=MailKeychainEntryNotFoundError("no entry")), \
+             patch.object(connector, "_search_messages_applescript",
+                          return_value=[]), \
+             patch.object(mc_mod.time, "perf_counter", side_effect=[0.0, 1.5]), \
+             caplog.at_level(logging.INFO, logger="apple_mail_mcp.mail_connector"):
+            connector.search_messages("iCloud", "INBOX")
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "AppleScript search took" in r.getMessage()
+        ]
+        assert info_records == []
+
+    def test_search_messages_logs_imap_hint_even_when_applescript_raises(
+        self, connector: AppleMailConnector, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The threshold log fires from finally — slow failures should still log."""
+        from apple_mail_mcp import mail_connector as mc_mod
+
+        with patch.object(connector, "_imap_search",
+                          side_effect=MailKeychainEntryNotFoundError("no entry")), \
+             patch.object(connector, "_search_messages_applescript",
+                          side_effect=MailAppleScriptError("timeout")), \
+             patch.object(mc_mod.time, "perf_counter", side_effect=[0.0, 7.5]), \
+             caplog.at_level(logging.INFO, logger="apple_mail_mcp.mail_connector"):
+            with pytest.raises(MailAppleScriptError):
+                connector.search_messages("iCloud", "INBOX")
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "AppleScript search took" in r.getMessage()
+        ]
+        assert len(info_records) == 1
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_message(

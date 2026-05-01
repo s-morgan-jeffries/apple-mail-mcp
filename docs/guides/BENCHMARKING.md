@@ -7,7 +7,8 @@ The benchmark suite establishes timing baselines for the project's expensive ope
 | Benchmark | What it times |
 |-----------|---------------|
 | `search_messages_no_filter` | List-style search (no filters, just a limit) |
-| `search_messages_with_sender_filter` | Filtered search exercising the `whose sender contains` server-side filter |
+| `search_messages_with_sender_filter` | Filtered search with a permissive matcher — most messages match, exercises per-message AppleScript IF-filter machinery |
+| `search_messages_with_zero_matches` | Filtered search with a no-match sentinel — full-scan worst case (no early exit; bounded only by mailbox size) |
 | `save_attachments_one_file` | Saving attachments from one message to a tmp dir |
 | `mark_as_read_50_msgs` | Bulk mark-read on 50 messages — the key scaling-pattern signal |
 
