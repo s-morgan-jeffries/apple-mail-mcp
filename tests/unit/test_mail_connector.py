@@ -2218,6 +2218,68 @@ class TestBulkOpsSourceMailbox:
         assert "repeat with acc in accounts" in script
         assert "repeat with mb in mailboxes" in script
 
+    # ------ flag_message ------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_flag_message_narrow_path_uses_single_loop(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.flag_message(
+            ["abc"], "red", account="iCloud", source_mailbox="Archive"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "Archive" of' in script
+        assert "set flag index of msg to" in script
+        assert "set flagged status of msg to" in script
+        assert "repeat with acc in accounts" not in script
+
+    def test_flag_message_partial_pair_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="source_mailbox"):
+            connector.flag_message(["x"], "red", account="iCloud")
+        with pytest.raises(ValueError, match="account"):
+            connector.flag_message(["x"], "red", source_mailbox="Archive")
+
+    # ------ delete_messages ------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_messages_narrow_path_uses_single_loop(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.delete_messages(
+            ["abc"], account="iCloud", source_mailbox="Trash"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "Trash" of' in script
+        assert "delete msg" in script
+        assert "repeat with acc in accounts" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_messages_permanent_narrow_path(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.delete_messages(
+            ["abc"],
+            permanent=True,
+            account="iCloud",
+            source_mailbox="Junk",
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "Junk" of' in script
+        assert "repeat with acc in accounts" not in script
+
+    def test_delete_messages_partial_pair_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="source_mailbox"):
+            connector.delete_messages(["x"], account="iCloud")
+        with pytest.raises(ValueError, match="account"):
+            connector.delete_messages(["x"], source_mailbox="Trash")
+
 
 class TestWhoseIdQuoting:
     """Regression guards for #86: `whose id is X` must wrap X in quotes

@@ -122,7 +122,7 @@ def _bulk_repeat_block(
     *,
     account: str | None,
     source_mailbox: str | None,
-    inner: str,
+    actions: list[str],
     counter_var: str,
 ) -> str:
     """Emit the AppleScript repeat block for a bulk-mutation operation.
@@ -137,15 +137,15 @@ def _bulk_repeat_block(
     Args:
         account: Account name or UUID, or None.
         source_mailbox: Source mailbox name, or None.
-        inner: AppleScript statement(s) to run inside the loop AFTER
-            `set msg to first message of mb whose id is msgId`. Must NOT
-            include the counter increment — that's appended automatically.
+        actions: One or more AppleScript statements to run inside the
+            loop AFTER `set msg to first message ... whose id is msgId`.
+            The counter increment is appended automatically.
         counter_var: Name of the AppleScript counter variable (e.g.
             "updateCount", "moveCount") that gets incremented per success.
 
     Returns:
         AppleScript fragment ready to interpolate into a `tell application
-        "Mail"` block. Indented for readability when embedded.
+        "Mail"` block.
 
     Raises:
         ValueError: If exactly one of `account`/`source_mailbox` is given.
@@ -159,6 +159,8 @@ def _bulk_repeat_block(
 
     if account is not None and source_mailbox is not None:
         # Narrow path: single mailbox, single loop. O(N).
+        action_indent = " " * 20
+        action_lines = "\n".join(action_indent + a for a in actions)
         account_clause = applescript_account_clause(account)
         mb_safe = escape_applescript_string(sanitize_input(source_mailbox))
         return (
@@ -166,20 +168,22 @@ def _bulk_repeat_block(
             f"            repeat with msgId in idList\n"
             f"                try\n"
             f"                    set msg to first message of sourceMb whose id is msgId\n"
-            f"                    {inner}\n"
+            f"{action_lines}\n"
             f"                    set {counter_var} to {counter_var} + 1\n"
             f"                end try\n"
             f"            end repeat"
         )
 
     # Cross-scan path (legacy / backwards compat). O(N × M × K).
+    action_indent = " " * 28
+    action_lines = "\n".join(action_indent + a for a in actions)
     return (
         f"            repeat with msgId in idList\n"
         f"                repeat with acc in accounts\n"
         f"                    repeat with mb in mailboxes of acc\n"
         f"                        try\n"
         f"                            set msg to first message of mb whose id is msgId\n"
-        f"                            {inner}\n"
+        f"{action_lines}\n"
         f"                            set {counter_var} to {counter_var} + 1\n"
         f"                        end try\n"
         f"                    end repeat\n"
@@ -1243,7 +1247,7 @@ class AppleMailConnector:
         repeat_block = _bulk_repeat_block(
             account=account,
             source_mailbox=source_mailbox,
-            inner=f"set read status of msg to {'true' if read else 'false'}",
+            actions=[f"set read status of msg to {'true' if read else 'false'}"],
             counter_var="updateCount",
         )
 
@@ -1794,9 +1798,9 @@ class AppleMailConnector:
         )
 
         if gmail_mode:
-            inner = "duplicate msg to destMailbox\n                    delete msg"
+            actions = ["duplicate msg to destMailbox", "delete msg"]
         else:
-            inner = "set mailbox of msg to destMailbox"
+            actions = ["set mailbox of msg to destMailbox"]
 
         # `account` is required by this method (it's where the destination
         # lives), so source_mailbox is the only "optional" half here. Pass
@@ -1805,7 +1809,7 @@ class AppleMailConnector:
         repeat_block = _bulk_repeat_block(
             account=account if source_mailbox is not None else None,
             source_mailbox=source_mailbox,
-            inner=inner,
+            actions=actions,
             counter_var="moveCount",
         )
 
@@ -1829,6 +1833,9 @@ class AppleMailConnector:
         self,
         message_ids: list[str],
         flag_color: str,
+        *,
+        account: str | None = None,
+        source_mailbox: str | None = None,
     ) -> int:
         """
         Set flag color on messages.
@@ -1836,12 +1843,18 @@ class AppleMailConnector:
         Args:
             message_ids: List of message IDs to flag
             flag_color: Flag color (none, orange, red, yellow, blue, green, purple, gray)
+            account: Optional account name (or UUID); see `source_mailbox`.
+            source_mailbox: Optional source mailbox name. When provided
+                together with `account`, the AppleScript narrows the scan
+                to that single mailbox — O(N) instead of O(N × M × K).
+                Either alone raises ValueError.
 
         Returns:
             Number of messages flagged
 
         Raises:
-            ValueError: If flag color is invalid
+            ValueError: If flag color is invalid, or if exactly one of
+                `account`/`source_mailbox` is given.
         """
         if not message_ids:
             return 0
@@ -1858,23 +1871,22 @@ class AppleMailConnector:
             for mid in message_ids
         )
 
+        repeat_block = _bulk_repeat_block(
+            account=account,
+            source_mailbox=source_mailbox,
+            actions=[
+                f"set flag index of msg to {flag_index}",
+                f"set flagged status of msg to {flagged_status}",
+            ],
+            counter_var="flagCount",
+        )
+
         script = f"""
         tell application "Mail"
             set idList to {{{id_list}}}
             set flagCount to 0
 
-            repeat with msgId in idList
-                repeat with acc in accounts
-                    repeat with mb in mailboxes of acc
-                        try
-                            set msg to first message of mb whose id is msgId
-                            set flag index of msg to {flag_index}
-                            set flagged status of msg to {flagged_status}
-                            set flagCount to flagCount + 1
-                        end try
-                    end repeat
-                end repeat
-            end repeat
+{repeat_block}
 
             return flagCount
         end tell
@@ -1942,20 +1954,32 @@ class AppleMailConnector:
         message_ids: list[str],
         permanent: bool = False,
         skip_bulk_check: bool = True,
+        *,
+        account: str | None = None,
+        source_mailbox: str | None = None,
     ) -> int:
         """
         Delete messages (move to trash or permanent delete).
 
         Args:
             message_ids: List of message IDs to delete
-            permanent: If True, permanently delete (bypass trash)
+            permanent: If True, permanently delete (bypass trash). NOTE:
+                this flag currently produces identical AppleScript as the
+                non-permanent path; the actual permanent-vs-trash behavior
+                is whatever Mail.app does by default for `delete msg`.
             skip_bulk_check: If False, enforce bulk operation limits
+            account: Optional account name (or UUID); see `source_mailbox`.
+            source_mailbox: Optional source mailbox name. When provided
+                together with `account`, the AppleScript narrows the scan
+                to that single mailbox — O(N) instead of O(N × M × K).
+                Either alone raises ValueError.
 
         Returns:
             Number of messages deleted
 
         Raises:
-            ValueError: If bulk check fails
+            ValueError: If bulk check fails, or if exactly one of
+                `account`/`source_mailbox` is given.
         """
         if not message_ids:
             return 0
@@ -1972,50 +1996,27 @@ class AppleMailConnector:
             for mid in message_ids
         )
 
-        if permanent:
-            # Permanent delete (not recommended, requires extra caution)
-            script = f"""
-            tell application "Mail"
-                set idList to {{{id_list}}}
-                set deleteCount to 0
+        repeat_block = _bulk_repeat_block(
+            account=account,
+            source_mailbox=source_mailbox,
+            actions=["delete msg"],
+            counter_var="deleteCount",
+        )
 
-                repeat with msgId in idList
-                    repeat with acc in accounts
-                        repeat with mb in mailboxes of acc
-                            try
-                                set msg to first message of mb whose id is msgId
-                                delete msg
-                                set deleteCount to deleteCount + 1
-                            end try
-                        end repeat
-                    end repeat
-                end repeat
+        # `permanent` is preserved as a parameter but currently produces
+        # identical AppleScript — Mail.app's `delete msg` semantics handle
+        # both cases the same way today. If permanent-vs-trash needs to
+        # diverge in the future, branch here on `permanent`.
+        script = f"""
+        tell application "Mail"
+            set idList to {{{id_list}}}
+            set deleteCount to 0
 
-                return deleteCount
-            end tell
-            """
-        else:
-            # Move to trash (standard delete)
-            script = f"""
-            tell application "Mail"
-                set idList to {{{id_list}}}
-                set deleteCount to 0
+{repeat_block}
 
-                repeat with msgId in idList
-                    repeat with acc in accounts
-                        repeat with mb in mailboxes of acc
-                            try
-                                set msg to first message of mb whose id is msgId
-                                delete msg
-                                set deleteCount to deleteCount + 1
-                            end try
-                        end repeat
-                    end repeat
-                end repeat
-
-                return deleteCount
-            end tell
-            """
+            return deleteCount
+        end tell
+        """
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
