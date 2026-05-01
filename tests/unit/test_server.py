@@ -661,8 +661,20 @@ class TestMarkAsRead:
         assert result["success"] is True
         assert result["updated"] == 3
         assert result["requested"] == 3
-        mock_mail.mark_as_read.assert_called_once_with(["1", "2", "3"], read=True)
+        mock_mail.mark_as_read.assert_called_once_with(
+            ["1", "2", "3"], read=True, account=None, source_mailbox=None
+        )
         mock_logger.log_operation.assert_called_once()
+
+    def test_passes_source_mailbox_through(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """When account+source_mailbox are provided, they reach the connector."""
+        mock_mail.mark_as_read.return_value = 1
+        mark_as_read(["1"], account="Gmail", source_mailbox="INBOX")
+        mock_mail.mark_as_read.assert_called_once_with(
+            ["1"], read=True, account="Gmail", source_mailbox="INBOX"
+        )
 
     def test_empty_list_fails_bulk_validation(
         self, mock_mail: MagicMock, mock_logger: MagicMock
@@ -1023,6 +1035,19 @@ class TestMoveMessages:
             destination_mailbox="Archive",
             account="Gmail",
             gmail_mode=False,
+            source_mailbox=None,
+        )
+
+    def test_passes_source_mailbox_through(self, mock_mail: MagicMock) -> None:
+        """source_mailbox reaches the connector when provided."""
+        mock_mail.move_messages.return_value = 1
+        move_messages(["1"], "Archive", "Gmail", source_mailbox="INBOX")
+        mock_mail.move_messages.assert_called_once_with(
+            message_ids=["1"],
+            destination_mailbox="Archive",
+            account="Gmail",
+            gmail_mode=False,
+            source_mailbox="INBOX",
         )
 
     def test_empty_list_early_exit(self, mock_mail: MagicMock) -> None:
@@ -1072,7 +1097,17 @@ class TestFlagMessage:
         assert result["count"] == 1
         assert result["flag_color"] == "red"
         mock_mail.flag_message.assert_called_once_with(
-            message_ids=["1"], flag_color="red"
+            message_ids=["1"], flag_color="red", account=None, source_mailbox=None
+        )
+
+    def test_passes_source_mailbox_through(self, mock_mail: MagicMock) -> None:
+        mock_mail.flag_message.return_value = 1
+        flag_message(["1"], "red", account="Gmail", source_mailbox="INBOX")
+        mock_mail.flag_message.assert_called_once_with(
+            message_ids=["1"],
+            flag_color="red",
+            account="Gmail",
+            source_mailbox="INBOX",
         )
 
     def test_empty_list_early_exit(self, mock_mail: MagicMock) -> None:
@@ -1194,7 +1229,22 @@ class TestDeleteMessages:
         assert result["count"] == 2
         assert result["permanent"] is False
         mock_mail.delete_messages.assert_called_once_with(
-            message_ids=["1", "2"], permanent=False, skip_bulk_check=False
+            message_ids=["1", "2"],
+            permanent=False,
+            skip_bulk_check=False,
+            account=None,
+            source_mailbox=None,
+        )
+
+    def test_passes_source_mailbox_through(self, mock_mail: MagicMock) -> None:
+        mock_mail.delete_messages.return_value = 1
+        delete_messages(["1"], account="Gmail", source_mailbox="INBOX")
+        mock_mail.delete_messages.assert_called_once_with(
+            message_ids=["1"],
+            permanent=False,
+            skip_bulk_check=False,
+            account="Gmail",
+            source_mailbox="INBOX",
         )
 
     def test_empty_list_early_exit(self, mock_mail: MagicMock) -> None:

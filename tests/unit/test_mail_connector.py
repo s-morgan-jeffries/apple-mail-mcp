@@ -2108,6 +2108,179 @@ class TestMessageIdAppleScriptInjection:
         assert 'whose id is "craft\\"ed-id"' in script
 
 
+class TestBulkOpsSourceMailbox:
+    """Regression guards for #103: bulk-mutation methods accept paired
+    `account` + `source_mailbox` parameters that narrow the AppleScript
+    scan from O(N × accounts × mailboxes) to O(N).
+
+    Both params must be provided together (a mailbox name without an
+    account is ambiguous because the same name can exist across accounts).
+    Either alone raises ValueError.
+    """
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    # ------ mark_as_read ------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_mark_as_read_narrow_path_uses_single_loop(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "2"
+        connector.mark_as_read(
+            ["abc", "def"], account="Gmail", source_mailbox="INBOX"
+        )
+        script = mock_run.call_args[0][0]
+        # Narrow scope: single mailbox of a specific account.
+        assert 'mailbox "INBOX" of' in script
+        assert 'account "Gmail"' in script
+        # Cross-scan loops MUST be gone.
+        assert "repeat with acc in accounts" not in script
+        assert "repeat with mb in mailboxes" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_mark_as_read_no_params_keeps_cross_scan_path(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.mark_as_read(["abc"])
+        script = mock_run.call_args[0][0]
+        # Backwards-compat: existing slow path preserved.
+        assert "repeat with acc in accounts" in script
+        assert "repeat with mb in mailboxes" in script
+
+    def test_mark_as_read_account_without_source_mailbox_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="source_mailbox"):
+            connector.mark_as_read(["x"], account="Gmail")
+
+    def test_mark_as_read_source_mailbox_without_account_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="account"):
+            connector.mark_as_read(["x"], source_mailbox="INBOX")
+
+    # ------ move_messages ------
+    # Note: move_messages already has `account` for the DESTINATION account.
+    # `source_mailbox` is independent — it narrows where we LOOK for the
+    # source messages. Both branches (gmail_mode True/False) need the
+    # narrow path.
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_narrow_path_standard_branch(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "2"
+        connector.move_messages(
+            ["abc", "def"],
+            destination_mailbox="Archive",
+            account="Gmail",
+            source_mailbox="INBOX",
+        )
+        script = mock_run.call_args[0][0]
+        # Source narrowed to a single mailbox; destination unchanged.
+        assert 'mailbox "INBOX" of' in script
+        assert 'mailbox "Archive" of' in script  # destination still set
+        assert "repeat with acc in accounts" not in script
+        assert "repeat with mb in mailboxes" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_narrow_path_gmail_branch(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "2"
+        connector.move_messages(
+            ["abc", "def"],
+            destination_mailbox="[Gmail]/All Mail",
+            account="Gmail",
+            gmail_mode=True,
+            source_mailbox="INBOX",
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "INBOX" of' in script
+        # Gmail-mode body: duplicate + delete instead of set mailbox
+        assert "duplicate msg to destMailbox" in script
+        assert "delete msg" in script
+        assert "repeat with acc in accounts" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_no_source_keeps_cross_scan(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.move_messages(
+            ["abc"], destination_mailbox="Archive", account="Gmail"
+        )
+        script = mock_run.call_args[0][0]
+        assert "repeat with acc in accounts" in script
+        assert "repeat with mb in mailboxes" in script
+
+    # ------ flag_message ------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_flag_message_narrow_path_uses_single_loop(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.flag_message(
+            ["abc"], "red", account="iCloud", source_mailbox="Archive"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "Archive" of' in script
+        assert "set flag index of msg to" in script
+        assert "set flagged status of msg to" in script
+        assert "repeat with acc in accounts" not in script
+
+    def test_flag_message_partial_pair_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="source_mailbox"):
+            connector.flag_message(["x"], "red", account="iCloud")
+        with pytest.raises(ValueError, match="account"):
+            connector.flag_message(["x"], "red", source_mailbox="Archive")
+
+    # ------ delete_messages ------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_messages_narrow_path_uses_single_loop(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.delete_messages(
+            ["abc"], account="iCloud", source_mailbox="Trash"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "Trash" of' in script
+        assert "delete msg" in script
+        assert "repeat with acc in accounts" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_messages_permanent_narrow_path(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.delete_messages(
+            ["abc"],
+            permanent=True,
+            account="iCloud",
+            source_mailbox="Junk",
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "Junk" of' in script
+        assert "repeat with acc in accounts" not in script
+
+    def test_delete_messages_partial_pair_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="source_mailbox"):
+            connector.delete_messages(["x"], account="iCloud")
+        with pytest.raises(ValueError, match="account"):
+            connector.delete_messages(["x"], source_mailbox="Trash")
+
+
 class TestWhoseIdQuoting:
     """Regression guards for #86: `whose id is X` must wrap X in quotes
     even when X is already escape_applescript_string'd.
