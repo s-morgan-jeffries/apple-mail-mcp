@@ -669,3 +669,208 @@ class TestFindThreadMembers:
             )
 
         mock_client.logout.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Issue #72: get_message
+# ---------------------------------------------------------------------------
+
+
+class TestGetMessage:
+    """ImapConnector.get_message — Message-ID lookup + envelope/body fetch."""
+
+    def _setup_client(
+        self, mock_cls: MagicMock, *, uids: list[int] = None,
+        body: bytes = b"plain text body",
+        include_body_fetch: bool = True,
+        include_header_fetch: bool = False,
+    ) -> MagicMock:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.return_value = uids if uids is not None else [42]
+
+        fetched: dict[int, dict[bytes, Any]] = {}
+        for uid in (uids or [42]):
+            entry: dict[bytes, Any] = {
+                b"ENVELOPE": _fake_envelope(
+                    message_id=f"<{uid}@example.com>".encode(),
+                    subject=b"Hello",
+                ),
+                b"FLAGS": (b"\\Seen",),
+            }
+            if include_body_fetch:
+                entry[b"BODY[TEXT]"] = body
+            if include_header_fetch:
+                entry[b"BODY[HEADER]"] = (
+                    b"From: alice@example.com\r\nSubject: Hello\r\n"
+                )
+            fetched[uid] = entry
+        client.fetch.return_value = fetched
+        return client
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_search_uses_bracketed_message_id_header_criteria(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """The Message-ID gets bracketed before SEARCH HEADER — RFC 5322
+        canonical form is what IMAP servers compare the literal header
+        against."""
+        self._setup_client(mock_cls)
+
+        ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "abc@example.com", mailbox="INBOX",
+        )
+
+        mock_cls.return_value.search.assert_called_once_with(
+            ["HEADER", "Message-ID", "<abc@example.com>"]
+        )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_search_preserves_already_bracketed_id(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """If the caller already supplied an angle-bracketed ID, don't
+        wrap it twice."""
+        self._setup_client(mock_cls)
+
+        ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "<abc@example.com>", mailbox="INBOX",
+        )
+        mock_cls.return_value.search.assert_called_once_with(
+            ["HEADER", "Message-ID", "<abc@example.com>"]
+        )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_select_folder_honors_mailbox_param(
+        self, mock_cls: MagicMock
+    ) -> None:
+        self._setup_client(mock_cls)
+        ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "abc@x", mailbox="Archive",
+        )
+        mock_cls.return_value.select_folder.assert_called_once_with(
+            "Archive", readonly=True
+        )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_returns_dict_with_applescript_compatible_keys(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Return shape must match the AppleScript path so callers don't
+        have to special-case which dispatch fired."""
+        self._setup_client(mock_cls, uids=[7], body=b"hello world")
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "msg7@example.com", mailbox="INBOX",
+        )
+
+        assert set(result.keys()) >= {
+            "id", "subject", "sender", "date_received",
+            "read_status", "flagged", "content",
+        }
+        assert result["content"] == "hello world"
+        assert result["read_status"] is True
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_default_fetch_keys_include_body_text(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Default include_content=True and headers_only=False → fetch
+        ENVELOPE + FLAGS + BODY[TEXT]."""
+        self._setup_client(mock_cls)
+
+        ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "abc@x", mailbox="INBOX",
+        )
+
+        fetch_keys = mock_cls.return_value.fetch.call_args[0][1]
+        assert b"ENVELOPE" in fetch_keys
+        assert b"FLAGS" in fetch_keys
+        assert b"BODY[TEXT]" in fetch_keys
+        assert b"BODY[HEADER]" not in fetch_keys
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_include_content_false_skips_body_fetch(
+        self, mock_cls: MagicMock
+    ) -> None:
+        self._setup_client(mock_cls, include_body_fetch=False)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "abc@x", mailbox="INBOX", include_content=False,
+        )
+
+        fetch_keys = mock_cls.return_value.fetch.call_args[0][1]
+        assert b"BODY[TEXT]" not in fetch_keys
+        assert b"BODY[HEADER]" not in fetch_keys
+        # content empty when not requested.
+        assert result["content"] == ""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_headers_only_uses_body_header_not_body_text(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """headers_only is the perf knob — fetch headers only, return
+        empty content. The envelope already carries subject/sender/date,
+        so the BODY[HEADER] fetch is for spec-correctness vs. servers
+        that might still send the body without an explicit ask."""
+        self._setup_client(
+            mock_cls, include_body_fetch=False, include_header_fetch=True,
+        )
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "abc@x", mailbox="INBOX", headers_only=True,
+        )
+
+        fetch_keys = mock_cls.return_value.fetch.call_args[0][1]
+        assert b"BODY[HEADER]" in fetch_keys
+        assert b"BODY[TEXT]" not in fetch_keys
+        assert result["content"] == ""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_no_match_raises_message_not_found(
+        self, mock_cls: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailMessageNotFoundError
+
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.return_value = []
+
+        with pytest.raises(MailMessageNotFoundError, match="not found"):
+            ImapConnector("h", 993, "u@e.com", "pw").get_message(
+                "ghost@nowhere", mailbox="INBOX",
+            )
+
+        # Logout still called via the finally block.
+        client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_logout_called_on_exception(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.side_effect = RuntimeError("kaboom")
+
+        with pytest.raises(RuntimeError):
+            ImapConnector("h", 993, "u@e.com", "pw").get_message(
+                "x@y", mailbox="INBOX",
+            )
+        client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_only_first_match_is_fetched(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """If the server (somehow) returns multiple UIDs for the same
+        Message-ID — duplicate appends, server quirk — fetch only one to
+        avoid pulling unbounded duplicates."""
+        self._setup_client(mock_cls, uids=[1, 2, 3])
+
+        ImapConnector("h", 993, "u@e.com", "pw").get_message(
+            "abc@x", mailbox="INBOX",
+        )
+
+        fetch_args = mock_cls.return_value.fetch.call_args[0]
+        # First positional arg is the UID list — must be exactly one.
+        assert len(list(fetch_args[0])) == 1

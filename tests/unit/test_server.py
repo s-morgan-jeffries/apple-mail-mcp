@@ -534,9 +534,38 @@ class TestGetMessage:
 
         assert result["success"] is True
         assert result["message"]["id"] == "1"
-        mock_mail.get_message.assert_called_once_with("1", include_content=False)
+        # All five params flow through; defaults preserve back-compat for
+        # callers who only pass message_id (+ include_content).
+        mock_mail.get_message.assert_called_once_with(
+            "1",
+            include_content=False,
+            headers_only=False,
+            account=None,
+            mailbox=None,
+        )
         mock_logger.log_operation.assert_called_once_with(
             "get_message", {"message_id": "1"}, "success"
+        )
+
+    def test_imap_hint_params_pass_through_to_connector(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """Issue #72: account+mailbox activate the IMAP fast path; the
+        server tool must forward them unchanged so the dispatch decision
+        happens in the connector."""
+        mock_mail.get_message.return_value = {"id": "abc@x", "subject": "Hi"}
+
+        result = get_message(
+            "abc@x", account="iCloud", mailbox="INBOX", headers_only=True
+        )
+
+        assert result["success"] is True
+        mock_mail.get_message.assert_called_once_with(
+            "abc@x",
+            include_content=True,
+            headers_only=True,
+            account="iCloud",
+            mailbox="INBOX",
         )
 
     def test_message_not_found_maps_to_message_not_found(

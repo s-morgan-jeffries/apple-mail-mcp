@@ -1131,25 +1131,100 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
-    def get_message(self, message_id: str, include_content: bool = True) -> dict[str, Any]:
+    def get_message(
+        self,
+        message_id: str,
+        include_content: bool = True,
+        *,
+        headers_only: bool = False,
+        account: str | None = None,
+        mailbox: str | None = None,
+    ) -> dict[str, Any]:
         """
         Get full message details.
 
+        Tries the IMAP path first when both ``account`` and ``mailbox``
+        are supplied AND the account has a Keychain entry. Falls back to
+        AppleScript on any IMAP failure per the graceful-degradation
+        invariants in docs/research/imap-auth-options-decision.md, and
+        also when no account/mailbox hint is given.
+
+        Note on identifier semantics: the IMAP path matches against the
+        RFC 5322 ``Message-ID`` header (the same form ``search_messages``
+        returns when delegated through IMAP). The AppleScript path
+        matches Mail.app's internal numeric message id. Callers that
+        obtained ``message_id`` from a `search_messages` call should
+        forward the same ``account`` + ``mailbox`` to keep the paths
+        consistent.
+
         Args:
-            message_id: Message ID
-            include_content: Include message body
+            message_id: Message ID. RFC 5322 form for the IMAP path,
+                Mail.app internal id for the AppleScript path.
+            include_content: When False, ``content`` is the empty string.
+            headers_only: IMAP-only optimization — fetches ``BODY[HEADER]``
+                instead of the body. Silently ignored on the AppleScript
+                fallback path (AppleScript always returns body content
+                when ``include_content`` is True).
+            account: Mail.app account name. Optional; required (with
+                ``mailbox``) to enable the IMAP fast path.
+            mailbox: Folder to look in for the IMAP path. Optional.
 
         Returns:
-            Message dictionary
+            Message dictionary with keys: id, subject, sender,
+            date_received, read_status, flagged, content.
 
         Raises:
-            MailMessageNotFoundError: If message doesn't exist
+            MailMessageNotFoundError: Message not found via either path.
+        """
+        if account is not None and mailbox is not None:
+            try:
+                return self._imap_get_message(
+                    account=account,
+                    mailbox=mailbox,
+                    message_id=message_id,
+                    include_content=include_content,
+                    headers_only=headers_only,
+                )
+            except _IMAP_FALLBACK_EXCS as exc:
+                self._log_imap_fallback(account, exc)
+                # fall through to AppleScript
+
+        return self._get_message_applescript(message_id, include_content)
+
+    def _imap_get_message(
+        self,
+        *,
+        account: str,
+        mailbox: str,
+        message_id: str,
+        include_content: bool,
+        headers_only: bool,
+    ) -> dict[str, Any]:
+        """Run get_message through the IMAP path. Mirrors _imap_search.
+
+        Propagates all fallback-triggering exceptions unchanged — the
+        caller (get_message) catches and falls back.
+        """
+        host, port, email = self._resolve_imap_config(account)
+        password = get_imap_password(account, email)
+        imap = ImapConnector(host, port, email, password)
+        return imap.get_message(
+            message_id,
+            mailbox=mailbox,
+            include_content=include_content,
+            headers_only=headers_only,
+        )
+
+    def _get_message_applescript(
+        self, message_id: str, include_content: bool
+    ) -> dict[str, Any]:
+        """AppleScript fallback for get_message — iterates account × mailbox.
+
+        Slow on accounts with many mailboxes (see issue #72). Callers
+        with a known account+mailbox should provide them to take the
+        IMAP path instead.
         """
         message_id_safe = escape_applescript_string(sanitize_input(message_id))
-
-        # Note: Direct message ID lookup is tricky in AppleScript
-        # We need to search through mailboxes
-        # For now, we'll use a simplified approach
 
         content_clause = (
             'set msgContent to content of msg'
