@@ -1031,7 +1031,8 @@ class TestAppleMailConnector:
         mock_resolve.assert_called_once_with("iCloud")
         mock_keychain.assert_called_once_with("iCloud", "user@icloud.com")
         mock_imap_cls.assert_called_once_with(
-            "imap.mail.me.com", 993, "user@icloud.com", "app-password"
+            "imap.mail.me.com", 993, "user@icloud.com", "app-password",
+            pool=None,
         )
         # Parameters forwarded 1:1 to the IMAP connector (minus `account`).
         mock_imap.search_messages.assert_called_once_with(
@@ -1133,7 +1134,8 @@ class TestAppleMailConnector:
         mock_resolve.assert_called_once_with("iCloud")
         mock_keychain.assert_called_once_with("iCloud", "user@icloud.com")
         mock_imap_cls.assert_called_once_with(
-            "imap.mail.me.com", 993, "user@icloud.com", "app-password"
+            "imap.mail.me.com", 993, "user@icloud.com", "app-password",
+            pool=None,
         )
         mock_imap.find_thread_members.assert_called_once_with(
             anchor_rfc_message_id="anchor@x",

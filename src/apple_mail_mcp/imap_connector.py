@@ -24,13 +24,18 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timedelta as _timedelta
 from typing import Any
 
 from imapclient import IMAPClient
-from imapclient.exceptions import IMAPClientError
+from imapclient.exceptions import IMAPClientError, LoginError
 from imapclient.response_types import Envelope
 
 from .exceptions import MailMessageNotFoundError
@@ -49,8 +54,137 @@ CONNECT_TIMEOUT_S: float = 3.0
 fallback happens inside the graceful-degradation window without
 waiting for TCP's default timeout."""
 
+POOL_IDLE_TIMEOUT_S: float = 270.0
+"""Default pool idle threshold. iCloud and most providers drop IMAP
+sessions after ~30 min idle. 270s = 4.5 min keeps us comfortably under
+that while still amortizing connect cost across realistic interactive
+bursts (a series of search → get_message → get_attachments calls within
+a couple minutes of each other reuses one connection)."""
+
 _FLAG_SEEN = b"\\Seen"
 _FLAG_FLAGGED = b"\\Flagged"
+
+
+# ---------------------------------------------------------------------------
+# Connection pool (issue #75)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _PooledClient:
+    """Tracks one cached IMAPClient: the connection, a lock that
+    serializes its use across threads, and a monotonic timestamp for
+    idle-timeout decisions."""
+
+    client: IMAPClient
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    last_used: float = field(default_factory=time.monotonic)
+
+
+# Exceptions that should invalidate a pooled connection. LoginError /
+# IMAPClientError are direct protocol failures; OSError catches mid-
+# session network drops (broken pipe, conn reset). MailMessageNotFoundError
+# is NOT here — it's a clean "no match" answer, not a connection failure.
+_POOL_INVALIDATE_EXCS: tuple[type[BaseException], ...] = (
+    LoginError,
+    IMAPClientError,
+    OSError,
+)
+
+
+class ImapConnectionPool:
+    """Reuses IMAPClient sessions across calls keyed by (host, email).
+
+    Per the issue #75 design: opt-in (per-call lifecycle remains the
+    default in :class:`ImapConnector` until a pool is explicitly
+    passed). Lazy-reconnect on error and on idle timeout — if the
+    cached client is stale, the next ``session()`` drops it and opens
+    a fresh one transparently.
+
+    Thread-safety:
+    - The cache dict is guarded by ``_cache_lock``.
+    - Each cached client has its own per-connection lock that
+      ``session()`` holds for the duration of the yielded block.
+      Concurrent calls to the same (host, email) serialize; concurrent
+      calls to different keys run in parallel.
+    """
+
+    def __init__(self, *, idle_timeout_s: float = POOL_IDLE_TIMEOUT_S) -> None:
+        self._cache: dict[tuple[str, str], _PooledClient] = {}
+        self._cache_lock = threading.Lock()
+        self._idle_timeout_s = idle_timeout_s
+
+    @contextmanager
+    def session(
+        self,
+        host: str,
+        port: int,
+        email: str,
+        password: str,
+        connect_timeout: float,
+    ) -> Iterator[IMAPClient]:
+        """Yield a logged-in IMAPClient for use; manage its lifecycle.
+
+        On clean exit: bump ``last_used`` and keep the entry cached.
+
+        On failure of one of ``_POOL_INVALIDATE_EXCS``: drop the entry
+        (attempt logout, swallow logout errors) so the next call gets
+        a fresh connection. The original exception still propagates;
+        the orchestrator's existing fallback logic catches it.
+        """
+        key = (host, email)
+
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            stale = (
+                entry is not None
+                and time.monotonic() - entry.last_used > self._idle_timeout_s
+            )
+            if entry is None or stale:
+                if entry is not None:
+                    # Stale — try to be polite about closing it.
+                    self._cache.pop(key, None)
+                    try:
+                        entry.client.logout()
+                    except Exception:  # noqa: BLE001 — best effort
+                        pass
+                client = IMAPClient(
+                    host, port=port, ssl=True, timeout=connect_timeout
+                )
+                client.login(email, password)
+                entry = _PooledClient(client=client)
+                self._cache[key] = entry
+
+        # Acquire the per-connection lock OUTSIDE the cache lock — we
+        # don't want a slow operation on one connection blocking cache
+        # reads for unrelated keys.
+        with entry.lock:
+            try:
+                yield entry.client
+            except _POOL_INVALIDATE_EXCS:
+                # Connection-level failure: drop and propagate.
+                with self._cache_lock:
+                    # Only drop if it's still the same entry — another
+                    # thread may have already reconnected.
+                    if self._cache.get(key) is entry:
+                        self._cache.pop(key, None)
+                try:
+                    entry.client.logout()
+                except Exception:  # noqa: BLE001 — best effort
+                    pass
+                raise
+            else:
+                entry.last_used = time.monotonic()
+
+    def close(self) -> None:
+        """Log out all cached clients. Safe to call multiple times."""
+        with self._cache_lock:
+            entries = list(self._cache.values())
+            self._cache.clear()
+        for entry in entries:
+            try:
+                entry.client.logout()
+            except Exception:  # noqa: BLE001 — best effort
+                pass
 
 _IMAP_MONTHS = (
     "Jan",
@@ -313,12 +447,42 @@ class ImapConnector:
         email: str,
         password: str,
         connect_timeout: float = CONNECT_TIMEOUT_S,
+        *,
+        pool: ImapConnectionPool | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._email = email
         self._password = password
         self._connect_timeout = connect_timeout
+        self._pool = pool
+
+    @contextmanager
+    def _session(self) -> Iterator[IMAPClient]:
+        """Yield a logged-in IMAPClient. Routes through the pool when
+        one was provided at construction; otherwise opens and closes a
+        fresh connection per call (the v0.5.0 behavior).
+
+        All four public methods of this connector (search_messages,
+        get_message, get_attachments, find_thread_members) use this
+        helper so the pool / no-pool decision lives in exactly one place.
+        """
+        if self._pool is not None:
+            with self._pool.session(
+                self._host, self._port, self._email,
+                self._password, self._connect_timeout,
+            ) as client:
+                yield client
+            return
+
+        client = IMAPClient(
+            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
+        )
+        try:
+            client.login(self._email, self._password)
+            yield client
+        finally:
+            client.logout()
 
     def search_messages(
         self,
@@ -343,11 +507,7 @@ class ImapConnector:
             date_to,
         )
 
-        client = IMAPClient(
-            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
-        )
-        try:
-            client.login(self._email, self._password)
+        with self._session() as client:
             client.select_folder(mailbox, readonly=True)
 
             uids = client.search(criteria)
@@ -377,8 +537,6 @@ class ImapConnector:
                     _envelope_to_dict(entry[b"ENVELOPE"], tuple(entry[b"FLAGS"]))
                 )
             return results
-        finally:
-            client.logout()
 
     def get_message(
         self,
@@ -443,11 +601,7 @@ class ImapConnector:
             # servers send less data this way; some don't care.
             fetch_keys.append(b"BODY[HEADER]")
 
-        client = IMAPClient(
-            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
-        )
-        try:
-            client.login(self._email, self._password)
+        with self._session() as client:
             client.select_folder(mailbox, readonly=True)
 
             uids = client.search(["HEADER", "Message-ID", bracketed])
@@ -469,8 +623,6 @@ class ImapConnector:
             else:
                 result["content"] = ""
             return result
-        finally:
-            client.logout()
 
     def get_attachments(
         self,
@@ -516,11 +668,7 @@ class ImapConnector:
             else f"<{message_id}>"
         )
 
-        client = IMAPClient(
-            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
-        )
-        try:
-            client.login(self._email, self._password)
+        with self._session() as client:
             client.select_folder(mailbox, readonly=True)
 
             uids = client.search(["HEADER", "Message-ID", bracketed])
@@ -535,8 +683,6 @@ class ImapConnector:
             return _bodystructure_extract_attachments(
                 entry.get(b"BODYSTRUCTURE")
             )
-        finally:
-            client.logout()
 
     def find_thread_members(
         self,
@@ -570,11 +716,7 @@ class ImapConnector:
         """
         known_ids: set[str] = {anchor_rfc_message_id} | set(anchor_references)
 
-        client = IMAPClient(
-            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
-        )
-        try:
-            client.login(self._email, self._password)
+        with self._session() as client:
             mailboxes = client.list_folders()
             collected: dict[str, dict[str, Any]] = {}
 
@@ -639,5 +781,3 @@ class ImapConnector:
                 collected.values(),
                 key=lambda m: m.get("date_received") or "",
             )
-        finally:
-            client.logout()
