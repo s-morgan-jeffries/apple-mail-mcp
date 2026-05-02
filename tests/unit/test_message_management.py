@@ -353,19 +353,22 @@ class TestDeleteMessages:
         assert result == 3
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_permanent_delete(
+    def test_permanent_delete_warns_and_still_returns_count(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Test permanent deletion (bypass trash)."""
+        """Issue #111: permanent=True emits a DeprecationWarning since
+        Mail.app exposes no AppleScript path that actually bypasses Trash.
+        The call still succeeds (messages are moved to Trash like the
+        default path) and returns the count."""
         mock_run.return_value = "1"
 
-        result = connector.delete_messages(
-            message_ids=["12345"],
-            permanent=True
-        )
+        with pytest.warns(DeprecationWarning, match="#111"):
+            result = connector.delete_messages(
+                message_ids=["12345"],
+                permanent=True
+            )
 
         assert result == 1
-        # Permanent delete should have different script
 
     def test_delete_empty_list(self, connector: AppleMailConnector) -> None:
         """Test deleting with empty message list."""

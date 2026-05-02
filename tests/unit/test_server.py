@@ -1285,6 +1285,26 @@ class TestDeleteMessages:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
 
+    def test_permanent_true_threads_through_to_connector(
+        self, mock_mail: MagicMock
+    ) -> None:
+        """Issue #111: the connector emits a DeprecationWarning when
+        permanent=True; the server's job is just to forward the flag
+        unchanged so the warning fires from the user's call frame."""
+        mock_mail.delete_messages.return_value = 1
+        result = delete_messages(["1"], permanent=True)
+        assert result["success"] is True
+        # Server still echoes the (now-meaningless) flag in its response
+        # for backwards compatibility with existing callers.
+        assert result["permanent"] is True
+        mock_mail.delete_messages.assert_called_once_with(
+            message_ids=["1"],
+            permanent=True,
+            skip_bulk_check=False,
+            account=None,
+            source_mailbox=None,
+        )
+
 
 # ---------------------------------------------------------------------------
 # 13. reply_to_message

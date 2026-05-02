@@ -1,6 +1,7 @@
 """Unit tests for mail connector."""
 
 import logging
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2361,19 +2362,40 @@ class TestBulkOpsSourceMailbox:
         assert "repeat with acc in accounts" not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_delete_messages_permanent_narrow_path(
+    def test_delete_messages_permanent_emits_deprecation_warning(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
+        """Issue #111: Mail.app exposes no AppleScript path to bypass Trash.
+        `permanent=True` is a no-op; warn so callers don't silently rely on
+        absent behavior."""
         mock_run.return_value = "1"
-        connector.delete_messages(
-            ["abc"],
-            permanent=True,
-            account="iCloud",
-            source_mailbox="Junk",
-        )
+        with pytest.warns(DeprecationWarning, match="#111"):
+            connector.delete_messages(
+                ["abc"],
+                permanent=True,
+                account="iCloud",
+                source_mailbox="Junk",
+            )
+        # Script shape unchanged from the non-permanent path: `delete msg`
+        # always moves to the account's Trash mailbox today.
         script = mock_run.call_args[0][0]
         assert 'mailbox "Junk" of' in script
+        assert "delete msg" in script
         assert "repeat with acc in accounts" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_messages_default_does_not_warn(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """The default path (permanent=False) must not emit DeprecationWarning."""
+        mock_run.return_value = "1"
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            connector.delete_messages(
+                ["abc"],
+                account="iCloud",
+                source_mailbox="Junk",
+            )
 
     def test_delete_messages_partial_pair_raises(
         self, connector: AppleMailConnector

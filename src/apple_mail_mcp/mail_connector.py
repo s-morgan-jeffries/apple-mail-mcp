@@ -6,6 +6,7 @@ import logging
 import re
 import subprocess
 import time
+import warnings
 from datetime import date as _date
 from datetime import timedelta as _timedelta
 from pathlib import Path
@@ -2011,14 +2012,15 @@ class AppleMailConnector:
         source_mailbox: str | None = None,
     ) -> int:
         """
-        Delete messages (move to trash or permanent delete).
+        Delete messages (always moves to the account's Trash mailbox).
 
         Args:
             message_ids: List of message IDs to delete
-            permanent: If True, permanently delete (bypass trash). NOTE:
-                this flag currently produces identical AppleScript as the
-                non-permanent path; the actual permanent-vs-trash behavior
-                is whatever Mail.app does by default for `delete msg`.
+            permanent: Reserved; currently a no-op. Mail.app's AppleScript
+                dictionary exposes no path to permanent-delete that bypasses
+                Trash — see issue #111. Passing True emits a
+                DeprecationWarning so callers see the discrepancy clearly
+                rather than silently relying on absent behavior.
             skip_bulk_check: If False, enforce bulk operation limits
             account: Optional account name (or UUID); see `source_mailbox`.
             source_mailbox: Optional source mailbox name. When provided
@@ -2027,7 +2029,7 @@ class AppleMailConnector:
                 Either alone raises ValueError.
 
         Returns:
-            Number of messages deleted
+            Number of messages deleted (moved to Trash)
 
         Raises:
             ValueError: If bulk check fails, or if exactly one of
@@ -2035,6 +2037,25 @@ class AppleMailConnector:
         """
         if not message_ids:
             return 0
+
+        # `permanent` was originally meant to bypass Trash, but empirical
+        # probing of Mail.app's AppleScript surface (issue #111) found no
+        # primitive that can permanently-delete:
+        #   - `delete msg` always moves to the account's Trash
+        #   - A second `delete` on a trashed message is a no-op
+        #   - There is no `empty trash` command in the dictionary
+        # Until / unless that changes, the parameter is reserved. Surface
+        # the gap loudly so MCP clients don't quietly trust a ghost knob.
+        if permanent:
+            warnings.warn(
+                "delete_messages(permanent=True) currently behaves "
+                "identically to permanent=False; Mail.app's AppleScript "
+                "dictionary does not expose a way to bypass Trash. "
+                "Messages are moved to the account's Trash mailbox in "
+                "both cases. See issue #111.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         # Safety check for bulk operations
         if not skip_bulk_check and len(message_ids) > 100:
@@ -2055,10 +2076,6 @@ class AppleMailConnector:
             counter_var="deleteCount",
         )
 
-        # `permanent` is preserved as a parameter but currently produces
-        # identical AppleScript — Mail.app's `delete msg` semantics handle
-        # both cases the same way today. If permanent-vs-trash needs to
-        # diverge in the future, branch here on `permanent`.
         script = f"""
         tell application "Mail"
             set idList to {{{id_list}}}

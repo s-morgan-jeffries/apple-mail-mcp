@@ -782,14 +782,14 @@ create_mailbox(account="Gmail", name="Q2", parent_mailbox="2024")
 
 ### delete_messages
 
-Delete messages (move to trash or permanently delete).
+Delete messages — always moves them to the account's Trash mailbox.
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `message_ids` | list[string] | Yes | - | List of message IDs to delete |
-| `permanent` | boolean | No | False | If True, permanently delete; if False, move to Trash |
+| `permanent` | boolean | No | False | Reserved; currently a no-op. Passing `True` emits a `DeprecationWarning`. See [issue #111](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/111). |
 
 **Returns:**
 
@@ -804,24 +804,19 @@ Delete messages (move to trash or permanently delete).
 **Examples:**
 
 ```python
-# Move messages to trash (safe)
+# Move messages to trash
 delete_messages(
     message_ids=["12345", "12346"],
-    permanent=False
-)
-
-# Permanently delete (cannot be undone!)
-delete_messages(
-    message_ids=["12347"],
-    permanent=True
 )
 ```
 
+**Note on `permanent`:**
+
+Mail.app's AppleScript dictionary exposes no path to permanent-delete that bypasses Trash. Calling `delete msg` always moves to the account's Trash; calling `delete` again on a message already in Trash is a no-op, and there is no `empty trash` command. The `permanent` parameter is preserved for API compatibility but currently has no effect; passing `True` raises a `DeprecationWarning` so the gap is visible. Track #111 for status.
+
 **Safety Notes:**
-- **Permanent deletion cannot be undone!**
 - Bulk deletions limited to 100 messages for safety
-- Default behavior moves to trash (recoverable)
-- Use `permanent=True` only when certain
+- All deletes are recoverable from the account's Trash mailbox until that mailbox is emptied (typically by Mail.app's per-account "empty trash" schedule, configurable in Mail's preferences)
 
 ---
 
