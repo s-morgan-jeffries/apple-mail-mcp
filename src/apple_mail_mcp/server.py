@@ -1617,11 +1617,15 @@ def delete_messages(
     source_mailbox: str | None = None,
 ) -> dict[str, Any]:
     """
-    Delete messages (move to trash or permanently delete).
+    Delete messages (always moves to the account's Trash mailbox).
 
     Args:
         message_ids: List of message IDs to delete
-        permanent: If True, permanently delete; if False, move to Trash (default: False)
+        permanent: Reserved; currently a no-op. Mail.app's AppleScript
+            dictionary exposes no path to permanent-delete that bypasses
+            Trash (issue #111). Passing True emits a DeprecationWarning;
+            messages still go to Trash. Recoverable from the account's
+            Trash mailbox until that mailbox is emptied.
         account: Optional account name (or UUID) the messages live in.
             Must be provided together with `source_mailbox`. When both
             are given, the operation is much faster.
@@ -1633,14 +1637,14 @@ def delete_messages(
     Example:
         delete_messages(
             message_ids=["12345"],
-            permanent=False,  # Move to trash
             account="Gmail",
             source_mailbox="INBOX",
         )
 
     Note:
         Bulk deletions are limited to 100 messages for safety.
-        Permanent deletion cannot be undone - use with caution.
+        All deletes are recoverable from Trash; there is currently no
+        AppleScript path to bypass it. See issue #111.
     """
     try:
         if not message_ids:
@@ -1662,8 +1666,7 @@ def delete_messages(
                 "error_type": "validation_error",
             }
 
-        delete_type = "permanently" if permanent else "to trash"
-        logger.info(f"Deleting {len(message_ids)} message(s) {delete_type}")
+        logger.info(f"Deleting {len(message_ids)} message(s) to trash")
 
         # Delete the messages
         count = mail.delete_messages(
