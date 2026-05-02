@@ -255,6 +255,67 @@ class TestMailIntegration:
         assert isinstance(result["flagged"], bool)
         assert isinstance(result["content"], str)
 
+    def test_get_message_via_imap(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """Issue #72: when account+mailbox are provided AND the account
+        has a Keychain entry, get_message uses the IMAP fast path.
+
+        Skips if the test account doesn't have IMAP configured — the
+        fallback would still work but we'd be testing the AppleScript
+        path again, which test_get_message above already covers.
+        """
+        from apple_mail_mcp.exceptions import (
+            MailKeychainAccessDeniedError,
+            MailKeychainEntryNotFoundError,
+        )
+        from apple_mail_mcp.keychain import get_imap_password
+
+        # Resolve email + skip-if-no-keychain via the same path the
+        # connector itself uses for IMAP delegation. Match the skip
+        # pattern from test_imap_connector integration tests.
+        try:
+            _, _, email = connector._resolve_imap_config(test_account)
+            get_imap_password(test_account, email)
+        except (
+            MailKeychainEntryNotFoundError,
+            MailKeychainAccessDeniedError,
+        ):
+            pytest.skip(
+                f"No Keychain entry for {test_account!r} — IMAP path "
+                f"can't be exercised. Run `apple-mail-mcp setup-imap` first."
+            )
+
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not matches:
+            pytest.skip("test inbox has no messages")
+        target_id = matches[0]["id"]
+
+        # Same shape as the AppleScript path — callers don't have to
+        # special-case which dispatch fired.
+        result = connector.get_message(
+            target_id, account=test_account, mailbox="INBOX",
+        )
+        assert set(result.keys()) >= {
+            "id", "subject", "sender", "date_received",
+            "read_status", "flagged", "content",
+        }
+        assert isinstance(result["content"], str)
+
+        # headers_only=True: same shape, content empty. Useful for
+        # preview-style callers.
+        head_only = connector.get_message(
+            target_id, account=test_account, mailbox="INBOX",
+            headers_only=True,
+        )
+        assert set(head_only.keys()) >= {
+            "id", "subject", "sender", "date_received",
+            "read_status", "flagged", "content",
+        }
+        assert head_only["content"] == ""
+
     def test_get_attachments(
         self, connector: AppleMailConnector, test_account: str
     ) -> None:

@@ -5,6 +5,7 @@ import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
+from imapclient.exceptions import LoginError
 
 from apple_mail_mcp.exceptions import (
     MailAccountNotFoundError,
@@ -1864,6 +1865,198 @@ class TestAppleMailConnector:
         connector.get_message("x")
         script = mock_run.call_args[0][0]
         assert "|id|:(id of msg as text)" in script
+
+    # --- Issue #72 dispatcher behavior -----------------------------------
+
+    def test_get_message_uses_imap_when_account_and_mailbox_provided(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """With both hint params, _imap_get_message runs and AppleScript
+        is never called."""
+        with patch.object(
+            connector, "_imap_get_message",
+            return_value={"id": "x", "content": "body"},
+        ) as imap_path, patch.object(
+            connector, "_get_message_applescript"
+        ) as as_path:
+            result = connector.get_message(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+
+        assert result == {"id": "x", "content": "body"}
+        imap_path.assert_called_once_with(
+            account="iCloud",
+            mailbox="INBOX",
+            message_id="abc@x",
+            include_content=True,
+            headers_only=False,
+        )
+        as_path.assert_not_called()
+
+    def test_get_message_no_hint_skips_imap_path(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """No account/mailbox → IMAP is bypassed entirely (no Keychain
+        prompt, no log, no nothing)."""
+        with patch.object(connector, "_imap_get_message") as imap_path, \
+             patch.object(
+                 connector, "_get_message_applescript",
+                 return_value={"id": "1"},
+             ) as as_path:
+            result = connector.get_message("123")
+
+        assert result == {"id": "1"}
+        imap_path.assert_not_called()
+        as_path.assert_called_once_with("123", True)
+
+    def test_get_message_partial_hint_skips_imap(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """account-only or mailbox-only is not enough; both required."""
+        with patch.object(connector, "_imap_get_message") as imap_path, \
+             patch.object(
+                 connector, "_get_message_applescript",
+                 return_value={"id": "1"},
+             ):
+            connector.get_message("123", account="iCloud")
+            connector.get_message("123", mailbox="INBOX")
+
+        imap_path.assert_not_called()
+
+    def test_get_message_falls_back_on_login_error(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """LoginError on IMAP path → fall through to AppleScript, log
+        fallback once."""
+        with patch.object(
+            connector, "_imap_get_message",
+            side_effect=LoginError("AUTHENTICATIONFAILED"),
+        ) as imap_path, patch.object(
+            connector, "_get_message_applescript",
+            return_value={"id": "1"},
+        ) as as_path, patch.object(
+            connector, "_log_imap_fallback"
+        ) as log_fb:
+            result = connector.get_message(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+
+        assert result == {"id": "1"}
+        imap_path.assert_called_once()
+        as_path.assert_called_once()
+        log_fb.assert_called_once()
+
+    def test_get_message_falls_back_on_keychain_miss(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """No Keychain entry is the benign opt-out signal — fall through
+        and log at DEBUG (not WARNING)."""
+        with patch.object(
+            connector, "_imap_get_message",
+            side_effect=MailKeychainEntryNotFoundError("none"),
+        ), patch.object(
+            connector, "_get_message_applescript",
+            return_value={"id": "1"},
+        ) as as_path, patch.object(
+            connector, "_log_imap_fallback"
+        ) as log_fb:
+            connector.get_message(
+                "x", account="iCloud", mailbox="INBOX",
+            )
+
+        as_path.assert_called_once()
+        log_fb.assert_called_once()
+
+    def test_get_message_falls_back_when_network_unavailable(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """Offline / DNS-failed / host-unreachable should fall through to
+        AppleScript so users running agents on a flaky network or fully
+        offline still get a result. OSError covers socket.timeout,
+        socket.gaierror, ConnectionRefusedError, and host-unreachable;
+        all of those are in _IMAP_FALLBACK_EXCS."""
+        with patch.object(
+            connector, "_imap_get_message",
+            side_effect=OSError("network is unreachable"),
+        ), patch.object(
+            connector, "_get_message_applescript",
+            return_value={"id": "1"},
+        ) as as_path, patch.object(
+            connector, "_log_imap_fallback"
+        ) as log_fb:
+            result = connector.get_message(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+
+        assert result == {"id": "1"}
+        as_path.assert_called_once()
+        # The fallback log fires so the user can find the network failure
+        # in DEBUG-level logs if they go looking.
+        log_fb.assert_called_once()
+
+    def test_get_message_falls_back_on_imap_protocol_error(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """IMAPClientError covers protocol-level breakage (BAD response,
+        truncated session, captive-portal-style HTTP-instead-of-IMAP).
+        Same fallback as network errors."""
+        from imapclient.exceptions import IMAPClientError
+
+        with patch.object(
+            connector, "_imap_get_message",
+            side_effect=IMAPClientError("BAD command"),
+        ), patch.object(
+            connector, "_get_message_applescript",
+            return_value={"id": "1"},
+        ) as as_path:
+            result = connector.get_message(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+
+        assert result == {"id": "1"}
+        as_path.assert_called_once()
+
+    def test_get_message_message_not_found_on_imap_does_not_fall_back(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """If IMAP found the folder but the Message-ID isn't there, that's
+        a definitive answer — don't paper over it with an AppleScript scan
+        that would also fail (or worse, succeed by matching a different
+        message in a different folder)."""
+        with patch.object(
+            connector, "_imap_get_message",
+            side_effect=MailMessageNotFoundError("nope"),
+        ), patch.object(
+            connector, "_get_message_applescript"
+        ) as as_path:
+            with pytest.raises(MailMessageNotFoundError):
+                connector.get_message(
+                    "abc@x", account="iCloud", mailbox="INBOX",
+                )
+        as_path.assert_not_called()
+
+    def test_get_message_headers_only_silently_ignored_on_applescript(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """headers_only is an IMAP-only knob; passing it without a hint
+        must not error and must not change the AppleScript path's behavior."""
+        with patch.object(
+            connector, "_get_message_applescript",
+            return_value={"id": "1", "content": "body"},
+        ) as as_path:
+            connector.get_message("123", headers_only=True)
+        # AppleScript path receives the original signature (message_id,
+        # include_content); headers_only is silently dropped.
+        as_path.assert_called_once_with("123", True)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_message_send_email_basic_pre_existing_unaffected(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Smoke test: existing positional callers (message_id only) still work."""
+        mock_run.return_value = '{"id":"x","subject":"","sender":"","date_received":"","read_status":false,"flagged":false,"content":""}'
+        result = connector.get_message("x")
+        assert result["id"] == "x"
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_send_email_basic(

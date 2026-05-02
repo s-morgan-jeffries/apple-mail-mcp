@@ -721,19 +721,32 @@ def search_messages(
 
 
 @mcp.tool()
-def get_message(message_id: str, include_content: bool = True) -> dict[str, Any]:
+def get_message(
+    message_id: str,
+    include_content: bool = True,
+    headers_only: bool = False,
+    account: str | None = None,
+    mailbox: str | None = None,
+) -> dict[str, Any]:
     """
     Get full details of a specific message.
 
     Args:
-        message_id: Message ID from search results
-        include_content: Include message body (default: true)
+        message_id: Message ID from search results.
+        include_content: Include message body (default: True).
+        headers_only: Skip body fetch on the IMAP path (default: False).
+            Silently ignored when falling back to AppleScript.
+        account: Mail.app account name. Together with `mailbox`, activates
+            the IMAP fast path: one round-trip lookup instead of an
+            account×mailbox AppleScript scan (issue #72). Without these,
+            falls back to the slower AppleScript scan.
+        mailbox: Folder to look in for the IMAP fast path (e.g. "INBOX").
 
     Returns:
-        Dictionary containing message details
+        Dictionary containing message details.
 
     Example:
-        >>> get_message("12345")
+        >>> get_message("12345", account="iCloud", mailbox="INBOX")
         {"success": True, "message": {...}}
     """
     try:
@@ -743,7 +756,13 @@ def get_message(message_id: str, include_content: bool = True) -> dict[str, Any]
 
         logger.info(f"Getting message: {message_id}")
 
-        message = mail.get_message(message_id, include_content=include_content)
+        message = mail.get_message(
+            message_id,
+            include_content=include_content,
+            headers_only=headers_only,
+            account=account,
+            mailbox=mailbox,
+        )
 
         operation_logger.log_operation(
             "get_message",

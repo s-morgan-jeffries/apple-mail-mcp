@@ -33,6 +33,8 @@ from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError
 from imapclient.response_types import Envelope
 
+from .exceptions import MailMessageNotFoundError
+
 logger = logging.getLogger(__name__)
 
 # Strict ISO 8601 YYYY-MM-DD. Duplicated from mail_connector to break an
@@ -277,6 +279,98 @@ class ImapConnector:
                     _envelope_to_dict(entry[b"ENVELOPE"], tuple(entry[b"FLAGS"]))
                 )
             return results
+        finally:
+            client.logout()
+
+    def get_message(
+        self,
+        message_id: str,
+        mailbox: str = "INBOX",
+        *,
+        include_content: bool = True,
+        headers_only: bool = False,
+    ) -> dict[str, Any]:
+        """Look up a single message by RFC 5322 Message-ID and return its
+        envelope + flags, optionally with body content.
+
+        ``message_id`` is matched against the ``Message-ID`` header via
+        ``SEARCH HEADER "Message-ID" "<id>"``. The angle brackets are
+        added if missing — RFC 5322 stores the ID in bracketed form and
+        IMAP servers compare against the literal header value.
+
+        Args:
+            message_id: RFC 5322 Message-ID, with or without surrounding
+                ``<>``. The bracketless form is what
+                ``search_messages`` returns; either works as input.
+            mailbox: Folder to look in. IMAP requires a SELECT before
+                FETCH; cross-folder lookup is not in scope here (callers
+                without a folder hint stay on the AppleScript path in
+                the orchestrator above).
+            include_content: When False, ``content`` is the empty string
+                (matches the AppleScript path's behavior with the same
+                flag).
+            headers_only: When True, fetches ``BODY[HEADER]`` instead of
+                ``BODY[TEXT]`` — useful for preview-style callers who
+                don't want the body. ``content`` is always returned as
+                the empty string in this mode (the headers themselves
+                are reflected via the envelope dict; we don't expose the
+                raw RFC 822 header block).
+
+        Returns:
+            Dict with the same keys as the AppleScript ``get_message``
+            output: ``id``, ``subject``, ``sender``, ``date_received``,
+            ``read_status``, ``flagged``, ``content``.
+
+        Raises:
+            MailMessageNotFoundError: No message in ``mailbox`` matches
+                the Message-ID. (The orchestrator's caller may then fall
+                back to AppleScript.)
+            IMAPClientError: Login / SELECT / SEARCH / FETCH failed.
+        """
+        bracketed = (
+            message_id
+            if message_id.startswith("<") and message_id.endswith(">")
+            else f"<{message_id}>"
+        )
+
+        fetch_keys: list[bytes] = [b"ENVELOPE", b"FLAGS"]
+        want_body = include_content and not headers_only
+        if want_body:
+            fetch_keys.append(b"BODY[TEXT]")
+        elif headers_only:
+            # We don't currently use the raw header block for anything in
+            # the response (envelope already gives us subject/sender/date),
+            # but requesting BODY[HEADER] is the spec-correct way to ask
+            # the server for headers without paying for the body. Some
+            # servers send less data this way; some don't care.
+            fetch_keys.append(b"BODY[HEADER]")
+
+        client = IMAPClient(
+            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
+        )
+        try:
+            client.login(self._email, self._password)
+            client.select_folder(mailbox, readonly=True)
+
+            uids = client.search(["HEADER", "Message-ID", bracketed])
+            if not uids:
+                raise MailMessageNotFoundError(
+                    f"Message-ID {message_id!r} not found in mailbox "
+                    f"{mailbox!r} on {self._host}."
+                )
+
+            fetched = client.fetch(uids[:1], fetch_keys)
+            entry = next(iter(fetched.values()))
+
+            result = _envelope_to_dict(
+                entry[b"ENVELOPE"], tuple(entry[b"FLAGS"])
+            )
+            if want_body:
+                body_bytes = entry.get(b"BODY[TEXT]") or b""
+                result["content"] = _decode(body_bytes)
+            else:
+                result["content"] = ""
+            return result
         finally:
             client.logout()
 
