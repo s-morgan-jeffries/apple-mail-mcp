@@ -340,6 +340,56 @@ class TestMailIntegration:
             assert isinstance(att["size"], int)
             assert isinstance(att["downloaded"], bool)
 
+    def test_get_attachments_via_imap(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """Issue #73: when account+mailbox are provided AND the account
+        has a Keychain entry, get_attachments uses BODYSTRUCTURE.
+
+        Skips if the test account doesn't have IMAP configured — the
+        fallback would still work but we'd be testing the AppleScript
+        path again, which test_get_attachments above already covers.
+        """
+        from apple_mail_mcp.exceptions import (
+            MailKeychainAccessDeniedError,
+            MailKeychainEntryNotFoundError,
+        )
+        from apple_mail_mcp.keychain import get_imap_password
+
+        try:
+            _, _, email = connector._resolve_imap_config(test_account)
+            get_imap_password(test_account, email)
+        except (
+            MailKeychainEntryNotFoundError,
+            MailKeychainAccessDeniedError,
+        ):
+            pytest.skip(
+                f"No Keychain entry for {test_account!r} — IMAP path "
+                f"can't be exercised. Run `apple-mail-mcp setup-imap` first."
+            )
+
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not matches:
+            pytest.skip("test inbox has no messages")
+        target_id = matches[0]["id"]
+
+        # Same shape as the AppleScript path, modulo `downloaded` which
+        # is always False on the IMAP path (BODYSTRUCTURE doesn't expose
+        # Mail.app's local cache state).
+        result = connector.get_attachments(
+            target_id, account=test_account, mailbox="INBOX",
+        )
+        assert isinstance(result, list)
+        for att in result:
+            assert set(att.keys()) >= {"name", "mime_type", "size", "downloaded"}
+            assert isinstance(att["name"], str)
+            assert isinstance(att["mime_type"], str)
+            assert isinstance(att["size"], int)
+            # Documented divergence — IMAP path always reports False.
+            assert att["downloaded"] is False
+
 
 class TestMailSendIntegration:
     """

@@ -529,9 +529,11 @@ Get list of attachments from a message.
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `message_id` | string | Yes | Message ID to get attachments from |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `message_id` | string | Yes | - | Message ID to get attachments from |
+| `account` | string | No | None | Mail.app account name. Together with `mailbox`, activates the IMAP fast path (one BODYSTRUCTURE FETCH instead of an account×mailbox AppleScript scan). See [issue #73](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/73). |
+| `mailbox` | string | No | None | Folder for the IMAP fast path (e.g. `"INBOX"`). |
 
 **Returns:**
 
@@ -540,30 +542,45 @@ Get list of attachments from a message.
   "success": true,
   "attachments": [
     {
-      "index": 1,
       "name": "report.pdf",
-      "size": "2.5 MB"
-    },
-    {
-      "index": 2,
-      "name": "data.xlsx",
-      "size": "1.8 MB"
+      "mime_type": "application/pdf",
+      "size": 524288,
+      "downloaded": false
     }
   ],
-  "count": 2
+  "count": 1
 }
 ```
 
 **Examples:**
 
 ```python
-# List all attachments in a message
-attachments = get_attachments(message_id="12345")
+# Slow path: AppleScript scans every account × every mailbox to locate
+# the message, then enumerates attachments.
+get_attachments(message_id="12345")
 
-# Process each attachment
-for att in attachments["attachments"]:
-    print(f"Found: {att['name']} ({att['size']})")
+# Fast path: one IMAP BODYSTRUCTURE round-trip. Pass the same account /
+# mailbox you used for search_messages.
+get_attachments(
+    message_id="abc@mail.example.com",
+    account="iCloud",
+    mailbox="INBOX",
+)
 ```
+
+**Note on `downloaded`:**
+
+On the IMAP path, `downloaded` is always `false` — `BODYSTRUCTURE` returns metadata only and Mail.app's local cache state isn't observable from the IMAP protocol. On the AppleScript path it reflects whether Mail.app has the attachment bytes locally. Treat `false` as "may need a network fetch on save".
+
+**IMAP path also surfaces silently-dropped cases:**
+
+The AppleScript path is known to miss attachments in three scenarios (issue #73):
+
+- Forwarded `message/rfc822` parts (attached `.eml` files).
+- Multipart/related inline images (e.g. signature PNGs).
+- Some Unicode filenames return mangled or empty.
+
+The IMAP path walks the protocol-level MIME tree and surfaces all three.
 
 ---
 

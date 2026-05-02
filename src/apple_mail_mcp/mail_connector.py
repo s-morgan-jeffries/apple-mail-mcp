@@ -1500,18 +1500,95 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return result == "sent"
 
-    def get_attachments(self, message_id: str) -> list[dict[str, Any]]:
+    def get_attachments(
+        self,
+        message_id: str,
+        *,
+        account: str | None = None,
+        mailbox: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Get list of attachments from a message.
 
+        Tries the IMAP path first when both ``account`` and ``mailbox``
+        are supplied AND the account has a Keychain entry — one
+        BODYSTRUCTURE FETCH instead of an account×mailbox AppleScript
+        scan plus per-attachment property reads. Falls back to AppleScript
+        on any IMAP failure per the graceful-degradation invariants in
+        docs/research/imap-auth-options-decision.md.
+
+        The IMAP path also surfaces attachment cases Mail.app's
+        AppleScript layer drops silently — forwarded message/rfc822
+        parts, multipart/related inline images with filenames, and
+        attachments with Unicode filenames (issue #73).
+
+        Note on identifier semantics: same as ``get_message`` — the IMAP
+        path matches against the RFC 5322 ``Message-ID`` header (the
+        form ``search_messages`` returns when delegated through IMAP).
+        The AppleScript path matches Mail.app's internal numeric id.
+        Forward the same ``account`` + ``mailbox`` you used for
+        ``search_messages`` to keep the paths consistent.
+
+        Note on ``downloaded``: on the IMAP path, ``downloaded`` is
+        always ``False`` — BODYSTRUCTURE returns metadata only, and
+        Mail.app's local-cache state isn't observable from the IMAP
+        protocol. On the AppleScript path it reflects Mail.app's cache.
+        Treat ``False`` as "may need a network fetch on save".
+
         Args:
-            message_id: Message ID
+            message_id: Message ID (RFC 5322 form for IMAP path,
+                Mail.app internal id for AppleScript path).
+            account: Mail.app account name. Optional; required (with
+                ``mailbox``) to enable the IMAP fast path.
+            mailbox: Folder to look in for the IMAP path. Optional.
 
         Returns:
-            List of attachment dictionaries with name, mime_type, size, downloaded
+            List of attachment dicts with keys ``name`` (str),
+            ``mime_type`` (str), ``size`` (int), ``downloaded`` (bool).
 
         Raises:
-            MailMessageNotFoundError: If message doesn't exist
+            MailMessageNotFoundError: Message not found via either path.
+        """
+        if account is not None and mailbox is not None:
+            try:
+                return self._imap_get_attachments(
+                    account=account,
+                    mailbox=mailbox,
+                    message_id=message_id,
+                )
+            except _IMAP_FALLBACK_EXCS as exc:
+                self._log_imap_fallback(account, exc)
+                # fall through to AppleScript
+
+        return self._get_attachments_applescript(message_id)
+
+    def _imap_get_attachments(
+        self,
+        *,
+        account: str,
+        mailbox: str,
+        message_id: str,
+    ) -> list[dict[str, Any]]:
+        """Run get_attachments through the IMAP path. Mirrors _imap_search
+        and _imap_get_message.
+
+        Propagates all fallback-triggering exceptions unchanged — the
+        caller (get_attachments) catches and falls back.
+        """
+        host, port, email = self._resolve_imap_config(account)
+        password = get_imap_password(account, email)
+        imap = ImapConnector(host, port, email, password)
+        return imap.get_attachments(message_id, mailbox=mailbox)
+
+    def _get_attachments_applescript(
+        self, message_id: str
+    ) -> list[dict[str, Any]]:
+        """AppleScript fallback for get_attachments — iterates account ×
+        mailbox to locate the message, then enumerates attachments via
+        Mail.app's model layer. Slow on accounts with many mailboxes;
+        also subject to known silent-failure cases (see issue #73).
+        Callers with a known account+mailbox should provide them to take
+        the IMAP path instead.
         """
         message_id_safe = escape_applescript_string(sanitize_input(message_id))
 

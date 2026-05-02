@@ -923,6 +923,38 @@ class TestGetAttachments:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
 
+    def test_imap_hint_params_pass_through_to_connector(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """Issue #73: account+mailbox activate the IMAP fast path; the
+        server tool must forward them unchanged so the dispatch decision
+        happens in the connector."""
+        mock_mail.get_attachments.return_value = []
+
+        result = get_attachments(
+            "abc@x", account="iCloud", mailbox="INBOX"
+        )
+
+        assert result["success"] is True
+        mock_mail.get_attachments.assert_called_once_with(
+            "abc@x",
+            account="iCloud",
+            mailbox="INBOX",
+        )
+
+    def test_default_call_passes_none_for_imap_hints(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """Pre-existing positional callers continue to work; the new
+        kwargs default to None so dispatch falls to AppleScript."""
+        mock_mail.get_attachments.return_value = []
+
+        get_attachments("1")
+
+        mock_mail.get_attachments.assert_called_once_with(
+            "1", account=None, mailbox=None,
+        )
+
 
 # ---------------------------------------------------------------------------
 # 7b. get_thread

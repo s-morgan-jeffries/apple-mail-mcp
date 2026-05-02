@@ -1150,18 +1150,28 @@ async def send_email_with_attachments(
 
 
 @mcp.tool()
-def get_attachments(message_id: str) -> dict[str, Any]:
+def get_attachments(
+    message_id: str,
+    account: str | None = None,
+    mailbox: str | None = None,
+) -> dict[str, Any]:
     """
     Get list of attachments from a message.
 
     Args:
-        message_id: Message ID from search results
+        message_id: Message ID from search results.
+        account: Mail.app account name. Together with `mailbox`, activates
+            the IMAP fast path: one BODYSTRUCTURE FETCH instead of an
+            account×mailbox AppleScript scan plus per-attachment property
+            reads (issue #73). Without these, falls back to the slower
+            AppleScript scan.
+        mailbox: Folder to look in for the IMAP fast path (e.g. "INBOX").
 
     Returns:
-        Dictionary with list of attachments
+        Dictionary with list of attachments.
 
     Example:
-        >>> get_attachments("12345")
+        >>> get_attachments("CABCD@x", account="iCloud", mailbox="INBOX")
         {
             "success": True,
             "attachments": [
@@ -1169,11 +1179,18 @@ def get_attachments(message_id: str) -> dict[str, Any]:
                     "name": "report.pdf",
                     "mime_type": "application/pdf",
                     "size": 524288,
-                    "downloaded": True
+                    "downloaded": False  # always False on IMAP path
                 }
             ],
             "count": 1
         }
+
+    Note on `downloaded`:
+        On the IMAP path (account+mailbox supplied), `downloaded` is
+        always False — BODYSTRUCTURE returns metadata only and Mail.app's
+        local cache state isn't observable via IMAP. On the AppleScript
+        fallback path it reflects Mail.app's actual cache. Treat False
+        as "may need a network fetch on save".
     """
     try:
         rate_err = check_rate_limit("get_attachments", {"message_id": message_id})
@@ -1182,7 +1199,9 @@ def get_attachments(message_id: str) -> dict[str, Any]:
 
         logger.info(f"Getting attachments for message: {message_id}")
 
-        attachments = mail.get_attachments(message_id)
+        attachments = mail.get_attachments(
+            message_id, account=account, mailbox=mailbox,
+        )
 
         operation_logger.log_operation(
             "get_attachments",
