@@ -874,3 +874,325 @@ class TestGetMessage:
         fetch_args = mock_cls.return_value.fetch.call_args[0]
         # First positional arg is the UID list — must be exactly one.
         assert len(list(fetch_args[0])) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #73: get_attachments
+# ---------------------------------------------------------------------------
+
+# BODYSTRUCTURE fixtures for the attachment extractor. Leaf shape is
+# (type, subtype, params, id, desc, encoding, size, [extras...], [disposition]).
+# Disposition tuple is (kind, params) where params is flat (k,v,k,v,...).
+
+# Plain body — should never be reported as an attachment.
+_BS_PLAIN_TEXT = (b"text", b"plain", (), None, None, b"7bit", 100, 5)
+
+# PDF attachment — disposition = attachment, filename in disposition params.
+_BS_PDF_ATTACHMENT = (
+    b"application", b"pdf",
+    (b"name", b"report.pdf"),
+    None, None, b"base64", 524288,
+    (b"attachment", (b"filename", b"report.pdf")),
+)
+
+# JPEG attachment — different mime + size.
+_BS_JPEG_ATTACHMENT = (
+    b"image", b"jpeg",
+    (b"name", b"photo.jpg"),
+    None, None, b"base64", 4096,
+    (b"attachment", (b"filename", b"photo.jpg")),
+)
+
+# Inline image with filename — multipart/related signature image case.
+_BS_INLINE_IMAGE_WITH_FILENAME = (
+    b"image", b"png",
+    (b"name", b"sig.png"),
+    b"<sig@local>", None, b"base64", 2048,
+    (b"inline", (b"filename", b"sig.png")),
+)
+
+# Inline body part WITHOUT a filename — a real body, not an attachment.
+_BS_INLINE_BODY_NO_FILENAME = (
+    b"text", b"html",
+    (b"charset", b"utf-8"),
+    None, None, b"7bit", 200, 10,
+    (b"inline", ()),
+)
+
+# Forwarded email (message/rfc822). Per RFC 2046 §5.2.1, the leaf for
+# message/rfc822 carries an envelope + body + lines after the size field;
+# disposition may or may not be present. Without disposition, the
+# AppleScript path silently drops these — IMAP must still surface them.
+_BS_FORWARDED_EMAIL_NO_DISP = (
+    b"message", b"rfc822",
+    (), None, None, b"7bit", 8192,
+    None, None, 250,  # envelope, body, lines (None'd; we don't inspect them)
+)
+
+# Legacy: filename in content-type's `name` param, no disposition at all.
+_BS_LEGACY_NAME_PARAM_ONLY = (
+    b"application", b"zip",
+    (b"name", b"old.zip"),
+    None, None, b"base64", 1024,
+)
+
+# Unicode filename via UTF-8 bytes.
+_BS_UNICODE_FILENAME = (
+    b"application", b"pdf",
+    (),
+    None, None, b"base64", 100,
+    (b"attachment", (b"filename", b"r\xc3\xa9sum\xc3\xa9.pdf")),
+)
+
+# Mangled bytes that aren't valid UTF-8.
+_BS_MANGLED_FILENAME = (
+    b"application", b"pdf",
+    (),
+    None, None, b"base64", 100,
+    (b"attachment", (b"filename", b"\xff\xfe\xff.pdf")),
+)
+
+
+class TestGetAttachments:
+    """ImapConnector.get_attachments — Message-ID lookup + BODYSTRUCTURE walk."""
+
+    def _setup_client(
+        self, mock_cls: MagicMock, *,
+        uids: list[int] | None = None,
+        bodystructure: Any = None,
+    ) -> MagicMock:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.return_value = uids if uids is not None else [42]
+        if bodystructure is None:
+            bodystructure = _BS_PLAIN_TEXT
+        client.fetch.return_value = {
+            (uids or [42])[0]: {b"BODYSTRUCTURE": bodystructure},
+        }
+        return client
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_search_uses_bracketed_message_id(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Same lookup path as get_message — bracket the ID for HEADER search."""
+        self._setup_client(mock_cls)
+
+        ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        mock_cls.return_value.search.assert_called_once_with(
+            ["HEADER", "Message-ID", "<abc@x>"]
+        )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_fetch_only_requests_bodystructure(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Single FETCH item — we don't need ENVELOPE/FLAGS/BODY here."""
+        self._setup_client(mock_cls)
+
+        ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        fetch_keys = mock_cls.return_value.fetch.call_args[0][1]
+        assert list(fetch_keys) == [b"BODYSTRUCTURE"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_no_attachments_returns_empty_list(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """A plain text/plain body has no attachments."""
+        self._setup_client(mock_cls, bodystructure=_BS_PLAIN_TEXT)
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+        assert result == []
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_single_pdf_attachment(
+        self, mock_cls: MagicMock
+    ) -> None:
+        bs = (_BS_PLAIN_TEXT, _BS_PDF_ATTACHMENT, b"mixed")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert result == [{
+            "name": "report.pdf",
+            "mime_type": "application/pdf",
+            "size": 524288,
+            "downloaded": False,  # always False on IMAP path; documented divergence
+        }]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_multiple_attachments(
+        self, mock_cls: MagicMock
+    ) -> None:
+        bs = (_BS_PLAIN_TEXT, _BS_PDF_ATTACHMENT, _BS_JPEG_ATTACHMENT, b"mixed")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert len(result) == 2
+        names = {a["name"] for a in result}
+        assert names == {"report.pdf", "photo.jpg"}
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_inline_image_with_filename_is_surfaced(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Multipart/related inline image (e.g. signature PNG) — the case
+        where Mail.app's AppleScript surface drops it silently. IMAP must
+        surface it."""
+        bs = (_BS_PLAIN_TEXT, _BS_INLINE_IMAGE_WITH_FILENAME, b"related")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert len(result) == 1
+        assert result[0]["name"] == "sig.png"
+        assert result[0]["mime_type"] == "image/png"
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_inline_body_without_filename_is_not_an_attachment(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """`Content-Disposition: inline` with no filename is a regular
+        body part (e.g. the message's HTML body) — not an attachment."""
+        bs = (_BS_PLAIN_TEXT, _BS_INLINE_BODY_NO_FILENAME, b"alternative")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert result == []
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_forwarded_email_surfaces_as_attachment(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """A `message/rfc822` part — i.e. a forwarded `.eml` — must be
+        surfaced even when no Content-Disposition is set, per RFC 2046
+        §5.2.1. This is the silent-failure case the issue calls out for
+        the AppleScript path."""
+        bs = (_BS_PLAIN_TEXT, _BS_FORWARDED_EMAIL_NO_DISP, b"mixed")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert len(result) == 1
+        assert result[0]["mime_type"] == "message/rfc822"
+        assert result[0]["size"] == 8192
+        # No filename was provided → empty string. Caller can still see
+        # the part exists and decide what to do with it.
+        assert result[0]["name"] == ""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_legacy_name_param_without_disposition_is_not_an_attachment(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """A leaf with `name` in content-type params but no disposition
+        and not message/rfc822: matches the existing has_attachment
+        helper's behavior (which only triggers on disposition). Skipping
+        this case keeps both helpers consistent — if we want to broaden
+        attachment detection, we do it for both at once."""
+        bs = (_BS_PLAIN_TEXT, _BS_LEGACY_NAME_PARAM_ONLY, b"mixed")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert result == []
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_unicode_filename_is_decoded(
+        self, mock_cls: MagicMock
+    ) -> None:
+        bs = (_BS_PLAIN_TEXT, _BS_UNICODE_FILENAME, b"mixed")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert len(result) == 1
+        assert result[0]["name"] == "résumé.pdf"
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_mangled_filename_does_not_crash(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Bytes that aren't valid UTF-8 must not raise; replacement-char
+        decoding gives the user something they can see and rename."""
+        bs = (_BS_PLAIN_TEXT, _BS_MANGLED_FILENAME, b"mixed")
+        self._setup_client(mock_cls, bodystructure=bs)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert len(result) == 1
+        # Replacement character means we got SOMETHING back, no crash.
+        assert "�" in result[0]["name"]
+        assert result[0]["name"].endswith(".pdf")
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_nested_multipart_attachments_are_surfaced(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """A multipart/alternative inside a multipart/mixed — common shape
+        for "HTML + plain text + attachment" emails. The walk must
+        recurse, not stop at the first multipart boundary."""
+        inner = (_BS_PLAIN_TEXT, _BS_INLINE_BODY_NO_FILENAME, b"alternative")
+        outer = (inner, _BS_PDF_ATTACHMENT, b"mixed")
+        self._setup_client(mock_cls, bodystructure=outer)
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+            "abc@x", mailbox="INBOX",
+        )
+
+        assert len(result) == 1
+        assert result[0]["name"] == "report.pdf"
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_no_match_raises_message_not_found(
+        self, mock_cls: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailMessageNotFoundError
+
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.return_value = []
+
+        with pytest.raises(MailMessageNotFoundError, match="not found"):
+            ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+                "ghost@x", mailbox="INBOX",
+            )
+        client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_logout_called_on_exception(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.side_effect = RuntimeError("kaboom")
+
+        with pytest.raises(RuntimeError):
+            ImapConnector("h", 993, "u@e.com", "pw").get_attachments(
+                "abc@x", mailbox="INBOX",
+            )
+        client.logout.assert_called_once()

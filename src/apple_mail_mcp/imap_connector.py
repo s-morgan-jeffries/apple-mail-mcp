@@ -147,6 +147,104 @@ def _format_sender(envelope: Envelope) -> str:
     return f"{name} <{email}>" if name else email
 
 
+def _bodystructure_extract_attachments(
+    structure: Any,
+) -> list[dict[str, Any]]:
+    """Walk a BODYSTRUCTURE tuple and emit attachment metadata.
+
+    A part counts as an attachment if any of:
+    - Its disposition is ``attachment``.
+    - Its disposition is ``inline`` AND it has a ``filename`` param.
+    - It's a ``message/rfc822`` part (forwarded email — conventionally
+      an attachment per RFC 2046 §5.2.1, and the case Mail.app's
+      AppleScript surface sometimes silently drops).
+
+    Returns dicts with keys: ``name``, ``mime_type``, ``size``,
+    ``downloaded``. ``downloaded`` is always False on the IMAP path —
+    BODYSTRUCTURE returns metadata only, not body bytes, and Mail.app's
+    local cache state isn't observable from the protocol. Callers that
+    need the bytes invoke ``save_attachments`` (which fetches on demand).
+    """
+    out: list[dict[str, Any]] = []
+
+    def _filename_from_params(params: Any, key_name: bytes) -> str | None:
+        """Pull a value out of a flat (k, v, k, v, ...) param tuple."""
+        if not isinstance(params, tuple):
+            return None
+        for i in range(0, len(params) - 1, 2):
+            k = params[i]
+            if isinstance(k, bytes) and k.lower() == key_name:
+                v = params[i + 1]
+                if isinstance(v, (bytes, bytearray)):
+                    return _decode(v)
+        return None
+
+    def _walk(s: Any) -> None:
+        if not isinstance(s, tuple) or not s:
+            return
+
+        # Multipart: first element is a child part (also a tuple).
+        if isinstance(s[0], tuple):
+            for child in s:
+                if isinstance(child, tuple):
+                    _walk(child)
+            return
+
+        # Leaf. Spec positions: type, subtype, params, id, desc, encoding,
+        # size, [type-specific extras...], [disposition]. The disposition
+        # tuple, if present, sits at the trailing end — but its exact index
+        # varies (text has 'lines', message/rfc822 has envelope+body+lines,
+        # etc.). Scan trailing elements for a tuple whose head is one of
+        # the disposition keywords.
+        leaf = s
+        type_ = leaf[0] if isinstance(leaf[0], bytes) else b""
+        subtype = (
+            leaf[1] if len(leaf) > 1 and isinstance(leaf[1], bytes) else b""
+        )
+        ct_params = leaf[2] if len(leaf) > 2 else ()
+        size_field = leaf[6] if len(leaf) > 6 else 0
+
+        disp_kind: bytes | None = None
+        disp_filename: str | None = None
+        for elem in leaf:
+            if (
+                isinstance(elem, tuple)
+                and elem
+                and isinstance(elem[0], bytes)
+                and elem[0].lower() in (b"attachment", b"inline")
+            ):
+                disp_kind = elem[0].lower()
+                disp_params = elem[1] if len(elem) > 1 else ()
+                disp_filename = _filename_from_params(disp_params, b"filename")
+                break
+
+        is_rfc822 = (
+            type_.lower() == b"message" and subtype.lower() == b"rfc822"
+        )
+        is_attachment = (
+            disp_kind == b"attachment"
+            or (disp_kind == b"inline" and disp_filename is not None)
+            or is_rfc822
+        )
+        if not is_attachment:
+            return
+
+        # Filename precedence: disposition's filename → content-type's
+        # `name` param (legacy mailers) → empty string.
+        name = disp_filename or _filename_from_params(ct_params, b"name") or ""
+        mime_type = f"{_decode(type_)}/{_decode(subtype)}"
+
+        out.append({
+            "name": name,
+            "mime_type": mime_type,
+            "size": int(size_field) if isinstance(size_field, int) else 0,
+            "downloaded": False,
+        })
+
+    _walk(structure)
+    return out
+
+
 def _bodystructure_has_attachment(structure: Any) -> bool:
     """Walk an IMAPClient-parsed BODYSTRUCTURE tree and detect attachments.
 
@@ -371,6 +469,72 @@ class ImapConnector:
             else:
                 result["content"] = ""
             return result
+        finally:
+            client.logout()
+
+    def get_attachments(
+        self,
+        message_id: str,
+        mailbox: str = "INBOX",
+    ) -> list[dict[str, Any]]:
+        """Return a list of attachment metadata dicts for a message.
+
+        Looks the message up by RFC 5322 Message-ID via
+        ``SEARCH HEADER "Message-ID" "<id>"``, then issues a single
+        ``FETCH ... BODYSTRUCTURE`` and walks the MIME tree to extract
+        attachment parts. One round-trip total for metadata, vs the
+        AppleScript path's account×mailbox scan plus per-attachment
+        property fetches.
+
+        The IMAP path also surfaces attachment cases Mail.app's
+        AppleScript layer drops silently — see issue #73 for the
+        catalog (forwarded message/rfc822 parts, multipart/related
+        inline images, Unicode filenames).
+
+        Args:
+            message_id: RFC 5322 Message-ID, with or without surrounding
+                ``<>``. The bracketless form is what
+                ``search_messages`` returns; either works as input.
+            mailbox: Folder to look in. IMAP requires SELECT before
+                FETCH; cross-folder discovery isn't in scope here
+                (callers without a folder hint stay on the AppleScript
+                path in the orchestrator above).
+
+        Returns:
+            List of dicts with keys ``name`` (str), ``mime_type`` (str),
+            ``size`` (int), ``downloaded`` (bool, always False on this
+            path). Empty list when the message has no attachments.
+
+        Raises:
+            MailMessageNotFoundError: No message in ``mailbox`` matches
+                the Message-ID.
+            IMAPClientError: Login / SELECT / SEARCH / FETCH failed.
+        """
+        bracketed = (
+            message_id
+            if message_id.startswith("<") and message_id.endswith(">")
+            else f"<{message_id}>"
+        )
+
+        client = IMAPClient(
+            self._host, port=self._port, ssl=True, timeout=self._connect_timeout
+        )
+        try:
+            client.login(self._email, self._password)
+            client.select_folder(mailbox, readonly=True)
+
+            uids = client.search(["HEADER", "Message-ID", bracketed])
+            if not uids:
+                raise MailMessageNotFoundError(
+                    f"Message-ID {message_id!r} not found in mailbox "
+                    f"{mailbox!r} on {self._host}."
+                )
+
+            fetched = client.fetch(uids[:1], [b"BODYSTRUCTURE"])
+            entry = next(iter(fetched.values()))
+            return _bodystructure_extract_attachments(
+                entry.get(b"BODYSTRUCTURE")
+            )
         finally:
             client.logout()
 

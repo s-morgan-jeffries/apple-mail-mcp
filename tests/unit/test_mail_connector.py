@@ -2058,6 +2058,142 @@ class TestAppleMailConnector:
         result = connector.get_message("x")
         assert result["id"] == "x"
 
+    # --- Issue #73: get_attachments dispatcher ----------------------------
+
+    def test_get_attachments_uses_imap_when_account_and_mailbox_provided(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            connector, "_imap_get_attachments",
+            return_value=[{"name": "x.pdf", "mime_type": "application/pdf",
+                           "size": 100, "downloaded": False}],
+        ) as imap_path, patch.object(
+            connector, "_get_attachments_applescript"
+        ) as as_path:
+            result = connector.get_attachments(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+
+        assert len(result) == 1
+        imap_path.assert_called_once_with(
+            account="iCloud",
+            mailbox="INBOX",
+            message_id="abc@x",
+        )
+        as_path.assert_not_called()
+
+    def test_get_attachments_no_hint_skips_imap_path(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            connector, "_imap_get_attachments"
+        ) as imap_path, patch.object(
+            connector, "_get_attachments_applescript",
+            return_value=[],
+        ) as as_path:
+            result = connector.get_attachments("123")
+
+        assert result == []
+        imap_path.assert_not_called()
+        as_path.assert_called_once_with("123")
+
+    def test_get_attachments_partial_hint_skips_imap(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """account-only or mailbox-only is not enough; both required."""
+        with patch.object(
+            connector, "_imap_get_attachments"
+        ) as imap_path, patch.object(
+            connector, "_get_attachments_applescript", return_value=[],
+        ):
+            connector.get_attachments("123", account="iCloud")
+            connector.get_attachments("123", mailbox="INBOX")
+
+        imap_path.assert_not_called()
+
+    def test_get_attachments_falls_back_on_login_error(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            connector, "_imap_get_attachments",
+            side_effect=LoginError("AUTHENTICATIONFAILED"),
+        ) as imap_path, patch.object(
+            connector, "_get_attachments_applescript",
+            return_value=[],
+        ) as as_path, patch.object(
+            connector, "_log_imap_fallback"
+        ) as log_fb:
+            connector.get_attachments(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+
+        imap_path.assert_called_once()
+        as_path.assert_called_once()
+        log_fb.assert_called_once()
+
+    def test_get_attachments_falls_back_when_offline(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """OSError covers DNS, EHOSTUNREACH, connect timeout, etc.
+        Same fallback behavior as get_message's offline test."""
+        with patch.object(
+            connector, "_imap_get_attachments",
+            side_effect=OSError("network unreachable"),
+        ), patch.object(
+            connector, "_get_attachments_applescript",
+            return_value=[],
+        ) as as_path:
+            connector.get_attachments(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+        as_path.assert_called_once()
+
+    def test_get_attachments_falls_back_on_keychain_miss(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            connector, "_imap_get_attachments",
+            side_effect=MailKeychainEntryNotFoundError("none"),
+        ), patch.object(
+            connector, "_get_attachments_applescript",
+            return_value=[],
+        ) as as_path, patch.object(
+            connector, "_log_imap_fallback"
+        ) as log_fb:
+            connector.get_attachments(
+                "abc@x", account="iCloud", mailbox="INBOX",
+            )
+        as_path.assert_called_once()
+        log_fb.assert_called_once()
+
+    def test_get_attachments_message_not_found_on_imap_does_not_fall_back(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """Same reasoning as get_message: a definitive 'not in this folder'
+        from IMAP shouldn't be papered over with a cross-folder
+        AppleScript scan that may match a different message."""
+        with patch.object(
+            connector, "_imap_get_attachments",
+            side_effect=MailMessageNotFoundError("nope"),
+        ), patch.object(
+            connector, "_get_attachments_applescript"
+        ) as as_path:
+            with pytest.raises(MailMessageNotFoundError):
+                connector.get_attachments(
+                    "abc@x", account="iCloud", mailbox="INBOX",
+                )
+        as_path.assert_not_called()
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_attachments_pre_existing_positional_caller_unaffected(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Smoke test: existing callers passing only message_id still work,
+        going through the AppleScript path unchanged."""
+        mock_run.return_value = '[]'
+        result = connector.get_attachments("x")
+        assert result == []
+
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_send_email_basic(
         self, mock_run: MagicMock, connector: AppleMailConnector
