@@ -24,7 +24,7 @@ from .exceptions import (
     MailRuleNotFoundError,
     MailUnsupportedRuleActionError,
 )
-from .imap_connector import ImapConnector
+from .imap_connector import ImapConnectionPool, ImapConnector
 from .keychain import get_imap_password
 from .utils import (
     applescript_account_clause,
@@ -204,14 +204,26 @@ def _bulk_repeat_block(
 class AppleMailConnector:
     """Interface to Apple Mail via AppleScript."""
 
-    def __init__(self, timeout: int = 60) -> None:
+    def __init__(
+        self,
+        timeout: int = 60,
+        *,
+        imap_pool: ImapConnectionPool | None = None,
+    ) -> None:
         """
         Initialize the Mail connector.
 
         Args:
-            timeout: Timeout in seconds for AppleScript operations
+            timeout: Timeout in seconds for AppleScript operations.
+            imap_pool: Optional ImapConnectionPool. When provided, every
+                IMAP-delegated call (search_messages, get_message,
+                get_attachments, get_thread) reuses cached connections
+                across calls, amortizing the ~400 ms TCP+TLS+LOGIN
+                overhead per call. Default None (per-call lifecycle —
+                the v0.5.0 behavior). See issue #75.
         """
         self.timeout = timeout
+        self._imap_pool = imap_pool
         # Accounts for which we've already logged a WARNING about IMAP failure.
         # Subsequent failures for the same account are demoted to DEBUG per
         # invariant 5 in docs/research/imap-auth-options-decision.md.
@@ -894,7 +906,7 @@ class AppleMailConnector:
         """
         host, port, email = self._resolve_imap_config(account)
         password = get_imap_password(account, email)
-        imap = ImapConnector(host, port, email, password)
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.search_messages(
             mailbox=mailbox,
             sender_contains=sender_contains,
@@ -1207,7 +1219,7 @@ class AppleMailConnector:
         """
         host, port, email = self._resolve_imap_config(account)
         password = get_imap_password(account, email)
-        imap = ImapConnector(host, port, email, password)
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.get_message(
             message_id,
             mailbox=mailbox,
@@ -1577,7 +1589,7 @@ class AppleMailConnector:
         """
         host, port, email = self._resolve_imap_config(account)
         password = get_imap_password(account, email)
-        imap = ImapConnector(host, port, email, password)
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.get_attachments(message_id, mailbox=mailbox)
 
     def _get_attachments_applescript(
@@ -1675,7 +1687,7 @@ class AppleMailConnector:
         account = cast(str, anchor["account"])
         host, port, email = self._resolve_imap_config(account)
         password = get_imap_password(account, email)
-        imap = ImapConnector(host, port, email, password)
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.find_thread_members(
             anchor_rfc_message_id=cast(str, anchor["rfc_message_id"]),
             anchor_references=cast(list[str], anchor.get("references") or []),

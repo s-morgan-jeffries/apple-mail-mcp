@@ -22,6 +22,7 @@ from .exceptions import (
     MailTemplateNotFoundError,
     MailUnsupportedRuleActionError,
 )
+from .imap_connector import ImapConnectionPool
 from .mail_connector import AppleMailConnector
 from .security import (
     check_rate_limit,
@@ -42,8 +43,25 @@ logger = logging.getLogger(__name__)
 # Create FastMCP server
 mcp = FastMCP("apple-mail")
 
-# Initialize mail connector
-mail = AppleMailConnector()
+# Initialize mail connector. Pool is opt-in via APPLE_MAIL_MCP_IMAP_POOL=1
+# (default off, per #75 acceptance criteria — keep per-call lifecycle the
+# default until benchmarks prove the speedup is worth the lifecycle
+# complexity, then a follow-up can flip the default).
+def _build_imap_pool() -> ImapConnectionPool | None:
+    """Build an ImapConnectionPool when the opt-in env var is set.
+
+    Pooling stays opt-in per #75's acceptance criteria: per-call lifecycle
+    is the default until benchmarks prove the speedup is worth the
+    lifecycle complexity, then a follow-up can flip the default."""
+    import os
+    flag = os.getenv("APPLE_MAIL_MCP_IMAP_POOL", "0").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        logger.info("IMAP connection pool enabled (APPLE_MAIL_MCP_IMAP_POOL)")
+        return ImapConnectionPool()
+    return None
+
+
+mail = AppleMailConnector(imap_pool=_build_imap_pool())
 
 
 def _build_send_summary(
