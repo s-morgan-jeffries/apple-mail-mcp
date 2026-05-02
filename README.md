@@ -67,25 +67,21 @@ On first run, macOS will prompt for Automation access. Grant permission in:
    - **Gmail:** [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Requires 2-Step Verification on your Google account.
    - **Yahoo / Fastmail / AOL:** generate an app password in the provider's account-security settings.
 
-2. Look up the account's primary email address as Mail.app knows it. The easiest way:
+2. Run the `setup-imap` subcommand. It prompts for the password (no echo), writes the Keychain entry, and verifies by connecting:
    ```bash
-   osascript -e 'tell application "Mail" to return email addresses of account "iCloud"'
+   apple-mail-mcp setup-imap --account iCloud
    ```
-   (Substitute your account's name — whatever it's labeled in Mail.app.) Use the first email address returned.
+   Substitute the Mail.app account name exactly — whatever it's labeled in Mail.app (e.g. `iCloud`, `Gmail`, `"Yahoo!"`). The CLI:
+   - looks up the account's primary email from Mail.app (override with `--email`),
+   - prompts via `getpass` so the password never lands in shell history,
+   - writes to Keychain at `apple-mail-mcp.imap.<account>` (idempotent — re-running with a new password updates the existing entry),
+   - opens an IMAP connection and runs a real LOGIN to confirm the password works. On rejection it rolls back the Keychain entry so you can retry without leaving a broken item behind.
 
-3. Store the app password in Keychain under a project-scoped service name:
-   ```bash
-   security add-generic-password \
-       -s "apple-mail-mcp.imap.<ACCOUNT_NAME>" \
-       -a "<email-from-step-2>" \
-       -w "<app-password>" \
-       -T "" -U
-   ```
-   Replace `<ACCOUNT_NAME>` with the Mail.app account name *exactly* (e.g. `iCloud`, `Gmail`, `"Yahoo!"`). The `-T ""` flag clears the ACL so macOS will prompt for Keychain access on first read (click "Always Allow" to persist).
+3. If you see a one-time "security wants to use the 'login' keychain" prompt on the next IMAP-backed call, click **Always Allow**.
 
-4. The next time you use a search tool, it will go through IMAP. On first access, you may see a one-time "security wants to use the 'login' keychain" prompt — click **Always Allow**.
+To remove the entry later: `apple-mail-mcp setup-imap --account iCloud --uninstall`.
 
-**Verifying the setup.** Run:
+**Verifying the setup.** The `setup-imap` command does this for you. If you want to spot-check post-hoc:
 ```bash
 uv run python -c "from apple_mail_mcp.mail_connector import AppleMailConnector; \
     print(AppleMailConnector().search_messages(account='<ACCOUNT_NAME>', limit=1))"
@@ -94,13 +90,11 @@ If IMAP is working, the call returns in ~1 second. If it logs a WARNING about fa
 
 **Known provider quirks.**
 
-- **iCloud:** the IMAP server accepts `@icloud.com` / `@me.com` aliases as LOGIN username, not the Apple ID email. This server reads `email addresses of account` from Mail.app for that reason.
+- **iCloud:** the IMAP server accepts `@icloud.com` / `@me.com` aliases as LOGIN username, not the Apple ID email. The server (and `setup-imap`) reads `email addresses of account` from Mail.app for that reason.
 - **Yahoo:** app passwords have been progressively deprecated; the option may not be available for all accounts. If Yahoo's account-security page doesn't show the option, IMAP setup isn't possible for that account and AppleScript is the only path.
 - **Gmail:** requires 2-Step Verification enabled. If your Google Workspace admin has disabled app passwords at the tenant level, IMAP setup isn't possible for that account.
 
 **Write operations** (`send_email`, `reply_to_message`, `forward_message`) always use AppleScript regardless of IMAP configuration — these need Mail.app's compose UI.
-
-A user-friendly `apple-mail-mcp setup-imap` CLI subcommand that wraps the `security add-generic-password` call (including validation and a test connection) is tracked in [#76](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/76).
 
 ## Development
 

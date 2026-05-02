@@ -2,6 +2,7 @@
 FastMCP server for Apple Mail integration.
 """
 
+import argparse
 import logging
 from typing import Any, cast
 
@@ -2111,11 +2112,70 @@ def render_template(
         return {"success": False, "error": str(e), "error_type": "unknown"}
 
 
-def main() -> None:
-    """Run the MCP server."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="apple-mail-mcp",
+        description=(
+            "Apple Mail MCP server. With no subcommand, starts the MCP "
+            "server (this is what Claude Desktop / mcp clients invoke)."
+        ),
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    setup_imap = sub.add_parser(
+        "setup-imap",
+        help=(
+            "Configure the Keychain entry that enables the IMAP fast path "
+            "for a Mail.app account."
+        ),
+    )
+    setup_imap.add_argument(
+        "--account",
+        required=True,
+        help="Mail.app account name (e.g. 'iCloud', 'Gmail').",
+    )
+    setup_imap.add_argument(
+        "--email",
+        default=None,
+        help=(
+            "Override the email address used as the Keychain key. "
+            "Defaults to the first email in Mail.app's account configuration."
+        ),
+    )
+    setup_imap.add_argument(
+        "--uninstall",
+        action="store_true",
+        help=(
+            "Remove the Keychain entry for this account (disables the IMAP "
+            "fast path; AppleScript fallback continues to work)."
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point. Defaults to running the MCP server.
+
+    With ``setup-imap`` (or any future subcommand), dispatches and exits
+    with the subcommand's exit code. Returning an int from main() lets
+    pytest-style tests assert exit codes without raising SystemExit.
+    """
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "setup-imap":
+        from .cli import run_setup_imap
+
+        return run_setup_imap(
+            account_name=args.account,
+            cli_email=args.email,
+            uninstall=args.uninstall,
+        )
+
     logger.info("Starting Apple Mail MCP server")
     mcp.run()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
