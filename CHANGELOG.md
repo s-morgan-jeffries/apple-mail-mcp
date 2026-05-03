@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-03
+
+Performance and ergonomics release. The IMAP delegation arc started in v0.5.0 is now complete: `search_messages`, `get_message`, `get_attachments`, and `get_thread` all delegate to IMAP transparently when configured, with a clean cross-provider fallback story. Headline numbers: search drops 60s → 2.7s on a populous mailbox, the IMAP fast path is wired through every read tool, and a small per-account circuit breaker keeps offline / stale-credential bursts bounded. Setup is no longer a four-line raw-shell incantation — there's a real CLI with verification.
+
+### Added
+
+**Setup-IMAP CLI (#76):** New `apple-mail-mcp setup-imap --account <name>` subcommand replaces the raw `security add-generic-password` recipe. Prompts for the password via `getpass` (no shell history), writes the Keychain entry idempotently, opens an IMAP connection to verify the password actually works, rolls back on auth failure. `--uninstall` removes the entry. `--email` overrides the Mail.app-derived default for the rare alias case. Default invocation (no subcommand) still starts the MCP server, so Claude Desktop is unaffected. (#116)
+
+**IMAP delegation for read tools:**
+- `get_message` (#72): one-round-trip lookup via `SEARCH HEADER Message-ID` + `FETCH` when `account` and `mailbox` are supplied. Replaces the AppleScript account×mailbox scan (~6-18s worst case). New `headers_only` knob skips body fetch when only metadata is needed. Surfaced + fixed a latent identifier mismatch: AppleScript path uses Mail.app's internal numeric id; IMAP returns RFC 5322 Message-IDs. Callers who forward `account`+`mailbox` from `search_messages` now stay on the IMAP path consistently. (#117)
+- `get_attachments` (#73): one BODYSTRUCTURE FETCH replaces the per-attachment property loop. Also surfaces three classes of attachment Mail.app's AppleScript silently drops: forwarded `message/rfc822` parts, multipart/related inline images with filenames, Unicode filenames. (#119)
+- `get_thread` (#122): tiered, capability-detected dispatch. Tier 1 is Gmail's `X-GM-THRID` against `[Gmail]/All Mail` — ~5 round-trips, mailbox-count-independent (replaces ~1100 round-trips on a 91-label account when All Mail is exposed over IMAP). Falls through cleanly to the existing per-mailbox header-search BFS when the capability or `[Gmail]/All Mail` isn't available. (#126)
+
+**IMAP connection pooling (#75):** New `ImapConnectionPool` class — opt-in via `APPLE_MAIL_MCP_IMAP_POOL=1` env var, default off. Caches IMAP sessions keyed by `(host, email)`, with idle-timeout reconnect (270s default), per-connection locking (thread-safety designed in even though FastMCP is single-threaded today), and invalidation on protocol/network errors. **Live measurement on a 5-call interactive workflow against iCloud: 10.6s → 6.3s, ~40% faster.** (#120)
+
+**IMAP failure circuit breaker (#118):** Per-account 30s cooldown on `AppleMailConnector` after non-benign IMAP failures. Bursts of calls during offline / stale-credential conditions stop wasting round-trips on the same broken account. Specialized `LoginError` warning text now names the exact `setup-imap` command — surfaces silent IMAP degradation that the AppleScript fallback otherwise hides indefinitely. (#121)
+
+**Benchmark suite (#31):** Captured baselines for search, attachment, bulk-ops, and pool scenarios. `make benchmark` / `make benchmark-baseline` Makefile targets. Skipped by default; opt-in via `--run-benchmark`. (#100)
+
+**`get_selected_messages` tool (#11):** Returns the messages currently selected in Mail.app's UI. External contribution.
+
+### Changed
+
+**`search_messages` AppleScript fallback path is 22× faster on large mailboxes (#32).** Replaced `whose <filter>` server-side predicate (which forces full-mailbox materialization on Mail.app's side) with manual reverse-order iteration plus per-message IF filters. Live: 60s → 2.7s on a populous mailbox; new `search_messages_with_zero_matches` benchmark confirms full-scan worst case stays bounded. INFO-level log fires when AppleScript search exceeds 5s, pointing users at IMAP setup. **Observable behavior change**: results now return newest-first; previously oldest-first. Callers that relied on the old order should reverse the result list. (#114)
+
+**Bulk operations cubic loop fix (#103).** `move_messages`, `flag_message`, `mark_as_read`, `delete_messages` accepted a new optional `source_mailbox` parameter that narrows the AppleScript scan from O(N × accounts × mailboxes) to O(N) when the caller knows where the messages are. (#112)
+
+**`/merge-and-status` slash command** now surfaces untriaged contributor issues alongside contributor PRs. (#104, #105)
+
+### Fixed
+
+**`delete_messages(permanent=True)` was a silent no-op (#111).** Empirically probed Mail.app's AppleScript surface — confirmed there's no path to permanent-delete that bypasses Trash. Parameter now emits `DeprecationWarning` so callers see the gap; docs corrected to describe actual behavior; AppleScript path unchanged (still moves to Trash, recoverable). (#115)
+
+**Dependency bumps:** fastmcp ≥3.2.4, pytest ≥9.0.3, ruff ≥0.15.12, mypy ≥1.20.2, pytest-cov ≥7.1.0. uv.lock regenerated. (#106-110, #113)
+
+**`check_dependencies.sh`** now invokes pip-audit via `uv run` — fixes a CI-only failure mode. (#99)
+
+### Documentation
+
+**Research: IMAP thread-discovery strategies** (`docs/research/imap-thread-strategies.md`, #80, #124). Empirical capability survey of iCloud, Gmail, and documented-from-public-docs Fastmail/Dovecot. Discovered iCloud doesn't advertise THREAD (contradicting public claims), Gmail doesn't advertise THREAD on the live account, and Gmail's `[Gmail]/All Mail` is opt-in over IMAP. Recommended a tiered, capability-detected dispatch — Tier 1 (X-GM-THRID) shipped in #122; Tier 2 (RFC 5256 THREAD) tracked as #123, Tier 1.5 (per-mailbox X-GM-THRID for hidden All Mail) tracked as #125. Both deferred to v0.7.0.
+
+**README** rewritten to reflect the new IMAP setup flow (single CLI command instead of raw `security` recipe).
+
+### Tooling
+
+- `pyproject.toml` `version = "0.6.0"`
+- `__init__.py` `__version__ = "0.6.0"`
+
 ## [0.5.0] - 2026-04-26
 
 Major minor release. Fifteen new MCP tools across four feature areas (account discovery, rule management, email templates, IMAP-backed performance), several long-standing AppleScript-injection bugs closed, and contributor-experience tightening prompted by an honest look at how earlier external PRs got handled. The README, CONTRIBUTING.md, and `.github/PULL_REQUEST_TEMPLATE.md` were all reworked to make the project safer and more welcoming to contribute to.
