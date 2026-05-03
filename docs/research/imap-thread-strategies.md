@@ -163,3 +163,50 @@ Both are independent of each other and of the current iCloud path. iCloud users 
 - iCloud CAPABILITY + THREAD probe: live measurement against `p42-imap.mail.me.com:993` on 2026-05-02.
 - Gmail / Fastmail / Dovecot capability claims: public vendor docs and standards (RFC 5256, Gmail IMAP extensions docs at <https://developers.google.com/gmail/imap/imap-extensions>).
 - Round-trip-cost estimates: derived from current code shape (`find_thread_members` in `imap_connector.py`) and measured per-round-trip cost on iCloud (~150-300 ms typical, occasional ~1 s under burst load).
+
+---
+
+## Addendum: live Gmail observations (2026-05-03, post #122 setup)
+
+Once the user configured Gmail IMAP delegation, we re-ran the capability probe directly. **One prediction in this doc was wrong** and worth correcting:
+
+```
+caps (21): [APPENDLIMIT=35651584, CHILDREN, COMPRESS=DEFLATE, CONDSTORE,
+            ENABLE, ESEARCH, ID, IDLE, IMAP4REV1, LIST-EXTENDED,
+            LIST-STATUS, LITERAL-, MOVE, NAMESPACE, QUOTA, SPECIAL-USE,
+            UIDPLUS, UNSELECT, UTF8=ACCEPT, X-GM-EXT-1, XLIST]
+THREAD variants: []           # ← NOT advertised
+X-GM-EXT-1 advertised? True   # ← advertised
+folder count: 92
+```
+
+- **`X-GM-EXT-1` confirmed** — Tier 1 (X-GM-THRID) is available, as predicted.
+- **`THREAD=*` is NOT advertised** on this Gmail account, contradicting the public-docs claim earlier in this doc. So Tier 2 (RFC 5256 THREAD) wouldn't fire on Gmail anyway — even if we implemented it, capability detection would skip it. **Tier 1 is the only IMAP optimization Gmail will accept**, and the BFS is the only fallback.
+- **92 folders** confirms the magnitude: 92 × N=4 × 3 ≈ 1100 SEARCH round-trips for the BFS path on this account. Tier 1 collapses that to ~5 round-trips, mailbox-count-independent.
+
+This finding makes #122 (Tier 1) the single highest-impact perf optimization for Gmail users. #123 (Tier 2) remains valuable for Fastmail / Dovecot deployments, where neither X-GM-EXT-1 nor a Gmail-class folder count applies.
+
+Capability matrix updated based on live probe:
+
+| Provider | THREAD advertised? | X-GM-EXT-1? | Notes |
+|----------|--------------------|--------------|-------|
+| iCloud | NO (verified 2026-05-02) | NO | BFS or AppleScript only. |
+| Gmail | **NO (verified 2026-05-03)** ← was YES per docs | YES | X-GM-THRID is the only IMAP optimization that fires here. |
+| Fastmail | YES (per public docs) | NO | THREAD per-mailbox is the win — no live verification yet. |
+| Dovecot-based | DEPENDS | NO | Capability detection per-server. |
+
+### Sub-finding: `[Gmail]/All Mail` is opt-in over IMAP
+
+The first cut of #122 (Tier 1) used SPECIAL-USE's `\\All` flag to find `[Gmail]/All Mail`, then ran one `SEARCH HEADER Message-ID` + one `FETCH X-GM-THRID` + one `SEARCH X-GM-THRID` against it. Total: 5 round-trips, mailbox-count-independent. Beautiful in theory.
+
+**In practice on the user's account, the folder isn't there.** The post-login folder listing (92 folders) had no entry with the `\\All` flag at all. Live `LIST` output shows only `\\Drafts`, `\\Important`, `\\Sent`, `\\Junk` (Spam), `\\Starred`, `\\Trash` — no `\\All Mail`. Manually trying `SELECT [Gmail]/All Mail` returned `[NONEXISTENT] Unknown Mailbox`.
+
+Cause: Gmail Settings → "Forwarding and POP/IMAP" → "Folder size limits" → the option **"Do not show this folder in IMAP"** can be toggled per-folder. Many Gmail users hide All Mail from IMAP because it's enormous and otherwise appears in every IMAP client's mailbox list. When hidden, the folder simply isn't enumerated by `LIST` and isn't selectable.
+
+This makes Tier 1 (as designed) a no-op for any Gmail user who has hidden All Mail. The dispatcher correctly falls through to Tier 3 (BFS), so correctness is fine — but the ~5-round-trip perf win never materializes.
+
+**For users who can enable All Mail in IMAP**: the Gmail Settings flip is one click; #122's Tier 1 then activates fully. Worth documenting in a setup-guide or README note.
+
+**For users who can't or won't**: needs a per-mailbox X-GM-THRID variant. SELECT INBOX (or any folder where the anchor lives), FETCH X-GM-THRID for the anchor's UID, then iterate selectable folders running `SEARCH X-GM-THRID <thrid>` per mailbox. Cost: M × 2 round-trips (vs. ~5 for the All-Mail path; vs. M × N × 3 for BFS). Still a 6× win over BFS on a 92-folder account. Filed as **#125**.
+
+This sub-finding doesn't invalidate #122 — Tier 1 still fires for Gmail users with All Mail exposed, which is a meaningful subset. It just means the universal X-GM-THRID path is a separate, more general optimization.

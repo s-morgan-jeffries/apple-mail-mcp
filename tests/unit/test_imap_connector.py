@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from imapclient.exceptions import IMAPClientError
 from imapclient.response_types import Address, Envelope
 
 from apple_mail_mcp.imap_connector import CONNECT_TIMEOUT_S, ImapConnector
@@ -1196,3 +1197,309 @@ class TestGetAttachments:
                 "abc@x", mailbox="INBOX",
             )
         client.logout.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Issue #122: Gmail X-GM-THRID dispatch in find_thread_members
+# ---------------------------------------------------------------------------
+
+
+def _gmail_caps_with_xgm() -> set[bytes]:
+    """Capability list as Gmail returns it post-login (live-probed
+    2026-05-02 — see docs/research/imap-thread-strategies.md addendum)."""
+    return {
+        b"IMAP4REV1", b"UNSELECT", b"IDLE", b"NAMESPACE", b"QUOTA",
+        b"ID", b"XLIST", b"CHILDREN", b"X-GM-EXT-1", b"UIDPLUS",
+        b"COMPRESS=DEFLATE", b"ENABLE", b"MOVE", b"CONDSTORE", b"ESEARCH",
+        b"UTF8=ACCEPT", b"LIST-EXTENDED", b"LIST-STATUS", b"LITERAL-",
+        b"SPECIAL-USE", b"APPENDLIMIT=35651584",
+    }
+
+
+def _generic_caps_no_xgm() -> set[bytes]:
+    """Capability list for a non-Gmail server (e.g. iCloud, Fastmail).
+    No X-GM-EXT-1 → Tier 1 must skip."""
+    return {
+        b"IMAP4REV1", b"UNSELECT", b"IDLE", b"NAMESPACE", b"QUOTA",
+        b"ID", b"UIDPLUS", b"ENABLE", b"CONDSTORE", b"ESEARCH",
+        b"SPECIAL-USE",
+    }
+
+
+def _gmail_folder_listing_with_all() -> list:
+    """A Gmail-style folder listing with the \\All SPECIAL-USE flag."""
+    return [
+        ((b"\\HasNoChildren",), b"/", "INBOX"),
+        ((b"\\HasNoChildren", b"\\Drafts"), b"/", "[Gmail]/Drafts"),
+        ((b"\\HasNoChildren", b"\\Sent"), b"/", "[Gmail]/Sent Mail"),
+        ((b"\\HasNoChildren", b"\\All"), b"/", "[Gmail]/All Mail"),
+        ((b"\\HasNoChildren", b"\\Trash"), b"/", "[Gmail]/Trash"),
+        ((b"\\HasNoChildren", b"\\Junk"), b"/", "[Gmail]/Spam"),
+    ]
+
+
+def _localized_gmail_folder_listing() -> list:
+    """A localized Gmail (Italian) listing — \\All flag present, name
+    differs. Hardcoding `[Gmail]/All Mail` would miss this; SPECIAL-USE
+    is the robust answer."""
+    return [
+        ((b"\\HasNoChildren",), b"/", "INBOX"),
+        ((b"\\HasNoChildren", b"\\All"), b"/", "[Google Mail]/Tutta la posta"),
+    ]
+
+
+def _generic_folder_listing_no_all() -> list:
+    """A non-Gmail listing with no \\All flag — Tier 1 must skip even
+    when the capability is advertised."""
+    return [
+        ((b"\\HasNoChildren",), b"/", "INBOX"),
+        ((b"\\HasNoChildren", b"\\Sent"), b"/", "Sent"),
+        ((b"\\HasNoChildren", b"\\Trash"), b"/", "Trash"),
+    ]
+
+
+class TestFindThreadMembersGmail:
+    """Tier 1 (Gmail X-GM-THRID) dispatch in find_thread_members.
+
+    The dispatcher itself lives in find_thread_members; these tests
+    drive it via mocked IMAPClient and assert the right strategy fired
+    based on the server's advertised capabilities."""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_uses_xgm_thrid_when_capability_advertised(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """The headline path: X-GM-EXT-1 advertised, anchor in All Mail
+        → 5 round trips, mailbox-count-independent. BFS path NOT hit."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_with_all()
+        # SEARCH HEADER Message-ID → anchor's UID
+        # SEARCH X-GM-THRID → all UIDs in conversation
+        client.search.side_effect = [[100], [100, 101, 102]]
+        # FETCH X-GM-THRID → conversation ID; FETCH ENVELOPE FLAGS → members
+        client.fetch.side_effect = [
+            {100: {b"X-GM-THRID": 1234567890123456789}},
+            _fake_fetch_result([100, 101, 102]),
+        ]
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        # Tier 1 SELECTed the All Mail folder (resolved via SPECIAL-USE).
+        client.select_folder.assert_called_once_with(
+            "[Gmail]/All Mail", readonly=True,
+        )
+        # Two SEARCHes (anchor lookup + thread expansion); two FETCHes.
+        assert client.search.call_count == 2
+        assert client.fetch.call_count == 2
+        # The X-GM-THRID search uses the conversation ID returned by FETCH.
+        thrid_search = client.search.call_args_list[1][0][0]
+        assert thrid_search == ["X-GM-THRID", "1234567890123456789"]
+        # All three thread members surfaced (deduped by Message-ID).
+        assert len(result) == 3
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_falls_back_to_bfs_when_xgm_ext_not_advertised(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Non-Gmail server (no X-GM-EXT-1) skips Tier 1 entirely and
+        runs the BFS — the Tier-1 helpers are never invoked."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _generic_caps_no_xgm()
+        client.list_folders.return_value = _generic_folder_listing_no_all()
+        client.search.return_value = []  # BFS finds nothing → fast exit
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@example.com",
+            anchor_references=[],
+        )
+
+        # BFS iterates folders. No SEARCH for X-GM-THRID was ever issued.
+        for call in client.search.call_args_list:
+            args = call[0][0]
+            assert args[0] != "X-GM-THRID", (
+                "X-GM-THRID query must not run when X-GM-EXT-1 is absent"
+            )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_falls_back_to_bfs_when_no_all_mail_folder(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """X-GM-EXT-1 advertised but no \\All folder in the listing —
+        unusual but possible (e.g. SPECIAL-USE not set up). Tier 1
+        returns None; BFS runs in the same session."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _generic_folder_listing_no_all()
+        client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        # No SELECT of any "All Mail" folder.
+        for call in client.select_folder.call_args_list:
+            assert "All Mail" not in call[0][0]
+        # BFS path SELECTed the regular folders.
+        assert client.select_folder.called
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_falls_back_to_bfs_when_anchor_not_in_all_mail(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """SEARCH HEADER returns no UID (anchor not present in All Mail).
+        Could happen during sync lag or if the message was hard-deleted
+        from All Mail. Fall through to BFS."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_with_all()
+        # First search is anchor-in-All-Mail → empty. Subsequent searches
+        # are the BFS per-folder per-id-per-header sequence — return empty.
+        client.search.return_value = []
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="missing@gmail.com",
+            anchor_references=[],
+        )
+
+        # Tier 1 attempted: All Mail SELECTed first.
+        first_select = client.select_folder.call_args_list[0]
+        assert first_select[0][0] == "[Gmail]/All Mail"
+        # Then BFS fired: many more SELECTs followed.
+        assert client.select_folder.call_count > 1
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_falls_back_to_bfs_on_xgm_thrid_query_rejection(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Server advertised X-GM-EXT-1 but rejects the X-GM-THRID query
+        anyway (quirky server / partial extension support). Tier 1
+        returns None; BFS picks up cleanly."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_with_all()
+        # Anchor lookup succeeds (Tier 1 SEARCH HEADER returns [100]);
+        # subsequent BFS searches find nothing.
+        client.search.side_effect = [[100]] + [[]] * 100
+        # First FETCH (Tier 1's X-GM-THRID query) is rejected; any later
+        # FETCH (BFS only fetches when SEARCH found something — it
+        # didn't, above — but be defensive) returns empty.
+        client.fetch.side_effect = [IMAPClientError("BAD X-GM-THRID"), {}, {}]
+
+        # Should NOT raise — IMAPClientError inside Tier 1 maps to None,
+        # not a re-raise. (Connection is still healthy; only the
+        # optimization path is broken.)
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        # BFS ran after the Tier 1 fall-through (multiple SELECTs).
+        assert client.select_folder.call_count > 1
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_uses_localized_all_mail_via_special_use(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Italian Gmail: All Mail is named `[Google Mail]/Tutta la posta`.
+        SPECIAL-USE flag is the only safe way to find it."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _localized_gmail_folder_listing()
+        client.search.side_effect = [[1], [1]]
+        client.fetch.side_effect = [
+            {1: {b"X-GM-THRID": 999}},
+            _fake_fetch_result([1]),
+        ]
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        client.select_folder.assert_called_once_with(
+            "[Google Mail]/Tutta la posta", readonly=True,
+        )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_returns_thread_members_in_chronological_order(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """The Tier 1 path must match Tier 3's existing sort: ascending
+        date_received. Callers depend on this — get_thread surfaces
+        results in chronological order."""
+        from datetime import datetime as _dt
+
+        # Three messages with intentionally OUT-OF-ORDER fetch UIDs vs dates.
+        e_old = _fake_envelope(
+            message_id=b"<old@gmail.com>", subject=b"Original",
+            date=_dt(2026, 1, 1, 12, 0, 0),
+        )
+        e_mid = _fake_envelope(
+            message_id=b"<mid@gmail.com>", subject=b"Re: Original",
+            date=_dt(2026, 1, 5, 12, 0, 0),
+        )
+        e_new = _fake_envelope(
+            message_id=b"<new@gmail.com>", subject=b"Re: Re: Original",
+            date=_dt(2026, 1, 10, 12, 0, 0),
+        )
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_with_all()
+        client.search.side_effect = [[100], [102, 100, 101]]
+        client.fetch.side_effect = [
+            {100: {b"X-GM-THRID": 555}},
+            {
+                100: {b"ENVELOPE": e_old, b"FLAGS": (b"\\Seen",)},
+                101: {b"ENVELOPE": e_mid, b"FLAGS": (b"\\Seen",)},
+                102: {b"ENVELOPE": e_new, b"FLAGS": ()},
+            },
+        ]
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="old@gmail.com",
+            anchor_references=[],
+        )
+
+        ids = [r["id"] for r in result]
+        assert ids == ["old@gmail.com", "mid@gmail.com", "new@gmail.com"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_dedups_by_message_id(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Defensive: even if the FETCH response somehow includes the
+        same Message-ID twice (unusual but observed in practice with
+        some servers when a message appears under multiple labels but
+        has the same RFC 5322 Message-ID), the result has unique IDs."""
+        e1 = _fake_envelope(message_id=b"<dup@gmail.com>", subject=b"S")
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_with_all()
+        client.search.side_effect = [[1], [1, 2]]
+        client.fetch.side_effect = [
+            {1: {b"X-GM-THRID": 7}},
+            {
+                1: {b"ENVELOPE": e1, b"FLAGS": ()},
+                2: {b"ENVELOPE": e1, b"FLAGS": ()},  # same Message-ID
+            },
+        ]
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="dup@gmail.com",
+            anchor_references=[],
+        )
+
+        assert len(result) == 1
