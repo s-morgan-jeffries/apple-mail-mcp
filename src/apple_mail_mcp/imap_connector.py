@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timedelta as _timedelta
-from typing import Any
+from typing import Any, cast
 
 from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError, LoginError
@@ -691,22 +691,36 @@ class ImapConnector:
     ) -> list[dict[str, Any]]:
         """Return all messages in the anchor's thread across the account.
 
-        Iterates every mailbox on the server. For each mailbox, searches
-        for any message whose Message-ID, In-Reply-To, or References
-        header matches any of the known thread IDs (the anchor plus its
-        known ancestors from the anchor's References header). Collects
-        matches, dedupes by Message-ID, sorts chronologically.
+        Tiered, capability-detected dispatch (issue #122):
 
-        A single pass suffices because well-formed replies copy the entire
-        References chain of their parent — so searching on the anchor's
-        Message-ID against the References header captures all descendants
-        regardless of tree depth.
+        - **Tier 1 (Gmail X-GM-THRID)** — when ``X-GM-EXT-1`` is in the
+          server's CAPABILITY list, look the conversation up by Gmail's
+          64-bit thread ID against ``[Gmail]/All Mail`` (resolved via
+          ``\\All`` SPECIAL-USE flag, which is localization-safe). Five
+          round-trips total, mailbox-count-independent — replaces a
+          ~1100-round-trip BFS on a 91-label Gmail account with ~5.
+
+        - **Tier 3 (header-search BFS)** — universal fallback. Iterates
+          every mailbox on the server; searches Message-ID / In-Reply-To /
+          References for every known thread ID. Used on iCloud, Fastmail,
+          and any provider that doesn't advertise the X-GM-EXT-1 path.
+          Also used when Tier 1 advertises but rejects mid-flight (server
+          lied about its capabilities).
+
+        Tier 2 (RFC 5256 THREAD) is reserved for #123 — slot in another
+        capability check between Tier 1 and Tier 3 there.
+
+        A single ``_session()`` covers all tiers, so a Tier 1 → Tier 3
+        fall-through doesn't pay a second connect+login. With the pool
+        (#75), both tiers share the cached connection.
 
         Args:
             anchor_rfc_message_id: RFC 5322 Message-ID of the thread anchor,
                 bracketless (as returned by _strip_brackets).
             anchor_references: List of Message-IDs from the anchor's
-                References header, bracketless, order preserved.
+                References header, bracketless, order preserved. Used by
+                Tier 3; Tier 1 doesn't need them (X-GM-THRID is the
+                authoritative grouping).
 
         Returns:
             List of message dicts in the same shape as search_messages
@@ -714,70 +728,189 @@ class ImapConnector:
             ``read_status``, ``flagged``), deduped by Message-ID, sorted
             chronologically ascending.
         """
-        known_ids: set[str] = {anchor_rfc_message_id} | set(anchor_references)
-
         with self._session() as client:
-            mailboxes = client.list_folders()
-            collected: dict[str, dict[str, Any]] = {}
+            # Tier 1: Gmail X-GM-THRID — fastest, mailbox-count-independent.
+            if self._has_capability(client, b"X-GM-EXT-1"):
+                tier1 = self._thread_via_xgm_thrid(client, anchor_rfc_message_id)
+                if tier1 is not None:
+                    return tier1
+                # Else fall through to Tier 3 in the same session.
 
-            for _flags, _delimiter, raw_name in mailboxes:
-                # imapclient returns names as str when its decoder succeeds,
-                # bytes/bytearray on failure. Coerce to str either way.
-                if isinstance(raw_name, (bytes, bytearray)):
-                    mailbox_name = raw_name.decode("utf-8", errors="replace")
-                else:
-                    mailbox_name = raw_name
-
-                try:
-                    client.select_folder(mailbox_name, readonly=True)
-                except IMAPClientError as exc:
-                    # Some mailboxes (e.g. Gmail smart labels) reject SELECT.
-                    # Matches the AppleScript path's precedent of skipping
-                    # them silently.
-                    logger.debug(
-                        "find_thread_members: skipping mailbox %s: %s",
-                        mailbox_name, exc,
-                    )
-                    continue
-
-                # Search for each known id across three header types. IMAP
-                # returns UIDs whose specified header contains the given
-                # substring; each search is server-side and indexed.
-                uids_found: set[int] = set()
-                for id_ in known_ids:
-                    id_quoted = f"<{id_}>"
-                    for header in ("Message-ID", "In-Reply-To", "References"):
-                        try:
-                            uids = client.search(["HEADER", header, id_quoted])
-                        except IMAPClientError as exc:
-                            logger.debug(
-                                "find_thread_members: search failed in %s for "
-                                "%s=%s: %s",
-                                mailbox_name, header, id_quoted, exc,
-                            )
-                            continue
-                        uids_found.update(uids)
-
-                if not uids_found:
-                    continue
-
-                fetched = client.fetch(
-                    list(uids_found), [b"ENVELOPE", b"FLAGS"]
-                )
-                for fetch_entry in fetched.values():
-                    envelope = fetch_entry.get(b"ENVELOPE")
-                    if envelope is None:
-                        continue
-                    raw_msgid = getattr(envelope, "message_id", None)
-                    if not raw_msgid:
-                        continue
-                    clean_msgid = _strip_brackets(_decode(raw_msgid))
-                    if clean_msgid in collected:
-                        continue
-                    flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
-                    collected[clean_msgid] = _envelope_to_dict(envelope, flags)
-
-            return sorted(
-                collected.values(),
-                key=lambda m: m.get("date_received") or "",
+            # Tier 3: header-search BFS — universal fallback.
+            return self._find_thread_members_bfs(
+                client, anchor_rfc_message_id, anchor_references,
             )
+
+    @staticmethod
+    def _has_capability(client: IMAPClient, name: bytes) -> bool:
+        """True if ``name`` (e.g. ``b"X-GM-EXT-1"``) is in the post-login
+        capability list. IMAPClient caches CAPABILITY across the session;
+        this is a local lookup, no round trip."""
+        return name in client.capabilities()
+
+    @staticmethod
+    def _find_all_mail_folder(client: IMAPClient) -> str | None:
+        """Return the Gmail All Mail folder name via the ``\\All``
+        SPECIAL-USE flag, or None if not found.
+
+        Hardcoding ``[Gmail]/All Mail`` would break on localized Gmail
+        accounts (e.g. ``[Google Mail]/Tutta la posta``); the SPECIAL-USE
+        flag is the standard way to find it regardless of label."""
+        for flags, _delim, name in client.list_folders():
+            if b"\\All" in flags:
+                if isinstance(name, (bytes, bytearray)):
+                    return name.decode("utf-8", errors="replace")
+                return cast(str, name)
+        return None
+
+    def _thread_via_xgm_thrid(
+        self,
+        client: IMAPClient,
+        anchor_rfc_message_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Tier 1 (Gmail X-GM-THRID) implementation. Returns thread member
+        dicts on success, OR ``None`` when the strategy can't run (no
+        ``\\All`` folder, anchor not in All Mail, X-GM-THRID query
+        rejected mid-flight). On None, the caller falls through to Tier 3.
+
+        Returning None (rather than raising) keeps the dispatcher's
+        control flow clean — exceptions are reserved for failures the
+        orchestrator's ``_IMAP_FALLBACK_EXCS`` should observe."""
+        all_mail = self._find_all_mail_folder(client)
+        if all_mail is None:
+            return None
+
+        client.select_folder(all_mail, readonly=True)
+
+        bracketed = f"<{anchor_rfc_message_id}>"
+        try:
+            anchor_uids = client.search(["HEADER", "Message-ID", bracketed])
+        except IMAPClientError:
+            return None
+        if not anchor_uids:
+            return None
+
+        try:
+            thrid_fetch = client.fetch(anchor_uids[:1], [b"X-GM-THRID"])
+        except IMAPClientError:
+            return None
+        thrid_entry: dict[bytes, Any] = next(iter(thrid_fetch.values()), {})
+        thrid = thrid_entry.get(b"X-GM-THRID")
+        if thrid is None:
+            return None
+
+        try:
+            thread_uids = client.search(["X-GM-THRID", str(thrid)])
+        except IMAPClientError:
+            return None
+        if not thread_uids:
+            return None
+
+        fetched = client.fetch(thread_uids, [b"ENVELOPE", b"FLAGS"])
+
+        collected: dict[str, dict[str, Any]] = {}
+        for fetch_entry in fetched.values():
+            envelope = fetch_entry.get(b"ENVELOPE")
+            if envelope is None:
+                continue
+            raw_msgid = getattr(envelope, "message_id", None)
+            if not raw_msgid:
+                continue
+            clean_msgid = _strip_brackets(_decode(raw_msgid))
+            if clean_msgid in collected:
+                continue
+            flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
+            collected[clean_msgid] = _envelope_to_dict(envelope, flags)
+
+        return sorted(
+            collected.values(),
+            key=lambda m: m.get("date_received") or "",
+        )
+
+    @staticmethod
+    def _find_thread_members_bfs(
+        client: IMAPClient,
+        anchor_rfc_message_id: str,
+        anchor_references: list[str],
+    ) -> list[dict[str, Any]]:
+        """Tier 3: per-mailbox header-search BFS. Universal fallback —
+        works against any IMAP server that supports basic SEARCH HEADER
+        (RFC 3501).
+
+        For each mailbox, searches the Message-ID / In-Reply-To /
+        References headers for every known thread ID (the anchor plus
+        its known ancestors). A single pass suffices because well-formed
+        replies copy the entire References chain of their parent — so
+        searching on the anchor's Message-ID against the References
+        header captures all descendants regardless of tree depth.
+
+        Cost: M × N × 3 SEARCHes + M SELECTs + up to M FETCHes, where
+        M is mailbox count and N is the size of the known-IDs set.
+        Slow on accounts with many mailboxes; #122 (X-GM-THRID) is the
+        Gmail-specific optimization, #123 (RFC 5256 THREAD) the more
+        general one."""
+        known_ids: set[str] = {anchor_rfc_message_id} | set(anchor_references)
+        mailboxes = client.list_folders()
+        collected: dict[str, dict[str, Any]] = {}
+
+        for _flags, _delimiter, raw_name in mailboxes:
+            # imapclient returns names as str when its decoder succeeds,
+            # bytes/bytearray on failure. Coerce to str either way.
+            if isinstance(raw_name, (bytes, bytearray)):
+                mailbox_name = raw_name.decode("utf-8", errors="replace")
+            else:
+                mailbox_name = raw_name
+
+            try:
+                client.select_folder(mailbox_name, readonly=True)
+            except IMAPClientError as exc:
+                # Some mailboxes (e.g. Gmail smart labels) reject SELECT.
+                # Matches the AppleScript path's precedent of skipping
+                # them silently.
+                logger.debug(
+                    "find_thread_members: skipping mailbox %s: %s",
+                    mailbox_name, exc,
+                )
+                continue
+
+            # Search for each known id across three header types. IMAP
+            # returns UIDs whose specified header contains the given
+            # substring; each search is server-side and indexed.
+            uids_found: set[int] = set()
+            for id_ in known_ids:
+                id_quoted = f"<{id_}>"
+                for header in ("Message-ID", "In-Reply-To", "References"):
+                    try:
+                        uids = client.search(["HEADER", header, id_quoted])
+                    except IMAPClientError as exc:
+                        logger.debug(
+                            "find_thread_members: search failed in %s for "
+                            "%s=%s: %s",
+                            mailbox_name, header, id_quoted, exc,
+                        )
+                        continue
+                    uids_found.update(uids)
+
+            if not uids_found:
+                continue
+
+            fetched = client.fetch(
+                list(uids_found), [b"ENVELOPE", b"FLAGS"]
+            )
+            for fetch_entry in fetched.values():
+                envelope = fetch_entry.get(b"ENVELOPE")
+                if envelope is None:
+                    continue
+                raw_msgid = getattr(envelope, "message_id", None)
+                if not raw_msgid:
+                    continue
+                clean_msgid = _strip_brackets(_decode(raw_msgid))
+                if clean_msgid in collected:
+                    continue
+                flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
+                collected[clean_msgid] = _envelope_to_dict(envelope, flags)
+
+        return sorted(
+            collected.values(),
+            key=lambda m: m.get("date_received") or "",
+        )
