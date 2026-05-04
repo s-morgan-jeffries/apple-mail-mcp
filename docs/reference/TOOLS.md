@@ -1050,7 +1050,7 @@ print(f"Thread has {thread['count']} messages")
 
 ### list_rules
 
-List all Mail.app rules. Returns each rule's 1-based positional index, name, and enabled state. The `index` is the handle the mutation tools (`set_rule_enabled`, `delete_rule`, `update_rule`) use to address a specific rule.
+List all Mail.app rules. Returns each rule's 1-based positional index, name, and enabled state. The `index` is the handle the mutation tools (`update_rule`, `delete_rule`) use to address a specific rule.
 
 **Parameters:** None.
 
@@ -1072,25 +1072,6 @@ List all Mail.app rules. Returns each rule's 1-based positional index, name, and
 - `index`: 1-based positional index, matching Mail.app's AppleScript reference (`rule N`). Indexes can shift if rules are reordered or deleted in Mail's UI between calls — re-fetch the list before mutating.
 - `name`: Rule display name. **Not guaranteed unique** — Mail.app allows multiple rules with the same name. Use `index`, not `name`, for unambiguous addressing.
 - `enabled`: Reflects the rule's toggle in Mail.app's Rules preferences.
-
----
-
-### set_rule_enabled
-
-Toggle a rule's enabled state.
-
-**Parameters:**
-
-- `rule_index` (int, required): 1-based index from `list_rules`.
-- `enabled` (bool, required): `true` to enable, `false` to disable.
-
-**Returns:**
-
-```json
-{"success": true, "rule_index": 3, "enabled": false}
-```
-
-No confirmation prompt — the change is trivially reversible by toggling again.
 
 ---
 
@@ -1128,7 +1109,7 @@ create_rule(
 
 ### update_rule
 
-Patch a rule's properties. Only the fields you pass are changed.
+Patch a rule's properties. Only the fields you pass are changed. Also serves as the enable/disable mechanism — pass `enabled=True|False` (the standalone `set_rule_enabled` tool was folded into this one in #130).
 
 **Parameters:**
 
@@ -1138,7 +1119,7 @@ Patch a rule's properties. Only the fields you pass are changed.
 - `match_logic` (str, optional): `"all"` or `"any"`.
 - `actions` (dict, optional): When provided, **replaces** the rule's actions wholesale (per the same schema as `create_rule`'s `actions`).
 
-**Confirmation:** elicits user confirmation before applying the change.
+**Conditional confirmation:** prompts the user via MCP elicitation only when the patch touches `conditions`, `actions`, or `match_logic` (irreversible replacements). Patches limited to `enabled` and/or `name` skip the prompt — both are trivially reversible.
 
 **Returns:**
 

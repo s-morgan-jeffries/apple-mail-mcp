@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+**`update_rule` absorbs `set_rule_enabled` (#130):** The standalone `set_rule_enabled` MCP tool is removed; toggle a rule's enabled state via `update_rule(rule_index, enabled=True|False)` instead. `update_rule` now prompts for confirmation only when the patch touches `conditions`, `actions`, or `match_logic` (irreversible fields); patches limited to `enabled` and/or `name` skip the prompt. Migration: callers that did `set_rule_enabled(idx, True)` should call `update_rule(idx, enabled=True)`. First of the consolidations from the #129 audit (27 → 20 tools).
+
 ## [0.6.0] - 2026-05-03
 
 Performance and ergonomics release. The IMAP delegation arc started in v0.5.0 is now complete: `search_messages`, `get_message`, `get_attachments`, and `get_thread` all delegate to IMAP transparently when configured, with a clean cross-provider fallback story. Headline numbers: search drops 60s → 2.7s on a populous mailbox, the IMAP fast path is wired through every read tool, and a small per-account circuit breaker keeps offline / stale-credential bursts bounded. Setup is no longer a four-line raw-shell incantation — there's a real CLI with verification.

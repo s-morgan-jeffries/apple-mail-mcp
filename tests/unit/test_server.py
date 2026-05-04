@@ -52,7 +52,6 @@ from apple_mail_mcp.server import (
     search_messages,
     send_email,
     send_email_with_attachments,
-    set_rule_enabled,
     update_rule,
 )
 
@@ -185,31 +184,8 @@ class TestListRules:
 
 
 # ---------------------------------------------------------------------------
-# 0c. Rule mutations: set_rule_enabled, delete_rule, create_rule, update_rule
+# 0c. Rule mutations: delete_rule, create_rule, update_rule
 # ---------------------------------------------------------------------------
-
-
-class TestSetRuleEnabled:
-    def test_success_disables_rule(self, mock_mail: MagicMock) -> None:
-        mock_mail.list_rules.return_value = [
-            {"index": 1, "name": "X", "enabled": True},
-            {"index": 2, "name": "News", "enabled": True},
-        ]
-        result = set_rule_enabled(rule_index=2, enabled=False)
-        assert result["success"] is True
-        assert result["rule_index"] == 2
-        assert result["name"] == "News"
-        assert result["enabled"] is False
-        mock_mail.set_rule_enabled.assert_called_once_with(2, False)
-
-    def test_returns_rule_not_found_when_index_missing(
-        self, mock_mail: MagicMock
-    ) -> None:
-        mock_mail.list_rules.return_value = []
-        result = set_rule_enabled(rule_index=99, enabled=True)
-        assert result["success"] is False
-        assert result["error_type"] == "rule_not_found"
-        mock_mail.set_rule_enabled.assert_not_called()
 
 
 class TestDeleteRule:
@@ -293,7 +269,71 @@ class TestCreateRule:
 
 
 class TestUpdateRule:
-    async def test_success_with_accepted_ctx(
+    # ---- Irreversible patches: prompt required ---------------------------
+
+    async def test_conditions_patch_prompts_and_succeeds(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        result = await update_rule(
+            rule_index=1,
+            conditions=[
+                {"field": "subject", "operator": "contains", "value": "X"}
+            ],
+            ctx=mock_ctx_accept,
+        )
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.update_rule.assert_called_once()
+
+    async def test_actions_patch_prompts_and_succeeds(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        result = await update_rule(
+            rule_index=1,
+            actions={"mark_read": True},
+            ctx=mock_ctx_accept,
+        )
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.update_rule.assert_called_once()
+
+    async def test_match_logic_patch_prompts_and_succeeds(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        result = await update_rule(
+            rule_index=1, match_logic="any", ctx=mock_ctx_accept
+        )
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.update_rule.assert_called_once()
+
+    async def test_declined_ctx_blocks_irreversible_update(
+        self, mock_mail: MagicMock, mock_ctx_decline: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "X", "enabled": True},
+        ]
+        result = await update_rule(
+            rule_index=1,
+            actions={"delete": True},
+            ctx=mock_ctx_decline,
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        mock_mail.update_rule.assert_not_called()
+
+    # ---- Reversible-only patches: no prompt ------------------------------
+
+    async def test_enabled_only_patch_does_not_prompt(
         self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
     ) -> None:
         mock_mail.list_rules.return_value = [
@@ -303,21 +343,50 @@ class TestUpdateRule:
             rule_index=1, enabled=False, ctx=mock_ctx_accept
         )
         assert result["success"] is True
-        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_ctx_accept.elicit.assert_not_awaited()
         mock_mail.update_rule.assert_called_once()
 
-    async def test_declined_ctx_blocks_update(
-        self, mock_mail: MagicMock, mock_ctx_decline: MagicMock
+    async def test_name_only_patch_does_not_prompt(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        result = await update_rule(
+            rule_index=1, name="renamed", ctx=mock_ctx_accept
+        )
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_not_awaited()
+        mock_mail.update_rule.assert_called_once()
+
+    async def test_enabled_plus_name_does_not_prompt(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
     ) -> None:
         mock_mail.list_rules.return_value = [
             {"index": 1, "name": "X", "enabled": True},
         ]
         result = await update_rule(
-            rule_index=1, enabled=False, ctx=mock_ctx_decline
+            rule_index=1,
+            enabled=False,
+            name="renamed",
+            ctx=mock_ctx_accept,
         )
-        assert result["success"] is False
-        assert result["error_type"] == "cancelled"
-        mock_mail.update_rule.assert_not_called()
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_not_awaited()
+        mock_mail.update_rule.assert_called_once()
+
+    async def test_enabled_only_works_without_ctx(
+        self, mock_mail: MagicMock
+    ) -> None:
+        """Migration path for callers porting from set_rule_enabled."""
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "X", "enabled": True},
+        ]
+        result = await update_rule(rule_index=1, enabled=True)
+        assert result["success"] is True
+        mock_mail.update_rule.assert_called_once()
+
+    # ---- Error mapping ----------------------------------------------------
 
     async def test_returns_unsupported_action_error_type(
         self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
@@ -331,7 +400,9 @@ class TestUpdateRule:
             "uses run-script"
         )
         result = await update_rule(
-            rule_index=1, enabled=False, ctx=mock_ctx_accept
+            rule_index=1,
+            actions={"delete": True},
+            ctx=mock_ctx_accept,
         )
         assert result["success"] is False
         assert result["error_type"] == "unsupported_rule_action"

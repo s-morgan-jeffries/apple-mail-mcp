@@ -226,7 +226,7 @@ class TestCheckRateLimit:
             "mark_as_read", "move_messages", "flag_message", "create_mailbox",
             "delete_messages", "reply_to_message", "send_email",
             "send_email_with_attachments", "forward_message",
-            "set_rule_enabled", "delete_rule", "create_rule", "update_rule",
+            "delete_rule", "create_rule", "update_rule",
             "list_templates", "get_template", "save_template",
             "delete_template", "render_template",
         }
@@ -364,7 +364,7 @@ class TestCheckTestModeSafety:
         monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
         assert (
             check_test_mode_safety(
-                "set_rule_enabled",
+                "update_rule",
                 rule_name="[apple-mail-mcp-test] my rule",
             )
             is None

@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
     "list_rules",
     "search_messages",
     "get_message",
+    "get_selected_messages",
     "get_thread",
     "get_attachments",
     # Send / reply / forward
@@ -46,7 +47,6 @@ EXPECTED_TOOLS = {
     "create_mailbox",
     "delete_messages",
     # Rule CRUD (#63)
-    "set_rule_enabled",
     "create_rule",
     "update_rule",
     "delete_rule",

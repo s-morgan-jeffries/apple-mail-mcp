@@ -133,7 +133,6 @@ OPERATION_TIERS: dict[str, str] = {
     "flag_message": "expensive_ops",
     "create_mailbox": "expensive_ops",
     "delete_messages": "expensive_ops",
-    "set_rule_enabled": "expensive_ops",
     "delete_rule": "expensive_ops",
     "create_rule": "expensive_ops",
     "update_rule": "expensive_ops",
@@ -276,7 +275,6 @@ SEND_OPERATIONS = {
 # names start with the test prefix below. Protects the user's real rules
 # during integration testing.
 RULE_GATED_OPERATIONS = {
-    "set_rule_enabled",
     "create_rule",
     "update_rule",
     "delete_rule",

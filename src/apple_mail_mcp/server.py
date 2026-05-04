@@ -227,71 +227,6 @@ def _resolve_rule_name(rule_index: int) -> str | None:
 
 
 @mcp.tool()
-def set_rule_enabled(rule_index: int, enabled: bool) -> dict[str, Any]:
-    """
-    Enable or disable a Mail.app rule by 1-based positional index.
-
-    Trivially reversible — no confirmation prompt. The index is the one
-    returned by ``list_rules``; if you've changed rule order in Mail.app
-    since the last list_rules call, re-list before calling this.
-
-    Args:
-        rule_index: 1-based positional index from list_rules.
-        enabled: True to enable, False to disable.
-
-    Returns:
-        Dictionary with success status and the rule's name.
-    """
-    try:
-        rate_err = check_rate_limit(
-            "set_rule_enabled", {"rule_index": rule_index}
-        )
-        if rate_err:
-            return rate_err
-
-        rule_name = _resolve_rule_name(rule_index)
-        if rule_name is None:
-            return {
-                "success": False,
-                "error": f"No rule at index {rule_index}",
-                "error_type": "rule_not_found",
-            }
-
-        safety_err = check_test_mode_safety(
-            "set_rule_enabled", rule_name=rule_name
-        )
-        if safety_err:
-            return safety_err
-
-        mail.set_rule_enabled(rule_index, enabled)
-        operation_logger.log_operation(
-            "set_rule_enabled",
-            {"rule_index": rule_index, "enabled": enabled, "name": rule_name},
-            "success",
-        )
-        return {
-            "success": True,
-            "rule_index": rule_index,
-            "name": rule_name,
-            "enabled": enabled,
-        }
-
-    except MailRuleNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "rule_not_found",
-        }
-    except Exception as e:
-        logger.error(f"Error in set_rule_enabled: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
 async def delete_rule(
     rule_index: int,
     ctx: Context | None = None,
@@ -466,11 +401,16 @@ async def update_rule(
     """
     Update an existing Mail.app rule (patch semantics).
 
-    Destructive — requires user confirmation via MCP elicitation before
-    running, because the previous condition/action state is irrecoverable
-    once replaced. Patch semantics: only fields you provide are changed.
-    ``conditions`` and ``actions``, when provided, REPLACE their respective
-    structures wholesale (not merged).
+    Patch semantics: only fields you provide are changed. ``conditions`` and
+    ``actions``, when provided, REPLACE their respective structures wholesale
+    (not merged).
+
+    Conditional confirmation: prompts the user via MCP elicitation only when
+    the patch touches ``conditions``, ``actions``, or ``match_logic`` —
+    those replacements are irrecoverable. Patches limited to ``enabled``
+    and/or ``name`` (trivially reversible) skip the prompt. The
+    enable/disable path replaces the removed ``set_rule_enabled`` tool: call
+    ``update_rule(rule_index, enabled=True|False)``.
 
     Refuses to update any rule whose existing actions include something
     outside the supported schema (run-AppleScript, redirect, reply text,
@@ -509,15 +449,21 @@ async def update_rule(
         if safety_err:
             return safety_err
 
-        summary = (
-            f"Update Mail.app rule '{rule_name}' (index {rule_index})? "
-            f"Previous condition/action state cannot be recovered."
+        needs_confirmation = (
+            conditions is not None
+            or actions is not None
+            or match_logic is not None
         )
-        cancel_err = await _elicit_confirmation(
-            ctx, summary, "update_rule", {"rule_index": rule_index}
-        )
-        if cancel_err:
-            return cancel_err
+        if needs_confirmation:
+            summary = (
+                f"Update Mail.app rule '{rule_name}' (index {rule_index})? "
+                f"Previous condition/action state cannot be recovered."
+            )
+            cancel_err = await _elicit_confirmation(
+                ctx, summary, "update_rule", {"rule_index": rule_index}
+            )
+            if cancel_err:
+                return cancel_err
 
         mail.update_rule(
             rule_index=rule_index,
