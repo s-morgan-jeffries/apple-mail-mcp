@@ -28,12 +28,14 @@ Search for messages matching specified criteria.
 | `has_attachment` | boolean | No | None | Filter messages with (true) or without (false) attachments |
 | `limit` | integer | No | 50 | Maximum number of results to return |
 | `source` | string | No | `"all"` | `"all"` searches the given account/mailbox; `"selected"` returns Mail.app's current UI selection. |
+| `thread_of` | string | No | None | Message id of any message in a thread; returns all messages in that thread, sorted by `date_received` ascending. Composes with the other filter parameters. |
 
 **Notes:**
 - Malformed `date_from` / `date_to` raise `error_type: validation_error`. Only ISO 8601 YYYY-MM-DD is accepted; relative dates like "7 days ago" are not supported.
 - `has_attachment` is filtered after the initial server-side match because Mail.app rejects attachment predicates inside its `whose` clause.
 - `source="selected"` (folded-in `get_selected_messages` in #131) ignores all other parameters — selection is global to Mail.app, not bound to an account/mailbox. Message bodies are always included via the `content` row field. Returns `account: null` and `mailbox: null` in the response.
-- With `source="all"` (default), omitting `account` returns `error_type: validation_error`.
+- `thread_of` (folded-in `get_thread` in #132) composes with the other filter parameters: `thread_of=X + read_status=False` returns unread thread members; `thread_of=X + sender_contains="alice"` returns alice's contributions to the thread. The anchor's account is resolved from the message id (so `account` and `mailbox` are not needed). Tier 1 / Tier 3 IMAP threading dispatch from #122 is preserved. Returns `account: null` and `mailbox: null` in the response. Anchor-not-found returns `error_type: "message_not_found"`.
+- With `source="all"` (default) and no `thread_of`, omitting `account` returns `error_type: validation_error`.
 
 **Returns:**
 
@@ -67,6 +69,12 @@ search_messages(account="Gmail", sender_contains="john@example.com")
 
 # Return Mail.app's current UI selection (folds in get_selected_messages)
 search_messages(source="selected")
+
+# Return all messages in a thread (folds in get_thread)
+search_messages(thread_of="<message_id>")
+
+# Unread members of a specific thread
+search_messages(thread_of="<message_id>", read_status=False)
 
 # Find messages with keyword in subject
 search_messages(account="Gmail", subject_contains="invoice", limit=10)
@@ -343,13 +351,6 @@ Create a new mailbox/folder.
 - `account`: string - Account name
 - `name`: string - Mailbox name
 - `parent_mailbox`: string (optional) - Parent for nested mailboxes
-
-### get_thread
-
-Get all messages in a conversation thread.
-
-**Parameters:**
-- `message_id`: string - Any message in the thread
 
 ### delete_messages
 
@@ -1005,54 +1006,6 @@ send_email(
 ---
 
 ## Phase 4 Tools (v0.5.0)
-
-### get_thread
-
-Return all messages in the thread containing the given anchor message, sorted chronologically.
-
-Looks up the anchor by its internal id, reads its RFC 5322 threading headers (Message-ID, In-Reply-To, References), then searches every mailbox in the anchor's account for candidate messages whose normalized subject matches. Candidates with overlapping Message-ID / In-Reply-To / References form the reply graph. The subject prefilter is a feasibility requirement, not an optimization — `whose message id is "X"` on Mail.app is ~21 seconds per lookup (not indexed) vs sub-second for subject.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `message_id` | string | Yes | - | Internal id of any message in the thread (from search_messages or get_message). |
-
-**Returns:**
-
-```json
-{
-  "success": true,
-  "thread": [
-    {"id": "100", "subject": "Q3 Report", "sender": "alice@x.com",
-     "date_received": "Mon Jan 1 2024 10:00:00", "read_status": true, "flagged": false},
-    {"id": "101", "subject": "Re: Q3 Report", "sender": "bob@x.com",
-     "date_received": "Mon Jan 1 2024 14:30:00", "read_status": true, "flagged": false}
-  ],
-  "count": 2
-}
-```
-
-Message rows are the search_messages shape (6 fields). No content — chain `get_message` to read bodies.
-
-**Known limitations:**
-
-- **Subject rewrites miss thread members.** A reply whose subject was rewritten mid-conversation ("Re: Q3 Report" → "Reopening the Q3 discussion") won't match the subject prefilter and is excluded. Rare in practice.
-- **Single-account scope.** Threads that span multiple accounts (forwarding, aliases) are not reconstructed cross-account.
-- **Orphan anchors** (messages with no threading headers) return a thread of 1 (the anchor itself).
-
-**Examples:**
-
-```python
-# Get the full conversation for a message found via search
-matches = search_messages("Gmail", mailbox="INBOX", subject_contains="Q3")
-thread = get_thread(matches["messages"][0]["id"])
-print(f"Thread has {thread['count']} messages")
-```
-
-**Future:** An IMAP-based code path (tracked as issue #66) will remove the subject-rewrite limitation once the `imap_connector` (issue #41) lands.
-
----
 
 ### list_rules
 

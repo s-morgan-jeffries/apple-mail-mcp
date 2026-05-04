@@ -31,7 +31,6 @@ EXPECTED_TOOLS = {
     "list_rules",
     "search_messages",
     "get_message",
-    "get_thread",
     "get_attachments",
     # Send / reply / forward
     "send_email",

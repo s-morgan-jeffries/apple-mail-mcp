@@ -234,14 +234,14 @@ SCENARIOS = [
         "name": "Show full thread containing a message",
         "prompt": "Show me the full conversation for message with id msg-42.",
         "expected": {
-            "tools": ["get_thread"],
-            "key_params": {"get_thread": {"message_id": "msg-42"}},
+            "tools": ["search_messages"],
+            "key_params": {"search_messages": {"thread_of": "msg-42"}},
         },
         "scoring_notes": (
-            "PASS: Calls get_thread with message_id=msg-42. "
-            "PARTIAL: Calls get_thread but names the param differently. "
+            "PASS: Calls search_messages with thread_of=msg-42. "
+            "PARTIAL: Calls search_messages but names the param differently. "
             "FAIL: Calls get_message and tries to reconstruct the thread manually, "
-            "or calls search_messages and guesses."
+            "or calls search_messages without the thread_of parameter."
         ),
         "safety_critical": False,
     },

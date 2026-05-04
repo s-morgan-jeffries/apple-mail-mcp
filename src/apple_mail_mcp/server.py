@@ -568,6 +568,51 @@ def list_mailboxes(account: str) -> dict[str, Any]:
         }
 
 
+def _apply_search_filters(
+    messages: list[dict[str, Any]],
+    sender_contains: str | None,
+    subject_contains: str | None,
+    read_status: bool | None,
+    is_flagged: bool | None,
+    date_from: str | None,
+    date_to: str | None,
+    has_attachment: bool | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Post-filter a list of message dicts in Python.
+
+    Used by the ``thread_of`` dispatch path of ``search_messages``: the
+    connector's ``get_thread`` returns the full thread, then we filter
+    here. Applies the same predicates the IMAP/AppleScript search paths
+    apply server-side, then truncates to ``limit``. Threads are typically
+    small (<50 messages), so the cost is negligible.
+    """
+    def matches(m: dict[str, Any]) -> bool:
+        if sender_contains is not None and sender_contains.lower() not in str(
+            m.get("sender", "")
+        ).lower():
+            return False
+        if subject_contains is not None and subject_contains.lower() not in str(
+            m.get("subject", "")
+        ).lower():
+            return False
+        if read_status is not None and bool(m.get("read_status")) != read_status:
+            return False
+        if is_flagged is not None and bool(m.get("flagged")) != is_flagged:
+            return False
+        if date_from is not None and str(m.get("date_received", "")) < date_from:
+            return False
+        if date_to is not None and str(m.get("date_received", "")) > date_to:
+            return False
+        if has_attachment is not None and bool(
+            m.get("has_attachment")
+        ) != has_attachment:
+            return False
+        return True
+
+    return [m for m in messages if matches(m)][:limit]
+
+
 @mcp.tool()
 def search_messages(
     account: str | None = None,
@@ -581,6 +626,7 @@ def search_messages(
     has_attachment: bool | None = None,
     limit: int = 50,
     source: Literal["all", "selected"] = "all",
+    thread_of: str | None = None,
 ) -> dict[str, Any]:
     """
     Search for messages matching criteria.
@@ -593,12 +639,22 @@ def search_messages(
     (selection is global to Mail.app, not bound to an account/mailbox).
     Message bodies are always included via the ``content`` row field.
 
+    When ``thread_of`` is set (folded-in ``get_thread``), returns all
+    messages in the same thread as the anchor message, sorted by
+    ``date_received`` ascending. Composes with the other filter
+    parameters: ``thread_of=X + read_status=False`` returns unread thread
+    members, ``thread_of=X + sender_contains="alice"`` returns alice's
+    contributions, etc. ``account`` and ``mailbox`` are not needed — the
+    anchor's account is resolved from the message id. If the anchor id
+    doesn't exist, returns ``error_type: "message_not_found"``.
+
     Args:
         account: Mail.app account display name (e.g., "Gmail", "iCloud") or
-            UUID (from list_accounts). Required when ``source="all"``;
-            ignored when ``source="selected"``. Names are convenient but
-            unstable across renames; UUIDs are stable.
-        mailbox: Mailbox name (default: "INBOX").
+            UUID (from list_accounts). Required when ``source="all"`` and
+            ``thread_of`` is None; ignored otherwise. Names are convenient
+            but unstable across renames; UUIDs are stable.
+        mailbox: Mailbox name (default: "INBOX"). Ignored when
+            ``thread_of`` or ``source="selected"`` is set.
         sender_contains: Filter by sender email/domain substring.
         subject_contains: Filter by subject keywords substring.
         read_status: Filter by read status (true=read, false=unread).
@@ -609,6 +665,8 @@ def search_messages(
         limit: Maximum results to return (default: 50).
         source: ``"all"`` (default) searches the given account/mailbox.
             ``"selected"`` returns Mail.app's current UI selection.
+        thread_of: When set to a message id, returns all messages in that
+            message's thread. Composes with the other filter parameters.
 
     Returns:
         Dictionary containing matching messages. Each message row includes
@@ -620,8 +678,47 @@ def search_messages(
         {"success": True, "messages": [...], "count": 5}
         >>> search_messages(source="selected")
         {"success": True, "messages": [...], "count": 2}
+        >>> search_messages(thread_of="12345", read_status=False)
+        {"success": True, "messages": [...], "count": 3}
     """
     try:
+        if thread_of is not None:
+            thread = mail.get_thread(thread_of)
+            filtered = _apply_search_filters(
+                thread,
+                sender_contains,
+                subject_contains,
+                read_status,
+                is_flagged,
+                date_from,
+                date_to,
+                has_attachment,
+                limit,
+            )
+            operation_logger.log_operation(
+                "search_messages",
+                {
+                    "thread_of": thread_of,
+                    "filters": {
+                        "sender": sender_contains,
+                        "subject": subject_contains,
+                        "read_status": read_status,
+                        "is_flagged": is_flagged,
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "has_attachment": has_attachment,
+                    },
+                },
+                "success",
+            )
+            return {
+                "success": True,
+                "account": None,
+                "mailbox": None,
+                "messages": filtered,
+                "count": len(filtered),
+            }
+
         if source == "selected":
             messages = mail.get_selected_messages(include_content=True)
             operation_logger.log_operation(
@@ -698,6 +795,13 @@ def search_messages(
             "count": len(messages),
         }
 
+    except MailMessageNotFoundError as e:
+        logger.error(f"Thread anchor not found: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "message_not_found",
+        }
     except (MailAccountNotFoundError, MailMailboxNotFoundError) as e:
         logger.error(f"Not found error: {e}")
         return {
@@ -1183,65 +1287,6 @@ def get_attachments(
         }
     except Exception as e:
         logger.error(f"Error getting attachments: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
-def get_thread(message_id: str) -> dict[str, Any]:
-    """
-    Return all messages in the thread containing the given message.
-
-    Looks up the message by its internal id, then reconstructs the
-    conversation by reading RFC 5322 threading headers (Message-ID,
-    In-Reply-To, References) across messages in the same account.
-    Results are sorted by date_received ascending.
-
-    Known limitation: thread members whose subject was rewritten
-    mid-conversation are missed (subject prefilter tradeoff).
-
-    Args:
-        message_id: Internal id of any message in the thread
-            (from search_messages or get_message results).
-
-    Returns:
-        Dictionary with the thread list.
-
-    Example:
-        >>> get_thread("12345")
-        {"success": True, "thread": [{...}, {...}], "count": 2}
-    """
-    try:
-        rate_err = check_rate_limit("get_thread", {"message_id": message_id})
-        if rate_err:
-            return rate_err
-
-        logger.info(f"Getting thread for message: {message_id}")
-
-        thread = mail.get_thread(message_id)
-
-        operation_logger.log_operation(
-            "get_thread", {"message_id": message_id}, "success"
-        )
-
-        return {
-            "success": True,
-            "thread": thread,
-            "count": len(thread),
-        }
-
-    except MailMessageNotFoundError as e:
-        logger.error(f"Message not found: {e}")
-        return {
-            "success": False,
-            "error": f"Message '{message_id}' not found",
-            "error_type": "message_not_found",
-        }
-    except Exception as e:
-        logger.error(f"Error getting thread: {e}")
         return {
             "success": False,
             "error": str(e),

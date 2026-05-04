@@ -38,7 +38,6 @@ from apple_mail_mcp.server import (
     get_attachments,
     get_message,
     get_template,
-    get_thread,
     list_accounts,
     list_mailboxes,
     list_rules,
@@ -690,6 +689,147 @@ class TestSearchMessages:
         mock_mail.search_messages.assert_called_once()
         mock_mail.get_selected_messages.assert_not_called()
 
+    # ---- thread_of (folded-in get_thread, #132) --------------------------
+
+    def _thread_fixture(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "1",
+                "subject": "Q3 plan",
+                "sender": "alice@example.com",
+                "date_received": "2026-04-01",
+                "read_status": True,
+                "flagged": False,
+            },
+            {
+                "id": "2",
+                "subject": "Re: Q3 plan",
+                "sender": "bob@example.com",
+                "date_received": "2026-04-02",
+                "read_status": False,
+                "flagged": False,
+            },
+            {
+                "id": "3",
+                "subject": "Re: Q3 plan",
+                "sender": "alice@example.com",
+                "date_received": "2026-04-15",
+                "read_status": False,
+                "flagged": True,
+            },
+        ]
+
+    def test_thread_of_returns_thread_members(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        result = search_messages(thread_of="1")
+
+        assert result["success"] is True
+        assert result["count"] == 3
+        assert result["account"] is None
+        assert result["mailbox"] is None
+        assert [m["id"] for m in result["messages"]] == ["1", "2", "3"]
+        mock_mail.get_thread.assert_called_once_with("1")
+        mock_mail.search_messages.assert_not_called()
+
+    def test_thread_of_combines_with_read_status_filter(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        result = search_messages(thread_of="1", read_status=False)
+
+        assert result["success"] is True
+        assert [m["id"] for m in result["messages"]] == ["2", "3"]
+        mock_mail.get_thread.assert_called_once_with("1")
+        mock_mail.search_messages.assert_not_called()
+
+    def test_thread_of_combines_with_sender_contains_filter(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        result = search_messages(thread_of="1", sender_contains="alice")
+
+        assert [m["id"] for m in result["messages"]] == ["1", "3"]
+
+    def test_thread_of_combines_with_subject_contains_filter(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        result = search_messages(thread_of="1", subject_contains="Re:")
+
+        assert [m["id"] for m in result["messages"]] == ["2", "3"]
+
+    def test_thread_of_combines_with_is_flagged_filter(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        result = search_messages(thread_of="1", is_flagged=True)
+
+        assert [m["id"] for m in result["messages"]] == ["3"]
+
+    def test_thread_of_combines_with_date_range(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        result = search_messages(
+            thread_of="1", date_from="2026-04-02", date_to="2026-04-10"
+        )
+
+        assert [m["id"] for m in result["messages"]] == ["2"]
+
+    def test_thread_of_with_limit_truncates(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        result = search_messages(thread_of="1", limit=2)
+
+        assert result["count"] == 2
+        assert [m["id"] for m in result["messages"]] == ["1", "2"]
+
+    def test_thread_of_anchor_not_found_returns_typed_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_thread.side_effect = MailMessageNotFoundError("nope")
+
+        result = search_messages(thread_of="nope")
+
+        assert result["success"] is False
+        assert result["error_type"] == "message_not_found"
+        assert "nope" in result["error"]
+        mock_logger.log_operation.assert_not_called()
+
+    def test_thread_of_does_not_require_account(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = []
+
+        result = search_messages(thread_of="x")  # no account, no validation_error
+
+        assert result["success"] is True
+
+    def test_thread_of_logs_operation(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_thread.return_value = self._thread_fixture()
+
+        search_messages(thread_of="1", read_status=False)
+
+        mock_logger.log_operation.assert_called_once()
+        logged_op, logged_params, logged_status = (
+            mock_logger.log_operation.call_args.args
+        )
+        assert logged_op == "search_messages"
+        assert logged_status == "success"
+        assert logged_params["thread_of"] == "1"
+
 
 # ---------------------------------------------------------------------------
 # 3. get_message
@@ -1126,54 +1266,6 @@ class TestGetAttachments:
         mock_mail.get_attachments.assert_called_once_with(
             "1", account=None, mailbox=None,
         )
-
-
-# ---------------------------------------------------------------------------
-# 7b. get_thread
-# ---------------------------------------------------------------------------
-
-
-class TestGetThread:
-    def test_success_returns_thread_and_logs(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        mock_mail.get_thread.return_value = [
-            {"id": "1", "subject": "Q3", "sender": "a@b", "date_received": "Mon", "read_status": True, "flagged": False},
-            {"id": "2", "subject": "Re: Q3", "sender": "c@d", "date_received": "Tue", "read_status": False, "flagged": False},
-        ]
-
-        result = get_thread("1")
-
-        assert result["success"] is True
-        assert result["count"] == 2
-        assert len(result["thread"]) == 2
-        mock_mail.get_thread.assert_called_once_with("1")
-        mock_logger.log_operation.assert_called_once_with(
-            "get_thread", {"message_id": "1"}, "success"
-        )
-
-    def test_message_not_found_maps_to_message_not_found(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        mock_mail.get_thread.side_effect = MailMessageNotFoundError("nope")
-
-        result = get_thread("nope")
-
-        assert result["success"] is False
-        assert result["error_type"] == "message_not_found"
-        assert "nope" in result["error"]
-        mock_logger.log_operation.assert_not_called()
-
-    def test_unexpected_exception_maps_to_unknown(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        mock_mail.get_thread.side_effect = RuntimeError("boom")
-
-        result = get_thread("1")
-
-        assert result["success"] is False
-        assert result["error_type"] == "unknown"
-        assert "boom" in result["error"]
 
 
 # ---------------------------------------------------------------------------
