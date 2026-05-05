@@ -339,14 +339,20 @@ SCENARIOS = [
         "name": "List attachments on a message",
         "prompt": "What attachments are on message 12345?",
         "expected": {
-            "tools": ["get_attachments"],
+            "tools": ["get_messages"],
             "key_params": {
-                "get_attachments": {"message_id": "12345"},
+                "get_messages": {
+                    "message_ids": ["12345"],
+                    "include_attachments": True,
+                },
             },
         },
         "scoring_notes": (
-            "PASS: Calls get_attachments with message_id='12345'. "
-            "PARTIAL: Calls get_messages first and tries to inspect attachments from that. "
+            "PASS: Calls get_messages with message_ids=['12345'] and "
+            "include_attachments=True (the default — relying on the default "
+            "is also acceptable). "
+            "PARTIAL: Calls get_messages with include_attachments=False then "
+            "follows up with another call. "
             "FAIL: Calls save_attachments (wrong — user only asked to list)."
         ),
         "safety_critical": False,

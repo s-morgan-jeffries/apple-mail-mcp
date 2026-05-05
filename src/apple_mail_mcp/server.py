@@ -577,6 +577,7 @@ def _resolve_id_list_to_messages(
     account: str | None,
     mailbox: str | None,
     headers_only: bool = False,
+    include_attachments: bool = False,
 ) -> list[dict[str, Any]]:
     """Resolve a mixed list of ids and ``SELECTED`` tokens to message dicts.
 
@@ -588,7 +589,8 @@ def _resolve_id_list_to_messages(
 
     Used by both ``search_messages.source`` (metadata mode,
     ``include_content=False``) and ``get_messages.message_ids`` (bodies
-    mode, ``include_content=True``).
+    mode, ``include_content=True``). The ``include_attachments`` flag
+    threads through to both connector methods.
     """
     selected_resolved: list[dict[str, Any]] | None = None
     out: list[dict[str, Any]] = []
@@ -596,7 +598,8 @@ def _resolve_id_list_to_messages(
         if id_or_token == _SELECTED_SENTINEL:
             if selected_resolved is None:
                 selected_resolved = mail.get_selected_messages(
-                    include_content=include_content
+                    include_content=include_content,
+                    include_attachments=include_attachments,
                 )
             out.extend(selected_resolved)
         else:
@@ -607,6 +610,7 @@ def _resolve_id_list_to_messages(
                     headers_only=headers_only,
                     account=account,
                     mailbox=mailbox,
+                    include_attachments=include_attachments,
                 )
                 out.append(msg)
             except MailMessageNotFoundError:
@@ -675,6 +679,7 @@ def search_messages(
     has_attachment: bool | None = None,
     limit: int = 50,
     source: list[str] | None = None,
+    include_attachments: bool = False,
 ) -> dict[str, Any]:
     """
     Search for messages matching criteria. Returns metadata-only rows.
@@ -717,6 +722,13 @@ def search_messages(
         source: Optional list of message ids (with optional ``"SELECTED"``
             sentinel) to restrict the search to. ``None`` (default)
             searches the account/mailbox normally.
+        include_attachments: When True, each row includes an ``attachments``
+            field listing per-attachment metadata (name, mime_type, size,
+            downloaded). Default False — opt-in because the AppleScript
+            fallback path can be slow on cold caches (#142). Free on the
+            IMAP fast path. To fetch attachment metadata for a known list
+            of ids cheaply, prefer ``get_messages([ids])`` (default-on
+            attachments, bounded cardinality).
 
     Returns:
         Dictionary containing matching messages. Each message row includes
@@ -738,6 +750,7 @@ def search_messages(
                 include_content=False,
                 account=account,
                 mailbox=mailbox,
+                include_attachments=include_attachments,
             )
             filtered = _apply_search_filters(
                 resolved,
@@ -807,6 +820,7 @@ def search_messages(
             date_to=date_to,
             has_attachment=has_attachment,
             limit=limit,
+            include_attachments=include_attachments,
         )
 
         operation_logger.log_operation(
@@ -865,6 +879,7 @@ def get_messages(
     headers_only: bool = False,
     account: str | None = None,
     mailbox: str | None = None,
+    include_attachments: bool = True,
 ) -> dict[str, Any]:
     """
     Get full details of one or more messages, with bodies.
@@ -889,6 +904,11 @@ def get_messages(
             instead of an account×mailbox AppleScript scan (issue #72).
             Ignored for the ``"SELECTED"`` sentinel (selection is global).
         mailbox: Folder to look in for the IMAP fast path (e.g. "INBOX").
+        include_attachments: Include per-attachment metadata (name,
+            mime_type, size, downloaded) on each message (default: True).
+            Bounded cost — id-list cardinality is typically 1-10. Free on
+            the IMAP fast path; cheap-enough on the AppleScript fallback
+            for typical id counts.
 
     Returns:
         Dictionary containing the list of messages and count.
@@ -916,6 +936,7 @@ def get_messages(
             account=account,
             mailbox=mailbox,
             headers_only=headers_only,
+            include_attachments=include_attachments,
         )
 
         operation_logger.log_operation(
@@ -1248,88 +1269,6 @@ async def send_email_with_attachments(
         }
     except Exception as e:
         logger.error(f"Unexpected error sending email with attachments: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
-def get_attachments(
-    message_id: str,
-    account: str | None = None,
-    mailbox: str | None = None,
-) -> dict[str, Any]:
-    """
-    Get list of attachments from a message.
-
-    Args:
-        message_id: Message ID from search results.
-        account: Mail.app account name. Together with `mailbox`, activates
-            the IMAP fast path: one BODYSTRUCTURE FETCH instead of an
-            account×mailbox AppleScript scan plus per-attachment property
-            reads (issue #73). Without these, falls back to the slower
-            AppleScript scan.
-        mailbox: Folder to look in for the IMAP fast path (e.g. "INBOX").
-
-    Returns:
-        Dictionary with list of attachments.
-
-    Example:
-        >>> get_attachments("CABCD@x", account="iCloud", mailbox="INBOX")
-        {
-            "success": True,
-            "attachments": [
-                {
-                    "name": "report.pdf",
-                    "mime_type": "application/pdf",
-                    "size": 524288,
-                    "downloaded": False  # always False on IMAP path
-                }
-            ],
-            "count": 1
-        }
-
-    Note on `downloaded`:
-        On the IMAP path (account+mailbox supplied), `downloaded` is
-        always False — BODYSTRUCTURE returns metadata only and Mail.app's
-        local cache state isn't observable via IMAP. On the AppleScript
-        fallback path it reflects Mail.app's actual cache. Treat False
-        as "may need a network fetch on save".
-    """
-    try:
-        rate_err = check_rate_limit("get_attachments", {"message_id": message_id})
-        if rate_err:
-            return rate_err
-
-        logger.info(f"Getting attachments for message: {message_id}")
-
-        attachments = mail.get_attachments(
-            message_id, account=account, mailbox=mailbox,
-        )
-
-        operation_logger.log_operation(
-            "get_attachments",
-            {"message_id": message_id},
-            "success"
-        )
-
-        return {
-            "success": True,
-            "attachments": attachments,
-            "count": len(attachments),
-        }
-
-    except MailMessageNotFoundError as e:
-        logger.error(f"Message not found: {e}")
-        return {
-            "success": False,
-            "error": f"Message '{message_id}' not found",
-            "error_type": "message_not_found",
-        }
-    except Exception as e:
-        logger.error(f"Error getting attachments: {e}")
         return {
             "success": False,
             "error": str(e),

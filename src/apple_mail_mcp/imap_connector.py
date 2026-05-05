@@ -495,6 +495,7 @@ class ImapConnector:
         date_to: str | None = None,
         has_attachment: bool | None = None,
         limit: int | None = None,
+        include_attachments: bool = False,
     ) -> list[dict[str, Any]]:
         # Validate and translate filters before opening a connection so that
         # invalid input fails fast without the TCP-connect + LOGIN round trip.
@@ -518,7 +519,13 @@ class ImapConnector:
                 return []
 
             fetch_keys: list[bytes] = [b"ENVELOPE", b"FLAGS"]
-            if has_attachment is not None:
+            # BODYSTRUCTURE bundles into the same FETCH (no extra round-trip)
+            # whether we need it for has_attachment filtering or for the
+            # include_attachments output field — only fetch once.
+            need_bodystructure = (
+                has_attachment is not None or include_attachments
+            )
+            if need_bodystructure:
                 fetch_keys.append(b"BODYSTRUCTURE")
             fetched = client.fetch(uids, fetch_keys)
 
@@ -533,9 +540,14 @@ class ImapConnector:
                         continue
                     if has_attachment is False and has:
                         continue
-                results.append(
-                    _envelope_to_dict(entry[b"ENVELOPE"], tuple(entry[b"FLAGS"]))
+                row = _envelope_to_dict(
+                    entry[b"ENVELOPE"], tuple(entry[b"FLAGS"])
                 )
+                if include_attachments:
+                    row["attachments"] = _bodystructure_extract_attachments(
+                        entry.get(b"BODYSTRUCTURE")
+                    )
+                results.append(row)
             return results
 
     def get_message(
@@ -545,6 +557,7 @@ class ImapConnector:
         *,
         include_content: bool = True,
         headers_only: bool = False,
+        include_attachments: bool = False,
     ) -> dict[str, Any]:
         """Look up a single message by RFC 5322 Message-ID and return its
         envelope + flags, optionally with body content.
@@ -600,6 +613,8 @@ class ImapConnector:
             # the server for headers without paying for the body. Some
             # servers send less data this way; some don't care.
             fetch_keys.append(b"BODY[HEADER]")
+        if include_attachments:
+            fetch_keys.append(b"BODYSTRUCTURE")
 
         with self._session() as client:
             client.select_folder(mailbox, readonly=True)
@@ -622,6 +637,10 @@ class ImapConnector:
                 result["content"] = _decode(body_bytes)
             else:
                 result["content"] = ""
+            if include_attachments:
+                result["attachments"] = _bodystructure_extract_attachments(
+                    entry.get(b"BODYSTRUCTURE")
+                )
             return result
 
     def get_attachments(

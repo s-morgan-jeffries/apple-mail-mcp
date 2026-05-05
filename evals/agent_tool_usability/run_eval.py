@@ -57,7 +57,7 @@ TOOL_NAMES = [
     "list_accounts", "list_rules", "list_mailboxes", "search_messages", "get_messages",
     "get_thread",
     "send_email", "send_email_with_attachments",
-    "get_attachments", "save_attachments",
+    "save_attachments",
     "mark_as_read", "flag_message",
     "move_messages", "create_mailbox", "delete_messages",
     "reply_to_message", "forward_message",

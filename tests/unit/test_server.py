@@ -35,7 +35,6 @@ from apple_mail_mcp.server import (
     delete_template,
     flag_message,
     forward_message,
-    get_attachments,
     get_messages,
     get_template,
     get_thread,
@@ -494,6 +493,7 @@ class TestSearchMessages:
             date_to=None,
             has_attachment=None,
             limit=10,
+            include_attachments=False,
         )
         mock_logger.log_operation.assert_called_once()
         logged_op, logged_params, logged_status = mock_logger.log_operation.call_args.args
@@ -551,6 +551,7 @@ class TestSearchMessages:
             date_to="2026-04-15",
             has_attachment=True,
             limit=25,
+            include_attachments=False,
         )
         logged_params = mock_logger.log_operation.call_args.args[1]
         assert logged_params["filters"] == {
@@ -643,7 +644,8 @@ class TestSearchMessages:
         assert result["mailbox"] is None
         assert result["messages"][0]["id"] == "12345"
         mock_mail.get_selected_messages.assert_called_once_with(
-            include_content=False
+            include_content=False,
+            include_attachments=False,
         )
         mock_mail.search_messages.assert_not_called()
 
@@ -728,11 +730,12 @@ class TestSearchMessages:
         assert result["account"] is None
         assert result["mailbox"] is None
         assert [m["id"] for m in result["messages"]] == ["12345", "67890"]
-        # Per-id metadata fetch with no body.
+        # Per-id metadata fetch with no body, no attachments (search default).
         assert mock_mail.get_message.call_count == 2
         first_call = mock_mail.get_message.call_args_list[0]
         assert first_call.args[0] == "12345"
         assert first_call.kwargs.get("include_content") is False
+        assert first_call.kwargs.get("include_attachments") is False
         mock_mail.search_messages.assert_not_called()
         mock_mail.get_selected_messages.assert_not_called()
 
@@ -791,8 +794,10 @@ class TestSearchMessages:
 
         assert result["success"] is True
         assert [m["id"] for m in result["messages"]] == ["sel-1", "explicit-1"]
+        # search_messages defaults include_attachments=False on both paths.
         mock_mail.get_selected_messages.assert_called_once_with(
-            include_content=False
+            include_content=False,
+            include_attachments=False,
         )
         mock_mail.get_message.assert_called_once()
 
@@ -831,6 +836,50 @@ class TestSearchMessages:
         assert result["success"] is True
         assert [m["id"] for m in result["messages"]] == ["good-id"]
 
+    # ---- include_attachments (#133 + #142) -------------------------------
+
+    def test_include_attachments_default_is_false(
+        self, mock_mail: MagicMock
+    ) -> None:
+        """search_messages defaults include_attachments=False (unbounded
+        cardinality on AppleScript fallback). Default protects the
+        cheap-search semantic."""
+        mock_mail.search_messages.return_value = []
+
+        search_messages("Gmail")
+
+        kwargs = mock_mail.search_messages.call_args.kwargs
+        assert kwargs["include_attachments"] is False
+
+    def test_include_attachments_true_passes_through_to_connector(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.search_messages.return_value = []
+
+        search_messages("Gmail", include_attachments=True)
+
+        kwargs = mock_mail.search_messages.call_args.kwargs
+        assert kwargs["include_attachments"] is True
+
+    def test_include_attachments_with_source_list(
+        self, mock_mail: MagicMock
+    ) -> None:
+        """source=[ids] path also threads include_attachments through to
+        per-id mail.get_message calls."""
+        mock_mail.get_message.return_value = {
+            "id": "1",
+            "subject": "x",
+            "sender": "a@example.com",
+            "date_received": "2026-04-01",
+            "read_status": True,
+            "flagged": False,
+        }
+
+        search_messages(source=["1"], include_attachments=True)
+
+        first_call = mock_mail.get_message.call_args_list[0]
+        assert first_call.kwargs.get("include_attachments") is True
+
 
 # ---------------------------------------------------------------------------
 # 3. get_messages
@@ -848,13 +897,15 @@ class TestGetMessages:
         assert result["success"] is True
         assert result["count"] == 1
         assert result["messages"][0]["id"] == "1"
-        # All five params flow through per id.
+        # All six params flow through per id; include_attachments defaults
+        # True for get_messages (bounded id-list cardinality, see #133+#142).
         mock_mail.get_message.assert_called_once_with(
             "1",
             include_content=False,
             headers_only=False,
             account=None,
             mailbox=None,
+            include_attachments=True,
         )
         mock_logger.log_operation.assert_called_once()
 
@@ -912,9 +963,10 @@ class TestGetMessages:
 
         assert result["success"] is True
         assert [m["id"] for m in result["messages"]] == ["sel-1", "sel-2"]
-        # SELECTED expands via get_selected_messages — full bodies (default).
+        # SELECTED expands via get_selected_messages — full bodies + attachments default-on for get_messages.
         mock_mail.get_selected_messages.assert_called_once_with(
-            include_content=True
+            include_content=True,
+            include_attachments=True,
         )
         # No per-id get_message lookup needed for SELECTED-resolved rows.
         mock_mail.get_message.assert_not_called()
@@ -944,7 +996,8 @@ class TestGetMessages:
         assert result["success"] is True
         assert [m["id"] for m in result["messages"]] == ["sel-1", "real-1"]
         mock_mail.get_selected_messages.assert_called_once_with(
-            include_content=True
+            include_content=True,
+            include_attachments=True,
         )
         mock_mail.get_message.assert_called_once()
 
@@ -979,6 +1032,43 @@ class TestGetMessages:
             headers_only=True,
             account="iCloud",
             mailbox="INBOX",
+            include_attachments=True,
+        )
+
+    # ---- include_attachments (#133 + #142) -------------------------------
+
+    def test_include_attachments_default_is_true(
+        self, mock_mail: MagicMock
+    ) -> None:
+        """get_messages defaults include_attachments=True (bounded cardinality)."""
+        mock_mail.get_message.return_value = {"id": "1", "subject": "Hi"}
+
+        get_messages(["1"])
+
+        kwargs = mock_mail.get_message.call_args.kwargs
+        assert kwargs["include_attachments"] is True
+
+    def test_include_attachments_false_opts_out(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.get_message.return_value = {"id": "1", "subject": "Hi"}
+
+        get_messages(["1"], include_attachments=False)
+
+        kwargs = mock_mail.get_message.call_args.kwargs
+        assert kwargs["include_attachments"] is False
+
+    def test_include_attachments_threads_to_get_selected(
+        self, mock_mail: MagicMock
+    ) -> None:
+        """SELECTED sentinel path also receives include_attachments."""
+        mock_mail.get_selected_messages.return_value = []
+
+        get_messages(["SELECTED"], include_attachments=False)
+
+        mock_mail.get_selected_messages.assert_called_once_with(
+            include_content=True,
+            include_attachments=False,
         )
 
     def test_unexpected_exception_maps_to_unknown(
@@ -1283,79 +1373,6 @@ class TestSendEmailWithAttachments:
         assert result["error_type"] == "unknown"
 
 
-# ---------------------------------------------------------------------------
-# 7. get_attachments
-# ---------------------------------------------------------------------------
-
-
-class TestGetAttachments:
-    def test_success_returns_attachments_and_count(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        mock_mail.get_attachments.return_value = [
-            {"name": "a.pdf", "size": 10},
-            {"name": "b.pdf", "size": 20},
-        ]
-
-        result = get_attachments("1")
-
-        assert result["success"] is True
-        assert result["count"] == 2
-        assert len(result["attachments"]) == 2
-        mock_logger.log_operation.assert_called_once()
-
-    def test_message_not_found(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        mock_mail.get_attachments.side_effect = MailMessageNotFoundError("x")
-
-        result = get_attachments("999")
-
-        assert result["success"] is False
-        assert result["error_type"] == "message_not_found"
-        assert "999" in result["error"]
-
-    def test_unexpected_exception_maps_to_unknown(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        mock_mail.get_attachments.side_effect = RuntimeError("boom")
-
-        result = get_attachments("1")
-
-        assert result["success"] is False
-        assert result["error_type"] == "unknown"
-
-    def test_imap_hint_params_pass_through_to_connector(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        """Issue #73: account+mailbox activate the IMAP fast path; the
-        server tool must forward them unchanged so the dispatch decision
-        happens in the connector."""
-        mock_mail.get_attachments.return_value = []
-
-        result = get_attachments(
-            "abc@x", account="iCloud", mailbox="INBOX"
-        )
-
-        assert result["success"] is True
-        mock_mail.get_attachments.assert_called_once_with(
-            "abc@x",
-            account="iCloud",
-            mailbox="INBOX",
-        )
-
-    def test_default_call_passes_none_for_imap_hints(
-        self, mock_mail: MagicMock, mock_logger: MagicMock
-    ) -> None:
-        """Pre-existing positional callers continue to work; the new
-        kwargs default to None so dispatch falls to AppleScript."""
-        mock_mail.get_attachments.return_value = []
-
-        get_attachments("1")
-
-        mock_mail.get_attachments.assert_called_once_with(
-            "1", account=None, mailbox=None,
-        )
 
 
 # ---------------------------------------------------------------------------

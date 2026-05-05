@@ -939,6 +939,7 @@ class AppleMailConnector:
         date_to: str | None = None,
         has_attachment: bool | None = None,
         limit: int | None = None,
+        include_attachments: bool = False,
     ) -> list[dict[str, Any]]:
         """Run search_messages through the IMAP path.
 
@@ -968,6 +969,7 @@ class AppleMailConnector:
             date_to=date_to,
             has_attachment=has_attachment,
             limit=limit,
+            include_attachments=include_attachments,
         )
 
     def search_messages(
@@ -982,6 +984,7 @@ class AppleMailConnector:
         date_to: str | None = None,
         has_attachment: bool | None = None,
         limit: int | None = None,
+        include_attachments: bool = False,
     ) -> list[dict[str, Any]]:
         """Search for messages matching criteria.
 
@@ -990,6 +993,14 @@ class AppleMailConnector:
         in docs/research/imap-auth-options-decision.md — so a user with no
         Keychain entry, a revoked password, or a dropped network still gets
         working search via AppleScript.
+
+        When ``include_attachments=True``, every row includes an
+        ``attachments`` field with the same shape as ``mail.get_attachments``
+        rows (``name``, ``mime_type``, ``size``, ``downloaded``). On the IMAP
+        path this is essentially free (BODYSTRUCTURE bundles into the same
+        FETCH); on the AppleScript fallback, per-row attachment enumeration
+        can be expensive on cold caches — see the ``include_attachments``
+        notes in TOOLS.md and #142.
         """
         if not self._imap_breaker_open(account):
             try:
@@ -1004,6 +1015,7 @@ class AppleMailConnector:
                     date_to,
                     has_attachment,
                     limit,
+                    include_attachments,
                 )
                 self._imap_clear_breaker(account)
                 return result
@@ -1024,6 +1036,7 @@ class AppleMailConnector:
                 date_to,
                 has_attachment,
                 limit,
+                include_attachments,
             )
         finally:
             elapsed = time.perf_counter() - start
@@ -1048,6 +1061,7 @@ class AppleMailConnector:
         date_to: str | None = None,
         has_attachment: bool | None = None,
         limit: int | None = None,
+        include_attachments: bool = False,
     ) -> list[dict[str, Any]]:
         """AppleScript path for search_messages (the universal baseline).
 
@@ -1170,6 +1184,18 @@ class AppleMailConnector:
         # except for ordering (was oldest-first).
         effective_limit = str(limit) if limit else "999999999"
 
+        if include_attachments:
+            attachments_clause = '''
+                    set attList to {}
+                    repeat with att in mail attachments of msg
+                        set attRecord to {|name|:(name of att), |mime_type|:(MIME type of att), |size|:(file size of att), |downloaded|:(downloaded of att)}
+                        set end of attList to attRecord
+                    end repeat'''
+            attachments_field = ", |attachments|:attList"
+        else:
+            attachments_clause = ""
+            attachments_field = ""
+
         tell_body = f'''
         tell application "Mail"
             set accountRef to {account_clause}
@@ -1184,8 +1210,8 @@ class AppleMailConnector:
                 set msg to item i of msgs
                 set includeThis to true
                 {filter_block}
-                if includeThis then
-                    set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg)}}
+                if includeThis then{attachments_clause}
+                    set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg){attachments_field}}}
                     set end of resultData to msgRecord
                     set matchCount to matchCount + 1
                 end if
@@ -1205,6 +1231,7 @@ class AppleMailConnector:
         headers_only: bool = False,
         account: str | None = None,
         mailbox: str | None = None,
+        include_attachments: bool = False,
     ) -> dict[str, Any]:
         """
         Get full message details.
@@ -1254,6 +1281,7 @@ class AppleMailConnector:
                     message_id=message_id,
                     include_content=include_content,
                     headers_only=headers_only,
+                    include_attachments=include_attachments,
                 )
                 self._imap_clear_breaker(account)
                 return result
@@ -1261,7 +1289,9 @@ class AppleMailConnector:
                 self._log_imap_fallback(account, exc)
                 # fall through to AppleScript
 
-        return self._get_message_applescript(message_id, include_content)
+        return self._get_message_applescript(
+            message_id, include_content, include_attachments
+        )
 
     def _imap_get_message(
         self,
@@ -1271,6 +1301,7 @@ class AppleMailConnector:
         message_id: str,
         include_content: bool,
         headers_only: bool,
+        include_attachments: bool,
     ) -> dict[str, Any]:
         """Run get_message through the IMAP path. Mirrors _imap_search.
 
@@ -1285,10 +1316,14 @@ class AppleMailConnector:
             mailbox=mailbox,
             include_content=include_content,
             headers_only=headers_only,
+            include_attachments=include_attachments,
         )
 
     def _get_message_applescript(
-        self, message_id: str, include_content: bool
+        self,
+        message_id: str,
+        include_content: bool,
+        include_attachments: bool = False,
     ) -> dict[str, Any]:
         """AppleScript fallback for get_message — iterates account × mailbox.
 
@@ -1304,6 +1339,19 @@ class AppleMailConnector:
             else 'set msgContent to ""'
         )
 
+        if include_attachments:
+            attachments_clause = '''
+                        set attList to {}
+                        repeat with att in mail attachments of msg
+                            set attRecord to {|name|:(name of att), |mime_type|:(MIME type of att), |size|:(file size of att), |downloaded|:(downloaded of att)}
+                            set end of attList to attRecord
+                        end repeat
+'''
+            attachments_field = ", |attachments|:attList"
+        else:
+            attachments_clause = ""
+            attachments_field = ""
+
         tell_body = f'''
         tell application "Mail"
             set resultData to missing value
@@ -1312,8 +1360,8 @@ class AppleMailConnector:
                     try
                         set msg to first message of mb whose id is "{message_id_safe}"
                         {content_clause}
-
-                        set resultData to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent}}
+{attachments_clause}
+                        set resultData to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent{attachments_field}}}
                         exit repeat
                     end try
                 end repeat
@@ -2496,12 +2544,19 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return result
 
-    def get_selected_messages(self, include_content: bool = True) -> list[dict[str, Any]]:
+    def get_selected_messages(
+        self,
+        include_content: bool = True,
+        include_attachments: bool = False,
+    ) -> list[dict[str, Any]]:
         """
         Get messages currently selected in Apple Mail.
 
         Args:
             include_content: Include message body (default: True)
+            include_attachments: Include per-message attachment metadata
+                list (name, mime_type, size, downloaded). On AppleScript,
+                this can be expensive on cold caches — see #142.
 
         Returns:
             List of message dicts (same structure as get_message). Empty list if
@@ -2520,13 +2575,25 @@ class AppleMailConnector:
             else 'set msgContent to ""'
         )
 
+        if include_attachments:
+            attachments_clause = '''
+                set attList to {}
+                repeat with att in mail attachments of msg
+                    set attRecord to {|name|:(name of att), |mime_type|:(MIME type of att), |size|:(file size of att), |downloaded|:(downloaded of att)}
+                    set end of attList to attRecord
+                end repeat'''
+            attachments_field = ", |attachments|:attList"
+        else:
+            attachments_clause = ""
+            attachments_field = ""
+
         tell_body = f"""
         tell application "Mail"
             set resultData to {{}}
             set sel to selection
             repeat with msg in sel
-                {content_clause}
-                set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent}}
+                {content_clause}{attachments_clause}
+                set msgRecord to {{|id|:(id of msg as text), |subject|:(subject of msg), |sender|:(sender of msg), |date_received|:(date received of msg as text), |read_status|:(read status of msg), |flagged|:(flagged status of msg), |content|:msgContent{attachments_field}}}
                 set end of resultData to msgRecord
             end repeat
         end tell

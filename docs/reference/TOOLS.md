@@ -28,6 +28,7 @@ Search for messages matching specified criteria.
 | `has_attachment` | boolean | No | None | Filter messages with (true) or without (false) attachments |
 | `limit` | integer | No | 50 | Maximum number of results to return |
 | `source` | list[string] \| null | No | null | Optional list of message ids (with optional `"SELECTED"` sentinel) to scope the search to. `null` (default) searches the account/mailbox normally. |
+| `include_attachments` | boolean | No | false | When true, each row includes an `attachments` field with per-attachment metadata. Default off — opt-in because the AppleScript fallback path can be slow on cold caches (#142). Free on the IMAP fast path. |
 
 **Notes:**
 - Returns metadata-only rows (id, subject, sender, date_received, read_status, flagged). For full bodies, pipe the result ids into `get_messages([ids])`.
@@ -36,6 +37,7 @@ Search for messages matching specified criteria.
 - `source=[ids]` (folded-in `get_selected_messages` and the `thread_of` use case) scopes the search to a specific id list. Filter parameters (`sender_contains`, `read_status`, etc.) compose with `source` — the resolved messages are post-filtered. The literal token `"SELECTED"` may appear in the list and is server-resolved to Mail.app's current UI selection (zero-or-more ids); mixed lists like `["SELECTED", "12345"]` are valid. Returns `account: null` and `mailbox: null` in the response. Missing ids drop out silently (partial-results convention).
 - For thread retrieval, call `get_thread(message_id)` to expand an anchor into thread member ids; pipe those ids into `source=[ids]` for filtered metadata.
 - Omitting both `account` and `source` returns `error_type: validation_error`.
+- `include_attachments` defaults to **false** for `search_messages` (unlike `get_messages` which defaults to true). Reason: search results can span 50+ rows, and the AppleScript fallback path enumerates attachments per row — measured 1s for 50 messages but 97s for 100 cold-cache messages on a 47k-message Gmail INBOX (#142). To get attachment metadata for a small known set, prefer the two-step: `search_messages(...)` to get ids → `get_messages([those_ids])` (default-on attachments, bounded cardinality).
 
 **Returns:**
 
@@ -114,11 +116,16 @@ Retrieve full details of one or more messages, with bodies. Returns a list (alwa
 | `headers_only` | boolean | No | false | IMAP fast-path optimization for explicit ids; ignored on AppleScript fallback |
 | `account` | string | No | None | Mail.app account name. With `mailbox`, activates the IMAP fast path for explicit ids (issue #72) |
 | `mailbox` | string | No | None | Folder for the IMAP fast path (e.g. "INBOX") |
+| `include_attachments` | boolean | No | true | When true, each message gains an `attachments: [{name, mime_type, size, downloaded}]` field. Default on for `get_messages` because id-list cardinality is bounded (typically 1-10) — cost is acceptable on both paths. |
 
 **Notes:**
 - Missing ids drop out silently — the response contains whatever was found (partial-results convention).
 - The `"SELECTED"` sentinel is resolved server-side via `mail.get_selected_messages()` at call time. Empty selection expands to nothing.
 - Pair with `search_messages` (metadata-only, criteria-based) and `get_thread` (thread member ids) to fetch bodies for specific messages.
+
+**Performance note (path-dependent cost):**
+
+For accounts configured with IMAP (via `apple-mail-mcp setup-imap --account <name>`), `include_attachments` is essentially free — `BODYSTRUCTURE` bundles into the existing FETCH. For accounts without IMAP, the AppleScript fallback enumerates attachments per message — fine for small id lists (1-10) but can be slow on cold caches for larger lists. If you have a mix of IMAP-configured and non-IMAP accounts, expect variance. To opt out: pass `include_attachments=False`.
 
 **Returns:**
 
@@ -383,14 +390,6 @@ Send email with file attachments.
 - `subject`, `body`, `to`, `cc`, `bcc` (same as send_email)
 - `attachments`: array[string] - File paths to attach
 
-### get_attachments
-
-List or save attachments from a message.
-
-**Parameters:**
-- `message_id`: string - Message ID
-- `save_directory`: string (optional) - Directory to save attachments
-
 ### move_messages
 
 Move messages to a different mailbox.
@@ -592,67 +591,6 @@ send_email_with_attachments(
 - Dangerous file types blocked by default (.exe, .bat, .sh, etc.)
 - Path traversal attacks prevented
 - All file paths validated before sending
-
----
-
-### get_attachments
-
-Get list of attachments from a message.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `message_id` | string | Yes | - | Message ID to get attachments from |
-| `account` | string | No | None | Mail.app account name. Together with `mailbox`, activates the IMAP fast path (one BODYSTRUCTURE FETCH instead of an account×mailbox AppleScript scan). See [issue #73](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/73). |
-| `mailbox` | string | No | None | Folder for the IMAP fast path (e.g. `"INBOX"`). |
-
-**Returns:**
-
-```json
-{
-  "success": true,
-  "attachments": [
-    {
-      "name": "report.pdf",
-      "mime_type": "application/pdf",
-      "size": 524288,
-      "downloaded": false
-    }
-  ],
-  "count": 1
-}
-```
-
-**Examples:**
-
-```python
-# Slow path: AppleScript scans every account × every mailbox to locate
-# the message, then enumerates attachments.
-get_attachments(message_id="12345")
-
-# Fast path: one IMAP BODYSTRUCTURE round-trip. Pass the same account /
-# mailbox you used for search_messages.
-get_attachments(
-    message_id="abc@mail.example.com",
-    account="iCloud",
-    mailbox="INBOX",
-)
-```
-
-**Note on `downloaded`:**
-
-On the IMAP path, `downloaded` is always `false` — `BODYSTRUCTURE` returns metadata only and Mail.app's local cache state isn't observable from the IMAP protocol. On the AppleScript path it reflects whether Mail.app has the attachment bytes locally. Treat `false` as "may need a network fetch on save".
-
-**IMAP path also surfaces silently-dropped cases:**
-
-The AppleScript path is known to miss attachments in three scenarios (issue #73):
-
-- Forwarded `message/rfc822` parts (attached `.eml` files).
-- Multipart/related inline images (e.g. signature PNGs).
-- Some Unicode filenames return mangled or empty.
-
-The IMAP path walks the protocol-level MIME tree and surfaces all three.
 
 ---
 

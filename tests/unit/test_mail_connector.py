@@ -1230,6 +1230,7 @@ class TestAppleMailConnector:
             date_from=None,
             date_to=None,
             has_attachment=None,
+            include_attachments=False,
             limit=5,
         )
         assert result == [{"id": "1", "subject": "S"}]
@@ -1630,6 +1631,7 @@ class TestAppleMailConnector:
             "2026-04-22",
             True,
             10,
+            False,  # include_attachments
         )
 
     @patch.object(AppleMailConnector, "_search_messages_applescript")
@@ -2078,6 +2080,7 @@ class TestAppleMailConnector:
             message_id="abc@x",
             include_content=True,
             headers_only=False,
+            include_attachments=False,
         )
         as_path.assert_not_called()
 
@@ -2095,7 +2098,7 @@ class TestAppleMailConnector:
 
         assert result == {"id": "1"}
         imap_path.assert_not_called()
-        as_path.assert_called_once_with("123", True)
+        as_path.assert_called_once_with("123", True, False)
 
     def test_get_message_partial_hint_skips_imap(
         self, connector: AppleMailConnector
@@ -2234,8 +2237,8 @@ class TestAppleMailConnector:
         ) as as_path:
             connector.get_message("123", headers_only=True)
         # AppleScript path receives the original signature (message_id,
-        # include_content); headers_only is silently dropped.
-        as_path.assert_called_once_with("123", True)
+        # include_content, include_attachments); headers_only is silently dropped.
+        as_path.assert_called_once_with("123", True, False)
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_get_message_send_email_basic_pre_existing_unaffected(

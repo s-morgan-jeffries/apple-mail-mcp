@@ -29,7 +29,6 @@ EXPECTED_TOOLS = {
     "search_messages",
     "get_messages",
     "get_thread",
-    "get_attachments",
     # Send / reply / forward
     "send_email",
     "send_email_with_attachments",
@@ -178,12 +177,6 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         },
         "send_email_with_attachments",
         None,
-    ),
-    (
-        "get_attachments",
-        {"message_id": "msg-1"},
-        "get_attachments",
-        [],
     ),
     (
         "save_attachments",
