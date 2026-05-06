@@ -35,10 +35,8 @@ EXPECTED_TOOLS = {
     "reply_to_message",
     "forward_message",
     # Mutations
-    "mark_as_read",
+    "update_message",
     "save_attachments",
-    "move_messages",
-    "flag_message",
     "create_mailbox",
     "delete_messages",
     # Rule CRUD (#63)
@@ -88,7 +86,7 @@ class TestToolRegistration:
         "tool_name,expected_required",
         [
             ("send_email", {"to", "subject", "body"}),
-            ("move_messages", {"message_ids", "account", "destination_mailbox"}),
+            ("update_message", {"message_ids"}),
         ],
     )
     async def test_tool_schema_required_fields(
@@ -162,9 +160,9 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         None,
     ),
     (
-        "mark_as_read",
-        {"message_ids": ["msg-1"]},
-        "mark_as_read",
+        "update_message",
+        {"message_ids": ["msg-1"], "read_status": True},
+        "update_message",
         1,
     ),
     (
@@ -183,22 +181,6 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         {"message_id": "msg-1", "save_directory": _TMP_DIR},
         "save_attachments",
         0,
-    ),
-    (
-        "move_messages",
-        {
-            "message_ids": ["msg-1"],
-            "account": "TestAccount",
-            "destination_mailbox": "Archive",
-        },
-        "move_messages",
-        1,
-    ),
-    (
-        "flag_message",
-        {"message_ids": ["msg-1"], "flag_color": "red"},
-        "flag_message",
-        1,
     ),
     (
         "create_mailbox",

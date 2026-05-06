@@ -361,24 +361,33 @@ list_mailboxes(account="iCloud")
 
 ---
 
-### mark_as_read
+### update_message
 
-Mark one or more messages as read or unread.
+Patch one or more messages: change read state, flag color, and/or move to another mailbox in a single call. Replaces `mark_as_read`, `move_messages`, and `flag_message`.
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `message_ids` | array[string] | Yes | - | List of message IDs to update |
-| `read` | boolean | No | true | true to mark as read, false for unread |
+| `message_ids` | list[string] | Yes | - | Up to 100 message IDs to update |
+| `read_status` | boolean \| null | No | null | `True` marks read, `False` marks unread, `null` leaves unchanged |
+| `flagged` | boolean \| null | No | null | `True` flags (orange if no `flag_color` given), `False` clears, `null` leaves unchanged |
+| `flag_color` | string \| null | No | null | One of `orange`, `red`, `yellow`, `blue`, `green`, `purple`, `gray`, `none`. `"none"` clears the flag. Implies `flagged=True` for non-`none` values. |
+| `destination_mailbox` | string \| null | No | null | Target mailbox name to move to. Requires `account`. |
+| `account` | string \| null | No | null | Account name (required when `destination_mailbox` is set; also unlocks the IMAP narrow-path optimization) |
+| `source_mailbox` | string \| null | No | null | Optional narrow-path hint — if all messages live in this mailbox, the AppleScript scan is bypassed (IMAP fast path) |
+| `gmail_mode` | boolean | No | false | Use Gmail-specific copy+delete instead of move (label-based accounts) |
+
+**Patch semantics:** caller specifies only the fields they want changed. At least one field parameter must be set; otherwise returns `validation_error`.
+
+**Order of operations:** read-state and flag changes apply first (in the source mailbox), then the move. IMAP requires the message to exist in the source folder for STORE before MOVE.
 
 **Returns:**
 
 ```json
 {
   "success": true,
-  "updated": 3,
-  "requested": 3
+  "count": 3
 }
 ```
 
@@ -386,20 +395,51 @@ Mark one or more messages as read or unread.
 
 ```python
 # Mark messages as read
-mark_as_read(message_ids=["12345", "12346", "12347"])
+update_message(message_ids=["12345", "12346"], read_status=True)
 
-# Mark messages as unread
-mark_as_read(message_ids=["12345"], read=False)
+# Flag a message red
+update_message(message_ids=["12345"], flag_color="red")
+
+# Clear a flag
+update_message(message_ids=["12345"], flagged=False)
+
+# Move to Archive on a Gmail account
+update_message(
+    message_ids=["12345"],
+    destination_mailbox="Archive",
+    account="Gmail",
+    gmail_mode=True,
+)
+
+# Restore from Trash — no special verb required
+update_message(
+    message_ids=["12345"],
+    destination_mailbox="INBOX",
+    source_mailbox="Deleted Messages",
+    account="iCloud",
+)
+
+# Combined: mark read, flag green, and move — all in one AppleScript pass
+update_message(
+    message_ids=["12345"],
+    read_status=True,
+    flag_color="green",
+    destination_mailbox="Done",
+    account="Work",
+)
 ```
 
 **Validation Rules:**
 
 - Maximum 100 message IDs per request
-- At least one message ID required
+- At least one of `read_status`, `flagged`, `flag_color`, `destination_mailbox` must be set
+- `destination_mailbox` requires `account`
 
 **Error Codes:**
 
-- `validation_error`: Too many message IDs or invalid input
+- `validation_error`: Too many IDs, no fields set, or missing `account` for move
+- `account_not_found`: `account` does not match a configured Mail.app account
+- `not_found`: `destination_mailbox` not found on the account
 - `unknown`: Unexpected error occurred
 
 ---
@@ -413,23 +453,6 @@ Send email with file attachments.
 **Parameters:**
 - `subject`, `body`, `to`, `cc`, `bcc` (same as send_email)
 - `attachments`: array[string] - File paths to attach
-
-### move_messages
-
-Move messages to a different mailbox.
-
-**Parameters:**
-- `message_ids`: array[string] - Messages to move
-- `destination_mailbox`: string - Target mailbox name
-- `account`: string - Account name
-
-### flag_message
-
-Set color flag on messages.
-
-**Parameters:**
-- `message_id`: string - Message to flag
-- `color`: string - Flag color (none, orange, red, yellow, blue, green, purple, gray)
 
 ### create_mailbox
 
@@ -513,10 +536,10 @@ else:
 message_ids = [...]  # Large list
 for i in range(0, len(message_ids), 100):
     batch = message_ids[i:i+100]
-    mark_as_read(message_ids=batch)
+    update_message(message_ids=batch, read_status=True)
 
 # Bad: Single request with too many IDs
-mark_as_read(message_ids=message_ids)  # May fail if > 100
+update_message(message_ids=message_ids, read_status=True)  # May fail if > 100
 ```
 
 ### Account Names
@@ -667,116 +690,6 @@ save_attachments(
 - Path traversal attacks prevented
 - Filenames sanitized for safety
 - Existing files will be overwritten
-
----
-
-### move_messages
-
-Move messages to a different mailbox/folder.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `message_ids` | list[string] | Yes | - | List of message IDs to move |
-| `destination_mailbox` | string | Yes | - | Destination mailbox name |
-| `account` | string | Yes | - | Account name containing the messages |
-| `gmail_mode` | boolean | No | False | Use Gmail-specific handling (copy + delete) |
-
-**Returns:**
-
-```json
-{
-  "success": true,
-  "count": 3,
-  "destination": "Archive",
-  "account": "Gmail"
-}
-```
-
-**Examples:**
-
-```python
-# Move messages to Archive
-move_messages(
-    message_ids=["12345", "12346"],
-    destination_mailbox="Archive",
-    account="Gmail"
-)
-
-# Move to nested mailbox
-move_messages(
-    message_ids=["12347"],
-    destination_mailbox="Projects/Client Work",
-    account="Gmail"
-)
-
-# Use Gmail mode for label-based accounts
-move_messages(
-    message_ids=["12348"],
-    destination_mailbox="Important",
-    account="Gmail",
-    gmail_mode=True
-)
-```
-
-**Notes:**
-- For nested mailboxes, use "/" separator
-- Gmail mode uses copy + delete to properly handle labels
-- Standard IMAP accounts use direct move
-
----
-
-### flag_message
-
-Set flag color on messages.
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `message_ids` | list[string] | Yes | List of message IDs to flag |
-| `flag_color` | string | Yes | Flag color (none, orange, red, yellow, blue, green, purple, gray) |
-
-**Returns:**
-
-```json
-{
-  "success": true,
-  "count": 2,
-  "flag_color": "red"
-}
-```
-
-**Examples:**
-
-```python
-# Flag important messages as red
-flag_message(
-    message_ids=["12345", "12346"],
-    flag_color="red"
-)
-
-# Remove flag from messages
-flag_message(
-    message_ids=["12347"],
-    flag_color="none"
-)
-
-# Flag with different colors
-flag_message(message_ids=["12348"], flag_color="blue")
-flag_message(message_ids=["12349"], flag_color="green")
-```
-
-**Valid Colors:**
-- `none` - Remove flag
-- `orange` - Orange flag
-- `red` - Red flag (high priority)
-- `yellow` - Yellow flag
-- `blue` - Blue flag
-- `green` - Green flag
-- `purple` - Purple flag
-- `gray` - Gray flag
 
 ---
 
@@ -1008,7 +921,7 @@ for msg in unread["messages"]:
 
 # 3. Mark processed messages as read
 processed_ids = [msg["id"] for msg in unread["messages"]]
-mark_as_read(message_ids=processed_ids)
+update_message(message_ids=processed_ids, read_status=True)
 ```
 
 **Email Response Workflow:**

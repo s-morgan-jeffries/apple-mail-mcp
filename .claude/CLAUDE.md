@@ -23,10 +23,10 @@ make coverage              # Coverage report
 
 **Running the server:** `uv run python -m apple_mail_mcp.server` or via Claude Desktop config.
 
-## API Surface (24 MCP tools)
+## API Surface (22 MCP tools)
 
-**Core (Phase 1):** list_mailboxes, search_messages, get_messages, send_email, mark_as_read
-**Attachments & Management (Phase 2):** send_email_with_attachments, save_attachments, move_messages, flag_message, create_mailbox, delete_messages
+**Core (Phase 1):** list_mailboxes, search_messages, get_messages, send_email, update_message
+**Attachments & Management (Phase 2):** send_email_with_attachments, save_attachments, create_mailbox, delete_messages
 **Reply/Forward (Phase 3):** reply_to_message, forward_message
 **Discovery & Rules (Phase 4):** list_accounts, list_rules, get_thread, create_rule, update_rule, delete_rule
 **Templates (Phase 4 / v0.5.0):** list_templates, get_template, save_template, delete_template, render_template
@@ -44,7 +44,7 @@ make coverage              # Coverage report
 
 **JSON output from AppleScript:** Scripts emit JSON via ASObjC + `NSJSONSerialization` (wrap with `_wrap_as_json_script`, parse with `parse_applescript_json`). Always quote the `name` record key as `|name|:` — the bare form is silently dropped during NSDictionary conversion. Coerce `missing value` to safe defaults (`{}` / `0`) before serializing. See applescript-mail skill for details.
 
-**Gmail mode:** Gmail's label-based system doesn't support standard IMAP move. The `move_messages` tool has a `gmail_mode` parameter that uses copy+delete instead of move.
+**Gmail mode:** Gmail's label-based system doesn't support standard IMAP move. The `update_message` tool has a `gmail_mode` parameter that uses copy+delete instead of move.
 
 **Message ID lookup:** Finding a message by ID requires searching across all accounts and mailboxes. AppleScript `whose` clauses are used for efficiency.
 

@@ -215,10 +215,10 @@ Test operations on small batches first:
 
 ```python
 # Good: Start with 10 items
-mark_as_read(message_ids=test_batch[:10])
+update_message(message_ids=test_batch[:10], read_status=True)
 
 # Then scale up
-mark_as_read(message_ids=all_message_ids)
+update_message(message_ids=all_message_ids, read_status=True)
 ```
 
 #### 3. Check Operation Logs

@@ -2347,6 +2347,148 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
 
+    def update_message(
+        self,
+        message_ids: list[str],
+        *,
+        read_status: bool | None = None,
+        flagged: bool | None = None,
+        flag_color: str | None = None,
+        destination_mailbox: str | None = None,
+        account: str | None = None,
+        source_mailbox: str | None = None,
+        gmail_mode: bool = False,
+    ) -> int:
+        """
+        Patch one or more messages in a single AppleScript pass.
+
+        Consolidates ``mark_as_read`` + ``flag_message`` + ``move_messages``
+        (#135). Caller sets only the fields they want changed; tool applies
+        all of them in a single AppleScript pass via ``_bulk_repeat_block``.
+
+        Order of operations: read-state and flag changes are applied first
+        (in the source mailbox), then the move. IMAP requires the message
+        to exist in the source folder for STORE before MOVE.
+
+        Args:
+            message_ids: List of message ids to update.
+            read_status: When set, mark as read (True) / unread (False).
+            flagged: When set, set flag presence. ``True`` without
+                ``flag_color`` defaults to orange. ``False`` clears the
+                flag.
+            flag_color: Color name (orange, red, yellow, blue, green,
+                purple, gray, none). Implies ``flagged=True`` unless
+                "none". Validated.
+            destination_mailbox: When set, move messages to this mailbox.
+                Requires ``account`` (the destination's account).
+            account: Account hosting destination (required when
+                ``destination_mailbox`` is set). Also used with
+                ``source_mailbox`` for narrow-path optimization.
+            source_mailbox: Optional source mailbox. With ``account``,
+                narrows the AppleScript scan to one mailbox.
+            gmail_mode: Use Gmail-specific copy+delete for the move.
+
+        Returns:
+            Number of messages updated.
+
+        Raises:
+            ValueError: If no fields set; if exactly one of
+                account/source_mailbox is given without a destination
+                requirement; if flag_color invalid; if account is missing
+                when destination_mailbox is set.
+            MailAccountNotFoundError: account doesn't exist.
+            MailMailboxNotFoundError: destination mailbox doesn't exist.
+        """
+        if not message_ids:
+            return 0
+
+        # At least one mutation field must be set (server tier also
+        # validates; defense-in-depth here).
+        if (
+            read_status is None
+            and flagged is None
+            and flag_color is None
+            and destination_mailbox is None
+        ):
+            raise ValueError("update_message: specify at least one field to update")
+
+        if destination_mailbox is not None and account is None:
+            raise ValueError(
+                "update_message: account is required when "
+                "destination_mailbox is set"
+            )
+
+        from .utils import get_flag_index, validate_flag_color
+
+        actions: list[str] = []
+
+        if read_status is not None:
+            target = "true" if read_status else "false"
+            actions.append(f"set read status of msg to {target}")
+
+        # Flag handling — order matters: explicit flag_color wins over
+        # bare flagged=True; flagged=False clears regardless of color.
+        if flagged is False:
+            actions.append("set flag index of msg to -1")
+            actions.append("set flagged status of msg to false")
+        elif flag_color is not None:
+            if not validate_flag_color(flag_color):
+                raise ValueError(f"Invalid flag color: {flag_color}")
+            flag_index = get_flag_index(flag_color)
+            actions.append(f"set flag index of msg to {flag_index}")
+            flagged_status = "true" if flag_color != "none" else "false"
+            actions.append(f"set flagged status of msg to {flagged_status}")
+        elif flagged is True:
+            # No color → default orange (matches existing flag_message default).
+            actions.append(f"set flag index of msg to {get_flag_index('orange')}")
+            actions.append("set flagged status of msg to true")
+
+        # Move (always last — IMAP STORE requires source folder).
+        if destination_mailbox is not None:
+            if gmail_mode:
+                actions.append("duplicate msg to destMailbox")
+                actions.append("delete msg")
+            else:
+                actions.append("set mailbox of msg to destMailbox")
+
+        repeat_block = _bulk_repeat_block(
+            account=account if source_mailbox is not None else None,
+            source_mailbox=source_mailbox,
+            actions=actions,
+            counter_var="updateCount",
+        )
+
+        id_list = ", ".join(
+            f'"{escape_applescript_string(sanitize_input(mid))}"'
+            for mid in message_ids
+        )
+
+        # Set up destMailbox at script level when moving; the actions list
+        # references it inside the loop.
+        dest_setup = ""
+        if destination_mailbox is not None:
+            account_clause = applescript_account_clause(cast(str, account))
+            mb_safe = escape_applescript_string(sanitize_input(destination_mailbox))
+            dest_setup = (
+                f'set accountRef to {account_clause}\n'
+                f'            set destMailbox to mailbox "{mb_safe}" of accountRef'
+            )
+
+        script = f"""
+        tell application "Mail"
+            {dest_setup}
+            set idList to {{{id_list}}}
+            set updateCount to 0
+
+{repeat_block}
+
+            return updateCount
+        end tell
+        """
+
+        result = self._run_applescript(script)
+        return int(result) if result.isdigit() else 0
+
     def create_mailbox(
         self,
         account: str,

@@ -1138,40 +1138,95 @@ async def send_email(
 
 
 @mcp.tool()
-def mark_as_read(
+def update_message(
     message_ids: list[str],
-    read: bool = True,
+    read_status: bool | None = None,
+    flagged: bool | None = None,
+    flag_color: str | None = None,
+    destination_mailbox: str | None = None,
     account: str | None = None,
     source_mailbox: str | None = None,
+    gmail_mode: bool = False,
 ) -> dict[str, Any]:
     """
-    Mark messages as read or unread.
+    Update one or more messages: change read state, flag, and/or move,
+    in one atomic call (#135).
+
+    Patch semantics — caller specifies only the fields to change. All
+    specified mutations apply in a single AppleScript pass via the
+    bulk-update helper. Replaces the previous `mark_as_read`,
+    `move_messages`, and `flag_message` tools.
+
+    Order of operations (matters for IMAP): read-state and flag changes
+    apply first (in source mailbox), then the move. IMAP requires the
+    message to exist in the source folder for STORE before MOVE.
 
     Args:
-        message_ids: List of message IDs to update
-        read: True to mark as read, False to mark as unread (default: true)
-        account: Optional account name (or UUID) the messages live in.
-            Must be provided together with `source_mailbox`. When both
-            are given, the operation is much faster — single mailbox
-            scan instead of cross-account search.
-        source_mailbox: Optional source mailbox name (e.g. "INBOX").
-            See `account`.
+        message_ids: List of message IDs to update.
+        read_status: True to mark as read, False to mark as unread,
+            None to leave unchanged.
+        flagged: True to flag (default orange if no `flag_color` set),
+            False to clear the flag, None to leave unchanged.
+        flag_color: Color name (orange, red, yellow, blue, green,
+            purple, gray, none). Implies `flagged=True` unless "none".
+            Validated against the existing flag-color schema.
+        destination_mailbox: Move messages here (requires `account`).
+        account: Account name or UUID hosting the destination mailbox.
+            Required when `destination_mailbox` is set; also used with
+            `source_mailbox` for narrow-path optimization.
+        source_mailbox: Source mailbox name. With `account`, narrows the
+            AppleScript scan to one mailbox (O(N) instead of cross-scan).
+        gmail_mode: Use Gmail-specific copy+delete instead of MOVE.
 
     Returns:
-        Dictionary indicating success and number of messages updated
+        Dictionary with `updated` (int count) and `requested` (input count).
 
     Example:
-        >>> mark_as_read(["12345", "12346"], read=True)
-        {"success": True, "updated": 2}
-        >>> mark_as_read(["12345"], account="Gmail", source_mailbox="INBOX")
-        {"success": True, "updated": 1}
+        >>> # Mark read + move to Archive in one call:
+        >>> update_message(
+        ...     ["12345"], read_status=True,
+        ...     destination_mailbox="Archive", account="iCloud",
+        ...     source_mailbox="INBOX",
+        ... )
+        {"success": True, "updated": 1, "requested": 1}
+
+        >>> # Restore from Trash:
+        >>> update_message(
+        ...     ["12345"], destination_mailbox="INBOX",
+        ...     account="iCloud", source_mailbox="Deleted Messages",
+        ... )
+
+        >>> # Set red flag:
+        >>> update_message(["12345"], flag_color="red")
     """
     try:
-        rate_err = check_rate_limit("mark_as_read", {"count": len(message_ids)})
+        # Validate at least one field is set (AC #3 from #135).
+        if (
+            read_status is None
+            and flagged is None
+            and flag_color is None
+            and destination_mailbox is None
+        ):
+            return {
+                "success": False,
+                "error": "specify at least one field to update",
+                "error_type": "validation_error",
+            }
+
+        # Test-mode safety: when account is provided (moves, or narrow-path),
+        # gate against MAIL_TEST_ACCOUNT.
+        if account is not None:
+            safety_err = check_test_mode_safety(
+                "update_message", account=account
+            )
+            if safety_err:
+                return safety_err
+
+        rate_err = check_rate_limit("update_message", {"count": len(message_ids)})
         if rate_err:
             return rate_err
 
-        # Validate bulk operation
+        # Validate bulk size
         is_valid, error_msg = validate_bulk_operation(len(message_ids), max_items=100)
         if not is_valid:
             logger.error(f"Validation failed: {error_msg}")
@@ -1181,19 +1236,33 @@ def mark_as_read(
                 "error_type": "validation_error",
             }
 
-        logger.info(f"Marking {len(message_ids)} messages as {'read' if read else 'unread'}")
+        logger.info(
+            f"Updating {len(message_ids)} messages "
+            f"(read={read_status}, flagged={flagged}, color={flag_color}, "
+            f"dest={destination_mailbox})"
+        )
 
-        count = mail.mark_as_read(
+        count = mail.update_message(
             message_ids,
-            read=read,
+            read_status=read_status,
+            flagged=flagged,
+            flag_color=flag_color,
+            destination_mailbox=destination_mailbox,
             account=account,
             source_mailbox=source_mailbox,
+            gmail_mode=gmail_mode,
         )
 
         operation_logger.log_operation(
-            "mark_as_read",
-            {"count": len(message_ids), "read": read},
-            "success"
+            "update_message",
+            {
+                "count": len(message_ids),
+                "read_status": read_status,
+                "flagged": flagged,
+                "flag_color": flag_color,
+                "destination_mailbox": destination_mailbox,
+            },
+            "success",
         )
 
         return {
@@ -1202,8 +1271,29 @@ def mark_as_read(
             "requested": len(message_ids),
         }
 
+    except MailAccountNotFoundError as e:
+        logger.error(f"Account not found: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "account_not_found",
+        }
+    except MailMailboxNotFoundError as e:
+        logger.error(f"Mailbox not found: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "not_found",
+        }
+    except ValueError as e:
+        logger.error(f"Validation error in update_message: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "validation_error",
+        }
     except Exception as e:
-        logger.error(f"Error marking messages: {e}")
+        logger.error(f"Error updating messages: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -1513,179 +1603,6 @@ def save_attachments(
         }
     except Exception as e:
         logger.error(f"Error saving attachments: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
-def move_messages(
-    message_ids: list[str],
-    destination_mailbox: str,
-    account: str,
-    gmail_mode: bool = False,
-    source_mailbox: str | None = None,
-) -> dict[str, Any]:
-    """
-    Move messages to a different mailbox/folder.
-
-    Args:
-        message_ids: List of message IDs to move
-        destination_mailbox: Name of destination mailbox (use "/" for nested: "Projects/Client Work")
-        account: Mail.app account display name (e.g., "Gmail", "iCloud") or
-            UUID (from list_accounts) containing the messages. Names are
-            convenient but unstable across renames; UUIDs are stable.
-        gmail_mode: Use Gmail-specific move handling (copy + delete) for label-based systems
-        source_mailbox: Optional source mailbox name. When provided, the
-            operation is much faster — single mailbox scan instead of
-            cross-account search. Source is assumed to be in the same
-            `account` as the destination.
-
-    Returns:
-        Dictionary with success status and number of messages moved
-
-    Example:
-        move_messages(
-            message_ids=["12345", "12346"],
-            destination_mailbox="Archive",
-            account="Gmail",
-            source_mailbox="INBOX",
-        )
-    """
-    try:
-        safety_err = check_test_mode_safety("move_messages", account=account)
-        if safety_err:
-            return safety_err
-
-        if not message_ids:
-            return {
-                "success": True,
-                "count": 0,
-                "message": "No messages to move",
-            }
-
-        rate_err = check_rate_limit("move_messages", {"count": len(message_ids)})
-        if rate_err:
-            return rate_err
-
-        logger.info(
-            f"Moving {len(message_ids)} message(s) to {destination_mailbox} in account {account}"
-        )
-
-        # Move the messages
-        count = mail.move_messages(
-            message_ids=message_ids,
-            destination_mailbox=destination_mailbox,
-            account=account,
-            gmail_mode=gmail_mode,
-            source_mailbox=source_mailbox,
-        )
-
-        return {
-            "success": True,
-            "count": count,
-            "destination": destination_mailbox,
-            "account": account,
-        }
-
-    except MailMailboxNotFoundError as e:
-        logger.error(f"Mailbox not found: {e}")
-        return {
-            "success": False,
-            "error": f"Mailbox '{destination_mailbox}' not found in account '{account}'",
-            "error_type": "mailbox_not_found",
-        }
-    except MailAccountNotFoundError as e:
-        logger.error(f"Account not found: {e}")
-        return {
-            "success": False,
-            "error": f"Account '{account}' not found",
-            "error_type": "account_not_found",
-        }
-    except Exception as e:
-        logger.error(f"Error moving messages: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
-def flag_message(
-    message_ids: list[str],
-    flag_color: str,
-    account: str | None = None,
-    source_mailbox: str | None = None,
-) -> dict[str, Any]:
-    """
-    Set flag color on messages.
-
-    Args:
-        message_ids: List of message IDs to flag
-        flag_color: Flag color name (none, orange, red, yellow, blue, green, purple, gray)
-        account: Optional account name (or UUID) the messages live in.
-            Must be provided together with `source_mailbox`. When both
-            are given, the operation is much faster.
-        source_mailbox: Optional source mailbox name; see `account`.
-
-    Returns:
-        Dictionary with success status and number of messages flagged
-
-    Example:
-        flag_message(
-            message_ids=["12345"],
-            flag_color="red",
-            account="Gmail",
-            source_mailbox="INBOX",
-        )
-    """
-    try:
-        if not message_ids:
-            return {
-                "success": True,
-                "count": 0,
-                "message": "No messages to flag",
-            }
-
-        rate_err = check_rate_limit("flag_message", {"count": len(message_ids)})
-        if rate_err:
-            return rate_err
-
-        logger.info(f"Flagging {len(message_ids)} message(s) with color {flag_color}")
-
-        # Flag the messages
-        count = mail.flag_message(
-            message_ids=message_ids,
-            flag_color=flag_color,
-            account=account,
-            source_mailbox=source_mailbox,
-        )
-
-        return {
-            "success": True,
-            "count": count,
-            "flag_color": flag_color,
-        }
-
-    except ValueError as e:
-        logger.error(f"Invalid flag color: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "validation_error",
-        }
-    except MailMessageNotFoundError as e:
-        logger.error(f"Message not found: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "message_not_found",
-        }
-    except Exception as e:
-        logger.error(f"Error flagging messages: {e}")
         return {
             "success": False,
             "error": str(e),

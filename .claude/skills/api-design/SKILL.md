@@ -35,9 +35,10 @@ mark_as_flagged(message_id)
 mark_as_unflagged(message_id)
 mark_as_junk(message_id)
 
-# RIGHT - one tool with parameters
-flag_message(message_ids, flag_color)
-# or extend update capabilities into a general update_message() tool
+# RIGHT - one CRUD-style update tool with patch semantics
+update_message(message_ids, read_status=True)
+update_message(message_ids, flag_color="red")
+update_message(message_ids, destination_mailbox="Archive", account="Gmail")
 ```
 
 ### Specialized Search Tools
@@ -73,9 +74,9 @@ def list_mailboxes():
 
 ## Tool Naming Convention
 
-- Verb + noun: `search_messages`, `get_message`, `send_email`
-- Plural when accepting lists: `delete_messages`, `mark_as_read`
-- Specific verb over generic: `flag_message` not `update_message_flag`
+- Verb + noun: `search_messages`, `send_email`, `delete_messages`
+- Plural when accepting lists: `delete_messages`, `get_messages`
+- CRUD-style for multi-field mutation: `update_message(read_status, flag_color, destination_mailbox, ...)` over per-field verbs (`mark_as_read`, `flag_message`, `move_messages`). Patch semantics — unset fields are unchanged.
 
 ## Adding a New Tool Checklist
 

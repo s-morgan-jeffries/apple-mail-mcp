@@ -23,7 +23,7 @@ if accEmails is missing value then set accEmails to {}
 
 ## Gmail Label-Based System
 
-Gmail doesn't support standard IMAP move operations. The `move_messages` tool has a `gmail_mode` parameter:
+Gmail doesn't support standard IMAP move operations. The `update_message` tool has a `gmail_mode` parameter (when used with `destination_mailbox`):
 
 ```python
 # Standard IMAP (Exchange, iCloud, etc.)

@@ -10,7 +10,7 @@ MAILBOXES: No external mailbox cache — call list_mailboxes per account to disc
 
 MESSAGE IDS: Message IDs are per-account. Cross-mailbox and cross-account lookup is expensive. Always pass the `account` (and, when known, the `mailbox`) to search_messages and prefer narrow queries.
 
-GMAIL: Gmail uses labels, not IMAP folders. The move_messages tool has `gmail_mode=true` to use copy+delete for Gmail accounts.
+GMAIL: Gmail uses labels, not IMAP folders. The update_message tool has `gmail_mode=true` to use copy+delete for Gmail accounts.
 
 DESTRUCTIVE OPERATIONS: delete_messages, send_email, send_email_with_attachments, forward_message, and reply_to_message prompt for user confirmation via MCP elicitation. Plan them decisively — do not hedge or ask the user to confirm again in your response.
 
@@ -38,16 +38,6 @@ Delete messages (move to trash or permanently delete). Bulk deletions are limite
 **Parameters:**
 - `message_ids` (list[str], required): List of message IDs to delete.
 - `permanent` (bool, optional, default: False): If True, permanently delete; if False, move to Trash.
-
----
-
-### flag_message
-
-Set flag color on messages.
-
-**Parameters:**
-- `message_ids` (list[str], required): List of message IDs to flag.
-- `flag_color` (str, required): Flag color name (none, orange, red, yellow, blue, green, purple, gray).
 
 ---
 
@@ -117,28 +107,6 @@ List all Mail.app rules (read-only). Returns each rule's name and enabled state.
 
 ---
 
-### mark_as_read
-
-Mark messages as read or unread.
-
-**Parameters:**
-- `message_ids` (list[str], required): List of message IDs to update.
-- `read` (bool, optional, default: True): True to mark as read, False to mark as unread.
-
----
-
-### move_messages
-
-Move messages to a different mailbox/folder. For Gmail accounts (label-based, no native IMAP move), pass `gmail_mode=true` to use a copy+delete strategy.
-
-**Parameters:**
-- `message_ids` (list[str], required): List of message IDs to move.
-- `destination_mailbox` (str, required): Name of destination mailbox (use "/" for nested: "Projects/Client Work").
-- `account` (str, required): Account name containing the messages.
-- `gmail_mode` (bool, optional, default: False): Use Gmail-specific move handling (copy + delete) for label-based systems.
-
----
-
 ### reply_to_message
 
 Reply to a message. Requires user confirmation via MCP elicitation before sending.
@@ -203,3 +171,19 @@ Send an email with file attachments via Apple Mail. Requires user confirmation v
 - `attachments` (list[str], required): List of file paths to attach.
 - `cc` (list[str], optional): List of CC recipients.
 - `bcc` (list[str], optional): List of BCC recipients.
+
+---
+
+### update_message
+
+Patch one or more messages in a single call: change read state, flag color, and/or move to another mailbox. Replaces `mark_as_read`, `move_messages`, and `flag_message`. Patch semantics — caller specifies only the fields to change; at least one field parameter must be set. For Gmail accounts (label-based, no native IMAP move), pass `gmail_mode=true` to use a copy+delete strategy. Order of operations: read/flag changes apply first (in source mailbox), then move.
+
+**Parameters:**
+- `message_ids` (list[str], required): List of message IDs to update.
+- `read_status` (bool, optional): True marks read, False marks unread, omitted leaves unchanged.
+- `flagged` (bool, optional): True flags (default orange), False clears the flag, omitted leaves unchanged.
+- `flag_color` (str, optional): One of `orange`, `red`, `yellow`, `blue`, `green`, `purple`, `gray`, `none`. `"none"` clears.
+- `destination_mailbox` (str, optional): Target mailbox (requires `account`). Use "/" for nested.
+- `account` (str, optional): Account name (required when `destination_mailbox` is set).
+- `source_mailbox` (str, optional): Narrow-path hint — bypasses the AppleScript scan if all messages live in this mailbox.
+- `gmail_mode` (bool, optional, default: False): Use Gmail-specific copy+delete instead of move.

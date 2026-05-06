@@ -58,8 +58,7 @@ TOOL_NAMES = [
     "get_thread",
     "send_email", "send_email_with_attachments",
     "save_attachments",
-    "mark_as_read", "flag_message",
-    "move_messages", "create_mailbox", "delete_messages",
+    "update_message", "create_mailbox", "delete_messages",
     "reply_to_message", "forward_message",
 ]
 

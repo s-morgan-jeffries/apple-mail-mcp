@@ -17,8 +17,8 @@ description: Use when optimizing Apple Mail MCP operations, diagnosing slow quer
 | `search_messages` (typical INBOX) | ~1-5s | Depends on mailbox size and filter count |
 | `get_message` (single) | <1s | Direct ID lookup |
 | `send_email` | ~1-2s | Includes Mail.app compose + send |
-| `mark_as_read` (bulk) | ~1-2s | Single script for N messages |
-| `move_messages` | ~1-3s | Varies by account type (Gmail slower) |
+| `update_message` (bulk read/flag) | ~1-2s | Single script for N messages via `_bulk_repeat_block` |
+| `update_message` (move) | ~1-3s | Varies by account type (Gmail slower) |
 | `save_attachments` | ~2-5s | Depends on attachment count/size |
 
 ## Pattern 1: Use `whose` Clauses for Server-Side Filtering

@@ -38,10 +38,8 @@ EXPECTED_TOOLS = {
     "reply_to_message",
     "forward_message",
     # Mutations
-    "mark_as_read",
+    "update_message",
     "save_attachments",
-    "move_messages",
-    "flag_message",
     "create_mailbox",
     "delete_messages",
     # Rule CRUD (#63)
@@ -75,7 +73,7 @@ async def _list_tools_over_stdio() -> set[str]:
 
 
 async def test_stdio_subprocess_lists_all_tools() -> None:
-    """The real stdio handshake surfaces all 14 tools a client would see.
+    """The real stdio handshake surfaces all tools a client would see.
 
     If this fails where test_mcp_tools.py passes, the bug is in the transport
     layer: banner output contaminating stdout, stream closure, JSON-RPC framing,
