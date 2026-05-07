@@ -1,17 +1,20 @@
 """Persistent state for drafts created by ``create_draft``.
 
-Stores forward-seed metadata so ``update_draft`` can rebuild a forwarded
-draft. Mail.app's ``forward`` AppleScript command does not set any
-header that would let us recover the original message ID later
-(unlike ``reply``, which populates ``In-Reply-To``), so the seed has
-to be persisted by the caller path.
-
-Reply seeds don't need persistence — ``In-Reply-To`` carries the
-original Message-ID through Mail's ``reply`` command. Fresh drafts
-have no seed at all.
+Stores seed metadata so ``update_draft`` can rebuild a draft via the
+correct AppleScript primitive. Mail.app forbids mutating saved drafts,
+so update is implemented as delete + recreate; for reply / forward
+seeds we need to know the original message to re-invoke ``reply`` /
+``forward``. Looking the seed up via ``whose message id is`` against
+Mail.app on demand takes 30+ seconds on large mailboxes, so we
+persist seed metadata at create time instead.
 
 File layout: one JSON file per draft at ``<root>/<draft_id>.json``,
-with the shape ``{"forward_of": "<mail-app-internal-message-id>"}``.
+shape::
+
+    {"seed_kind": "reply",   "seed_id": "160989", "reply_all": false}
+    {"seed_kind": "forward", "seed_id": "160989"}
+
+Fresh drafts (no seed) get no file.
 
 ``draft_id`` is regex-validated before any path is constructed so
 user-controlled input cannot escape the drafts directory.
@@ -22,15 +25,28 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .exceptions import MailDraftInvalidIdError
 
 # Mail.app internal message ids are numeric strings in practice
-# (e.g. "160991"), but allow alphanumerics + - _ for safety. The 128
+# (e.g. "160991"). Allow alphanumerics + - _ for safety. The 128
 # char cap is generous for any conceivable id format.
 _DRAFT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 _EXT = ".json"
+
+SeedKind = Literal["reply", "forward"]
+
+
+@dataclass(frozen=True)
+class SeedRecord:
+    """Persisted seed metadata for a draft created by ``create_draft``."""
+
+    seed_kind: SeedKind
+    seed_id: str
+    reply_all: bool = False
 
 
 def _validate_draft_id(draft_id: str) -> None:
@@ -52,7 +68,7 @@ def default_root() -> Path:
 
 
 class DraftStateStore:
-    """File-backed store for forward-seed metadata."""
+    """File-backed store for draft seed metadata."""
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else default_root()
@@ -61,12 +77,13 @@ class DraftStateStore:
         _validate_draft_id(draft_id)
         return self.root / f"{draft_id}{_EXT}"
 
-    def get_forward_of(self, draft_id: str) -> str | None:
-        """Return the forward-seed message id for ``draft_id``, or None.
+    def get_seed(self, draft_id: str) -> SeedRecord | None:
+        """Return the seed record for ``draft_id``, or None.
 
-        Corrupt or unreadable state files are treated as "no state" rather
-        than raised — they would just block update_draft for a draft we
-        can't recover anyway, and the user can still delete + re-create.
+        Corrupt or unreadable state files are treated as "no state"
+        rather than raised — they would just block update_draft for a
+        draft we can't recover anyway, and the user can still
+        delete + re-create.
         """
         path = self._path_for(draft_id)
         if not path.is_file():
@@ -75,17 +92,26 @@ class DraftStateStore:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
-        forward_of = data.get("forward_of")
-        return forward_of if isinstance(forward_of, str) else None
+        kind = data.get("seed_kind")
+        seed_id = data.get("seed_id")
+        if kind not in ("reply", "forward"):
+            return None
+        if not isinstance(seed_id, str) or not seed_id:
+            return None
+        reply_all = bool(data.get("reply_all", False))
+        return SeedRecord(seed_kind=kind, seed_id=seed_id, reply_all=reply_all)
 
-    def set_forward_of(self, draft_id: str, forward_of: str) -> None:
-        """Persist the forward-seed message id for ``draft_id``."""
+    def set_seed(self, draft_id: str, seed: SeedRecord) -> None:
+        """Persist the seed record for ``draft_id``."""
         path = self._path_for(draft_id)
         self.root.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"forward_of": forward_of}),
-            encoding="utf-8",
-        )
+        payload: dict[str, object] = {
+            "seed_kind": seed.seed_kind,
+            "seed_id": seed.seed_id,
+        }
+        if seed.seed_kind == "reply":
+            payload["reply_all"] = seed.reply_all
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
     def delete(self, draft_id: str) -> None:
         """Remove the state file for ``draft_id``. Idempotent."""
