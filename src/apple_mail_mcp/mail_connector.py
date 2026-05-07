@@ -3112,3 +3112,267 @@ class AppleMailConnector:
         # Drop the internal flag from the user-visible payload.
         data.pop("found", None)
         return cast(dict[str, Any], data)
+
+    def create_draft(
+        self,
+        *,
+        seed: str = "new",
+        seed_id: str | None = None,
+        to: list[str] | None = None,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        subject: str | None = None,
+        body: str = "",
+        attachment_paths: list[Path] | None = None,
+        reply_all: bool = False,
+        from_account: str | None = None,
+        send_now: bool = False,
+    ) -> dict[str, str]:
+        """Create a draft (fresh, reply, or forward). Optionally send.
+
+        Args:
+            seed: ``"new"``, ``"reply"``, or ``"forward"``.
+            seed_id: Mail's internal id of the message to reply/forward.
+                Required when ``seed != "new"``.
+            to/cc/bcc: Recipient lists. For reply/forward, ``None`` keeps
+                Mail's auto-derived recipients; an empty list explicitly
+                clears that group; a populated list replaces.
+            subject: Subject. For ``seed="new"`` this is required by the
+                caller. For reply/forward, ``None`` keeps Mail's
+                auto-derived ``Re:``/``Fwd:`` prefix; non-None overrides.
+            body: Body text. For reply/forward, prepended above the
+                auto-quoted original (``body + "\\n\\n" + auto-content``).
+            attachment_paths: List of file paths. Each must exist.
+            reply_all: For ``seed="reply"`` only — use ``reply to all``.
+            from_account: Mail.app account name or UUID; ``None`` uses
+                Mail's default sender for the seed message.
+            send_now: ``False`` saves as draft and returns
+                ``{"draft_id": ...}``. ``True`` sends and returns
+                ``{"draft_id": "", "sent_message_id": ""}`` (sent_message_id
+                is empty on this version — recovering the just-sent message
+                across IMAP sync is unreliable).
+
+        Returns:
+            ``{"draft_id": <persisted-id>, "sent_message_id": <id-or-empty>}``.
+
+        Raises:
+            ValueError: invalid seed or missing required fields.
+            MailAccountNotFoundError: ``from_account`` doesn't match.
+            MailMessageNotFoundError: ``seed_id`` not found in any mailbox.
+            MailAppleScriptError: AppleScript failure.
+        """
+        if seed not in ("new", "reply", "forward"):
+            raise ValueError(f"seed must be 'new', 'reply', or 'forward'; got {seed!r}")
+        if seed in ("reply", "forward"):
+            if not seed_id:
+                raise ValueError(f"seed_id is required for seed={seed!r}")
+        else:  # seed == "new"
+            if not to:
+                raise ValueError("'to' is required when seed='new'")
+            if not subject:
+                raise ValueError("'subject' is required when seed='new'")
+
+        # Escape user inputs.
+        body_safe = escape_applescript_string(sanitize_input(body))
+        subject_safe = (
+            escape_applescript_string(sanitize_input(subject))
+            if subject is not None
+            else None
+        )
+        seed_id_safe = (
+            escape_applescript_string(sanitize_input(seed_id))
+            if seed_id is not None
+            else None
+        )
+
+        # Sender clause.
+        sender_clause = ""
+        if from_account is not None:
+            sender_email = self._resolve_account_to_sender(from_account)
+            sender_safe = escape_applescript_string(sender_email)
+            sender_clause = f'set sender of theMessage to "{sender_safe}"'
+
+        # Recipient blocks: AppleScript fragments that, when included,
+        # clear and re-populate that recipient group on `theMessage`.
+        def _recipient_block(kind: str, addrs: list[str] | None) -> str:
+            if addrs is None:
+                return ""  # keep auto-derived
+            list_str = ", ".join(
+                f'"{escape_applescript_string(a)}"' for a in addrs
+            )
+            return f"""
+                delete (every {kind} recipient of theMessage)
+                repeat with addr in {{{list_str}}}
+                    make new {kind} recipient at end of {kind} recipients of theMessage with properties {{address:addr}}
+                end repeat
+            """
+
+        to_block = _recipient_block("to", to)
+        cc_block = _recipient_block("cc", cc)
+        bcc_block = _recipient_block("bcc", bcc)
+
+        # Attachment block.
+        attachment_block = ""
+        if attachment_paths:
+            for p in attachment_paths:
+                pp = Path(p)
+                if not pp.is_file():
+                    raise FileNotFoundError(f"attachment not found: {pp}")
+            paths_safe = ", ".join(
+                f'"{escape_applescript_string(str(Path(p).resolve()))}"'
+                for p in attachment_paths
+            )
+            attachment_block = f"""
+                repeat with apath in {{{paths_safe}}}
+                    tell theMessage to make new attachment with properties {{file name:(POSIX file apath)}} at after last paragraph
+                end repeat
+            """
+
+        # Subject override (reply/forward only — for new, subject is set
+        # via `make new outgoing message ... properties`).
+        subject_override = ""
+        if seed != "new" and subject is not None:
+            subject_override = f'set subject of theMessage to "{subject_safe}"'
+
+        # Body handling differs by seed:
+        #
+        # - new: body baked into `make new outgoing message` properties.
+        # - reply/forward: Mail.app's auto-quoted content is NOT readable
+        #   from `content of d` until AFTER save (where the draft becomes
+        #   immutable), so true prepending is impossible. Tradeoff:
+        #     * non-empty body  -> override Mail's auto-content with user
+        #       body (matches existing reply_to_message behavior; loses
+        #       inline quote but preserves threading headers).
+        #     * empty body      -> leave Mail's auto-content alone (the
+        #       quoted-reply default the user gets in Mail.app).
+        if seed == "new":
+            body_block = ""
+        elif body:
+            body_block = f'set content of theMessage to "{body_safe}"'
+        else:
+            body_block = ""
+
+        # Seed-specific creation block.
+        if seed == "new":
+            creation_block = (
+                f'set theMessage to make new outgoing message with properties '
+                f'{{subject:"{subject_safe}", content:"{body_safe}", visible:false}}'
+            )
+        elif seed == "reply":
+            verb = "reply to all" if reply_all else "reply"
+            # Look up seed across all accounts/mailboxes; reuse the existing
+            # message-id lookup pattern.
+            creation_block = f"""
+                set origMsg to missing value
+                repeat with acc in accounts
+                    try
+                        repeat with mb in mailboxes of acc
+                            try
+                                set origMsg to first message of mb whose id is "{seed_id_safe}"
+                                exit repeat
+                            end try
+                        end repeat
+                    end try
+                    if origMsg is not missing value then exit repeat
+                end repeat
+                if origMsg is missing value then error "SEED_NOT_FOUND"
+                set theMessage to {verb} origMsg opening window false
+            """
+        else:  # forward
+            creation_block = f"""
+                set origMsg to missing value
+                repeat with acc in accounts
+                    try
+                        repeat with mb in mailboxes of acc
+                            try
+                                set origMsg to first message of mb whose id is "{seed_id_safe}"
+                                exit repeat
+                            end try
+                        end repeat
+                    end try
+                    if origMsg is not missing value then exit repeat
+                end repeat
+                if origMsg is missing value then error "SEED_NOT_FOUND"
+                set theMessage to forward origMsg opening window false
+            """
+
+        # Terminal block: save (with id-bridging diff) or send.
+        if send_now:
+            terminal_block = """
+                tell theMessage to send
+                return "SENT"
+            """
+        else:
+            terminal_block = """
+                save theMessage
+                delay 0.5
+
+                set newDraftId to ""
+                repeat with acc in accounts
+                    try
+                        repeat with mb in mailboxes of acc
+                            if name of mb contains "Drafts" then
+                                repeat with d in messages of mb
+                                    set candId to (id of d as text)
+                                    if candId is not in beforeIds then
+                                        set newDraftId to candId
+                                        exit repeat
+                                    end if
+                                end repeat
+                            end if
+                            if newDraftId is not "" then exit repeat
+                        end repeat
+                    end try
+                    if newDraftId is not "" then exit repeat
+                end repeat
+                return newDraftId
+            """
+
+        # Pre-save snapshot for id diffing (only when saving as draft).
+        snapshot_block = ""
+        if not send_now:
+            snapshot_block = """
+                set beforeIds to {}
+                repeat with acc in accounts
+                    try
+                        repeat with mb in mailboxes of acc
+                            if name of mb contains "Drafts" then
+                                repeat with d in messages of mb
+                                    copy (id of d as text) to end of beforeIds
+                                end repeat
+                            end if
+                        end repeat
+                    end try
+                end repeat
+            """
+
+        script = f"""
+        tell application "Mail"
+            {snapshot_block}
+
+            {creation_block}
+
+            {sender_clause}
+            {subject_override}
+            {body_block}
+            {to_block}
+            {cc_block}
+            {bcc_block}
+            {attachment_block}
+
+            {terminal_block}
+        end tell
+        """
+
+        try:
+            result = self._run_applescript(script).strip()
+        except MailAppleScriptError as e:
+            if "SEED_NOT_FOUND" in str(e):
+                raise MailMessageNotFoundError(
+                    f"no message with id {seed_id!r}"
+                ) from e
+            raise
+
+        if send_now:
+            return {"draft_id": "", "sent_message_id": ""}
+        return {"draft_id": result, "sent_message_id": ""}

@@ -3470,3 +3470,300 @@ class TestGetDraftState:
         script = mock_run.call_args[0][0]
         assert '"In-Reply-To"' in script
         assert '"References"' in script
+
+
+class TestCreateDraft:
+    """Tests for AppleMailConnector.create_draft."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    def test_invalid_seed_raises(self, connector: AppleMailConnector) -> None:
+        with pytest.raises(ValueError, match="seed must be"):
+            connector.create_draft(seed="bogus")
+
+    def test_reply_requires_seed_id(self, connector: AppleMailConnector) -> None:
+        with pytest.raises(ValueError, match="seed_id is required"):
+            connector.create_draft(seed="reply")
+
+    def test_forward_requires_seed_id(self, connector: AppleMailConnector) -> None:
+        with pytest.raises(ValueError, match="seed_id is required"):
+            connector.create_draft(seed="forward")
+
+    def test_new_requires_to(self, connector: AppleMailConnector) -> None:
+        with pytest.raises(ValueError, match="'to' is required"):
+            connector.create_draft(seed="new", subject="hi", body="x")
+
+    def test_new_requires_subject(self, connector: AppleMailConnector) -> None:
+        with pytest.raises(ValueError, match="'subject' is required"):
+            connector.create_draft(seed="new", to=["x@example.com"], body="x")
+
+    # ------------------------------------------------------------------
+    # Fresh seed (`seed='new'`)
+    # ------------------------------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_save_returns_draft_id(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "161055"
+        result = connector.create_draft(
+            seed="new",
+            to=["a@example.com"],
+            subject="hi",
+            body="hello",
+        )
+        assert result == {"draft_id": "161055", "sent_message_id": ""}
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_send_returns_empty_ids(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "SENT"
+        result = connector.create_draft(
+            seed="new",
+            to=["a@example.com"],
+            subject="hi",
+            body="hello",
+            send_now=True,
+        )
+        assert result == {"draft_id": "", "sent_message_id": ""}
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_script_shape(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="new",
+            to=["a@example.com", "b@example.com"],
+            cc=["c@example.com"],
+            subject="hi",
+            body="hello",
+        )
+        script = mock_run.call_args[0][0]
+        # Fresh seed uses make-new-outgoing-message with subject + content
+        # baked into properties.
+        assert 'make new outgoing message with properties' in script
+        assert '{subject:"hi"' in script or 'subject:"hi"' in script
+        assert "save theMessage" in script
+        assert "send" not in script.replace("send_now", "").replace(
+            "sender", ""
+        )
+        # Recipient blocks present.
+        assert 'a@example.com' in script
+        assert 'b@example.com' in script
+        assert 'c@example.com' in script
+        # Pre-save snapshot for id-bridging diff present.
+        assert "set beforeIds to" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_send_uses_send_block(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "SENT"
+        connector.create_draft(
+            seed="new",
+            to=["a@example.com"],
+            subject="hi",
+            body="x",
+            send_now=True,
+        )
+        script = mock_run.call_args[0][0]
+        assert "tell theMessage to send" in script
+        # No diff snapshot when sending.
+        assert "set beforeIds to" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_with_from_account_sets_sender(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        with patch.object(
+            connector, "_resolve_account_to_sender", return_value="me@x.com"
+        ):
+            connector.create_draft(
+                seed="new",
+                to=["a@example.com"],
+                subject="hi",
+                body="x",
+                from_account="Gmail",
+            )
+        script = mock_run.call_args[0][0]
+        assert 'set sender of theMessage to "me@x.com"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_with_attachments_includes_paths(
+        self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        f1 = tmp_path / "report.pdf"
+        f1.write_bytes(b"%PDF-fake")
+        f2 = tmp_path / "data.csv"
+        f2.write_text("a,b,c")
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="new",
+            to=["a@example.com"],
+            subject="hi",
+            body="x",
+            attachment_paths=[f1, f2],
+        )
+        script = mock_run.call_args[0][0]
+        assert str(f1.resolve()) in script
+        assert str(f2.resolve()) in script
+        assert "make new attachment" in script
+
+    def test_new_attachment_missing_raises(
+        self, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        with pytest.raises(FileNotFoundError):
+            connector.create_draft(
+                seed="new",
+                to=["a@example.com"],
+                subject="hi",
+                body="x",
+                attachment_paths=[tmp_path / "does-not-exist.pdf"],
+            )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_recipient_none_means_no_block(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """For reply/forward, cc=None should not emit a delete-and-replace
+        block (preserves Mail's auto-derived recipients)."""
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",
+            body="thanks",
+        )
+        script = mock_run.call_args[0][0]
+        # cc/bcc not specified → no clear-and-add block for them.
+        assert "delete (every cc recipient" not in script
+        assert "delete (every bcc recipient" not in script
+        # to also not specified → no clear for to either.
+        assert "delete (every to recipient" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_recipient_empty_list_clears(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """cc=[] explicitly clears auto-derived cc recipients."""
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",
+            cc=[],
+            body="x",
+        )
+        script = mock_run.call_args[0][0]
+        assert "delete (every cc recipient" in script
+
+    # ------------------------------------------------------------------
+    # Reply seed
+    # ------------------------------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_uses_reply_primitive(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",
+            body="thanks",
+        )
+        script = mock_run.call_args[0][0]
+        assert "reply origMsg opening window false" in script
+        assert "reply to all" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_all_uses_reply_to_all(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",
+            reply_all=True,
+            body="thanks",
+        )
+        script = mock_run.call_args[0][0]
+        assert "reply to all origMsg opening window false" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_body_overrides_auto_content(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Mail.app's auto-quoted reply content is not readable before
+        save, so a user-supplied body replaces (not prepends)
+        the auto-quote. Matches existing reply_to_message behavior."""
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",
+            body="thanks",
+        )
+        script = mock_run.call_args[0][0]
+        assert 'set content of theMessage to "thanks"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_no_body_no_content_override(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """An empty body should NOT override Mail's auto-quoted reply."""
+        mock_run.return_value = "1"
+        connector.create_draft(seed="reply", seed_id="160989", body="")
+        script = mock_run.call_args[0][0]
+        assert "set content of theMessage" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_subject_override(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",
+            subject="custom subject",
+            body="x",
+        )
+        script = mock_run.call_args[0][0]
+        assert 'set subject of theMessage to "custom subject"' in script
+
+    # ------------------------------------------------------------------
+    # Forward seed
+    # ------------------------------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_forward_uses_forward_primitive(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="forward",
+            seed_id="160989",
+            to=["x@example.com"],
+            body="fyi",
+        )
+        script = mock_run.call_args[0][0]
+        assert "forward origMsg opening window false" in script
+
+    # ------------------------------------------------------------------
+    # Seed lookup error mapping
+    # ------------------------------------------------------------------
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_seed_not_found_raises_message_not_found(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = MailAppleScriptError("SEED_NOT_FOUND")
+        with pytest.raises(MailMessageNotFoundError):
+            connector.create_draft(
+                seed="reply", seed_id="999999", body="x"
+            )
