@@ -3767,3 +3767,98 @@ class TestCreateDraft:
             connector.create_draft(
                 seed="reply", seed_id="999999", body="x"
             )
+
+
+class TestExtractDraftAttachments:
+    """Tests for AppleMailConnector.extract_draft_attachments."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    def test_invalid_id_raises(
+        self, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        with pytest.raises(MailDraftInvalidIdError):
+            connector.extract_draft_attachments(
+                "../escape", ["foo.pdf"], tmp_path
+            )
+
+    def test_missing_dest_dir_raises(
+        self, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        with pytest.raises(FileNotFoundError):
+            connector.extract_draft_attachments(
+                "160991", ["foo.pdf"], tmp_path / "nonexistent"
+            )
+
+    def test_no_attachments_returns_empty(
+        self, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        # Empty attachment list short-circuits without calling AppleScript.
+        result = connector.extract_draft_attachments("160991", [], tmp_path)
+        assert result == []
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_extract_creates_subdirs_and_returns_paths(
+        self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        # Simulate AppleScript actually writing the files (the real
+        # Mail.app would save here). We poke real bytes into the
+        # expected paths so the file-existence filter at the end picks
+        # them up.
+        def fake_run(script: str) -> str:
+            (tmp_path / "0").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "0" / "report.pdf").write_bytes(b"%PDF-fake")
+            (tmp_path / "1").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "1" / "data.csv").write_text("a,b,c")
+            return "2"
+
+        mock_run.side_effect = fake_run
+        paths = connector.extract_draft_attachments(
+            "160991", ["report.pdf", "data.csv"], tmp_path
+        )
+        assert paths == [
+            tmp_path / "0" / "report.pdf",
+            tmp_path / "1" / "data.csv",
+        ]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_partial_extraction_returns_only_existing(
+        self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        # Simulate Mail.app writing only the first file (e.g., second
+        # attachment was a Mail-internal sentinel that errored on save).
+        def fake_run(script: str) -> str:
+            (tmp_path / "0").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "0" / "ok.pdf").write_bytes(b"x")
+            (tmp_path / "1").mkdir(parents=True, exist_ok=True)
+            return "1"
+
+        mock_run.side_effect = fake_run
+        paths = connector.extract_draft_attachments(
+            "160991", ["ok.pdf", "missing.pdf"], tmp_path
+        )
+        assert paths == [tmp_path / "0" / "ok.pdf"]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_not_found_raises(
+        self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        mock_run.return_value = "ERR_NOT_FOUND"
+        with pytest.raises(MailDraftNotFoundError):
+            connector.extract_draft_attachments(
+                "999999", ["foo.pdf"], tmp_path
+            )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_script_uses_save_command(
+        self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Any
+    ) -> None:
+        mock_run.return_value = "0"
+        connector.extract_draft_attachments(
+            "160991", ["a.pdf"], tmp_path
+        )
+        script = mock_run.call_args[0][0]
+        assert "save a in (POSIX file tp)" in script
+        assert "mail attachments of foundDraft" in script

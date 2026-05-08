@@ -3376,3 +3376,105 @@ class AppleMailConnector:
         if send_now:
             return {"draft_id": "", "sent_message_id": ""}
         return {"draft_id": result, "sent_message_id": ""}
+
+    def extract_draft_attachments(
+        self,
+        draft_id: str,
+        attachment_names: list[str],
+        dest_dir: Path,
+    ) -> list[Path]:
+        """Save each attachment of a draft to disk.
+
+        Used by ``update_draft`` to preserve attachments through the
+        delete-and-recreate cycle. Mail.app doesn't expose attachment
+        file paths on saved drafts (`file of att` returns an opaque
+        reference), so we extract via the ``save`` AppleScript command.
+
+        Each attachment lands in its own ``<dest_dir>/<i>/`` subdirectory
+        so filename collisions between attachments don't lose data.
+        Original filenames are preserved.
+
+        Args:
+            draft_id: Draft to read attachments from.
+            attachment_names: Filenames (index-aligned with the draft's
+                ``mail attachments`` collection). Caller typically sources
+                these from ``get_draft_state(draft_id)["attachment_names"]``.
+            dest_dir: Existing directory under which subdirectories are
+                created. Caller owns the lifecycle (e.g. tempdir cleanup).
+
+        Returns:
+            Paths of the extracted files, in the same order as
+            ``attachment_names``. Length equals number of attachments
+            actually written; missing entries indicate per-attachment
+            extraction failures.
+
+        Raises:
+            MailDraftInvalidIdError: ``draft_id`` failed validation.
+            MailDraftNotFoundError: no draft with that id exists.
+            FileNotFoundError: ``dest_dir`` does not exist.
+        """
+        _validate_draft_id(draft_id)
+        dest_dir = Path(dest_dir)
+        if not dest_dir.is_dir():
+            raise FileNotFoundError(f"dest_dir does not exist: {dest_dir}")
+        if not attachment_names:
+            return []
+
+        # Pre-create per-attachment subdirectories on the Python side so
+        # the AppleScript only has to do `save att in (POSIX file <path>)`.
+        target_paths: list[Path] = []
+        for i, name in enumerate(attachment_names):
+            subdir = dest_dir / str(i)
+            subdir.mkdir(parents=True, exist_ok=True)
+            target_paths.append(subdir / name)
+
+        targets_safe = ", ".join(
+            f'"{escape_applescript_string(str(p.resolve()))}"'
+            for p in target_paths
+        )
+
+        script = f"""
+        tell application "Mail"
+            set targetId to "{draft_id}"
+            set foundDraft to missing value
+            repeat with acc in accounts
+                try
+                    repeat with mb in mailboxes of acc
+                        if name of mb contains "Drafts" then
+                            repeat with d in messages of mb
+                                if (id of d as text) is targetId then
+                                    set foundDraft to d
+                                    exit repeat
+                                end if
+                            end repeat
+                        end if
+                        if foundDraft is not missing value then exit repeat
+                    end repeat
+                end try
+                if foundDraft is not missing value then exit repeat
+            end repeat
+            if foundDraft is missing value then return "ERR_NOT_FOUND"
+
+            set targetPaths to {{{targets_safe}}}
+            set atts to mail attachments of foundDraft
+            set saved to 0
+            set total to count of atts
+            if total > (count of targetPaths) then set total to (count of targetPaths)
+            repeat with i from 1 to total
+                set a to item i of atts
+                set tp to item i of targetPaths
+                try
+                    save a in (POSIX file tp)
+                    set saved to saved + 1
+                end try
+            end repeat
+            return saved as text
+        end tell
+        """
+
+        result = self._run_applescript(script).strip()
+        if result == "ERR_NOT_FOUND":
+            raise MailDraftNotFoundError(f"no draft with id {draft_id!r}")
+
+        # Return only the paths that actually got files written.
+        return [p for p in target_paths if p.is_file()]
