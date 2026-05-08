@@ -4,14 +4,20 @@ FastMCP server for Apple Mail integration.
 
 import argparse
 import logging
+import tempfile
+from pathlib import Path
 from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 from fastmcp.server.elicitation import AcceptedElicitation
 
+from .drafts import DraftStateStore, SeedRecord
 from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailDraftError,
+    MailDraftInvalidIdError,
+    MailDraftNotFoundError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
     MailRuleNotFoundError,
@@ -2221,6 +2227,599 @@ def render_template(
         }
     except Exception as e:
         logger.error(f"Error in render_template: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
+
+
+def _get_draft_state_store() -> DraftStateStore:
+    """Return the active DraftStateStore. Re-resolved per call so the
+    APPLE_MAIL_MCP_HOME env var (and test-time monkeypatching) take
+    effect at use time, not import time. Mirrors _get_template_store."""
+    return DraftStateStore()
+
+
+def _draft_error_response(e: MailDraftError) -> dict[str, Any]:
+    """Map a draft exception to {success, error, error_type}."""
+    if isinstance(e, MailDraftNotFoundError):
+        et = "draft_not_found"
+    elif isinstance(e, MailDraftInvalidIdError):
+        et = "invalid_draft_id"
+    else:
+        et = "draft_error"
+    return {"success": False, "error": str(e), "error_type": et}
+
+
+def _build_draft_send_summary(
+    seed_kind: str,
+    to: list[str] | None,
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    subject: str | None,
+    body: str,
+) -> str:
+    """Confirmation summary when create_draft / update_draft is sending."""
+    verb = {"reply": "Send this reply?", "forward": "Forward this message?"}.get(
+        seed_kind, "Send this email?"
+    )
+    lines: list[str] = []
+    if to:
+        lines.append(f"To: {', '.join(to)}")
+    if cc:
+        lines.append(f"CC: {', '.join(cc)}")
+    if bcc:
+        lines.append(f"BCC: {', '.join(bcc)}")
+    if subject:
+        lines.append(f"Subject: {subject}")
+    if body:
+        preview = body[:200] + "..." if len(body) > 200 else body
+        lines.append(f"\n{preview}")
+    return verb + "\n\n" + "\n".join(lines)
+
+
+@mcp.tool()
+async def create_draft(
+    reply_to: str | None = None,
+    forward_of: str | None = None,
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    subject: str | None = None,
+    body: str = "",
+    attachment_paths: list[str] | None = None,
+    reply_all: bool = False,
+    template_name: str | None = None,
+    template_vars: dict[str, str] | None = None,
+    from_account: str | None = None,
+    send_now: bool = False,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Create a draft (fresh, reply, or forward). Optionally send immediately.
+
+    Mail.app's actual primitive is the draft — every outgoing message is
+    a draft until sent. This tool lets callers create one, optionally
+    seeded from an existing message (reply or forward), and either save
+    it for later or send it now.
+
+    Args:
+        reply_to: Mail.app id of a message to reply to. Mutually exclusive
+            with ``forward_of``. When set, ``to``/``cc`` recipients and
+            ``subject`` are auto-derived from the original (override by
+            passing them explicitly).
+        forward_of: Mail.app id of a message to forward. Mutually exclusive
+            with ``reply_to``. ``to`` is required (recipient of the forward).
+        to/cc/bcc: Recipient lists. For reply/forward, ``None`` keeps the
+            auto-derived recipients; ``[]`` explicitly clears that group;
+            a populated list replaces.
+        subject: Subject. Required when both seeds are None. For
+            reply/forward, ``None`` keeps Mail's ``Re:``/``Fwd:`` prefix.
+        body: Body text. For reply/forward, a non-empty body REPLACES
+            Mail's auto-quoted content; an empty body leaves the
+            auto-quote intact (matches Mail.app's default reply behavior).
+        attachment_paths: List of file paths to attach.
+        reply_all: For ``reply_to`` only — use ``reply to all``.
+        template_name: Optional template to render for ``subject`` and
+            ``body``. Caller-supplied ``subject``/``body`` override the
+            rendered output. ``template_vars`` override auto-fills.
+        template_vars: Variables to pass to the template renderer.
+            Requires ``template_name``.
+        from_account: Mail.app account name or UUID. ``None`` uses Mail's
+            default.
+        send_now: ``False`` (default) saves as draft. ``True`` sends
+            immediately and elicits user confirmation.
+
+    Returns:
+        ``{"success": True, "draft_id": "<id>", "sent_message_id": ""}``
+        when saved as draft. ``draft_id`` is empty when sent.
+    """
+    try:
+        # ----------------------------------------------------------------
+        # Param-shape validation
+        # ----------------------------------------------------------------
+        if reply_to and forward_of:
+            return {
+                "success": False,
+                "error": "reply_to and forward_of are mutually exclusive",
+                "error_type": "validation_error",
+            }
+        if template_vars and not template_name:
+            return {
+                "success": False,
+                "error": "template_vars requires template_name",
+                "error_type": "validation_error",
+            }
+
+        # Resolve seed.
+        if reply_to:
+            seed_kind = "reply"
+            seed_id: str | None = reply_to
+        elif forward_of:
+            seed_kind = "forward"
+            seed_id = forward_of
+        else:
+            seed_kind = "new"
+            seed_id = None
+
+        # ----------------------------------------------------------------
+        # Template resolution
+        # ----------------------------------------------------------------
+        if template_name:
+            try:
+                template = _get_template_store().get(template_name)
+                auto_vars = mail.auto_template_vars(seed_id)
+                merged_vars: dict[str, str] = {**auto_vars, **(template_vars or {})}
+                rendered = template.render(merged_vars)
+                # User-supplied subject/body override the rendered output.
+                if subject is None:
+                    subject = rendered["subject"]
+                if not body:
+                    body = rendered["body"] or ""
+            except MailTemplateError as e:
+                return _template_error_response(e)
+
+        # Fresh-seed required-field validation (after template rendering
+        # so a template can supply subject/body).
+        if seed_kind == "new":
+            if not to:
+                return {
+                    "success": False,
+                    "error": "'to' is required when not replying or forwarding",
+                    "error_type": "validation_error",
+                }
+            if not subject:
+                return {
+                    "success": False,
+                    "error": "'subject' is required when not replying or forwarding",
+                    "error_type": "validation_error",
+                }
+
+        # ----------------------------------------------------------------
+        # Send-only checks (drafts are local — no rate limit / safety)
+        # ----------------------------------------------------------------
+        if send_now:
+            all_recipients = (to or []) + (cc or []) + (bcc or [])
+            if all_recipients:
+                safety_err = check_test_mode_safety(
+                    "create_draft", recipients=all_recipients
+                )
+                if safety_err:
+                    return safety_err
+            rate_err = check_rate_limit(
+                "create_draft", {"subject": subject, "to": to}
+            )
+            if rate_err:
+                return rate_err
+            if to is not None or cc is not None or bcc is not None:
+                # Only validate recipient shape when caller supplied any —
+                # for reply with no overrides, recipients come from Mail.
+                is_valid, error_msg = validate_send_operation(
+                    to or [], cc, bcc
+                )
+                if not is_valid:
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "error_type": "validation_error",
+                    }
+            summary = _build_draft_send_summary(
+                seed_kind, to, cc, bcc, subject, body
+            )
+            cancel_err = await _elicit_confirmation(
+                ctx, summary, "create_draft",
+                {"subject": subject, "to": to, "seed_kind": seed_kind},
+            )
+            if cancel_err:
+                return cancel_err
+
+        # ----------------------------------------------------------------
+        # Connector call
+        # ----------------------------------------------------------------
+        attachment_path_objs = (
+            [Path(p) for p in attachment_paths]
+            if attachment_paths is not None
+            else None
+        )
+        result = mail.create_draft(
+            seed=seed_kind,
+            seed_id=seed_id,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            attachment_paths=attachment_path_objs,
+            reply_all=reply_all,
+            from_account=from_account,
+            send_now=send_now,
+        )
+        draft_id = result.get("draft_id", "")
+
+        # Persist seed metadata for reply/forward drafts so update_draft
+        # can rebuild without an O(N) header lookup.
+        if not send_now and draft_id and seed_kind in ("reply", "forward") and seed_id:
+            _get_draft_state_store().set_seed(
+                draft_id,
+                SeedRecord(
+                    seed_kind=seed_kind, seed_id=seed_id, reply_all=reply_all
+                ),
+            )
+
+        operation_logger.log_operation(
+            "create_draft",
+            {
+                "seed_kind": seed_kind,
+                "seed_id": seed_id,
+                "send_now": send_now,
+                "draft_id": draft_id,
+            },
+            "success",
+        )
+        return {
+            "success": True,
+            "draft_id": draft_id,
+            "sent_message_id": result.get("sent_message_id", ""),
+            "details": {"seed_kind": seed_kind, "send_now": send_now},
+        }
+
+    except MailMessageNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "message_not_found",
+        }
+    except MailAccountNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "account_not_found",
+        }
+    except FileNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "file_not_found",
+        }
+    except MailDraftError as e:
+        return _draft_error_response(e)
+    except MailAppleScriptError as e:
+        logger.error(f"AppleScript error in create_draft: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "applescript_error",
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error in create_draft: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
+
+
+@mcp.tool()
+async def update_draft(
+    draft_id: str,
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+    subject: str | None = None,
+    body: str | None = None,
+    attachment_paths: list[str] | None = None,
+    template_name: str | None = None,
+    template_vars: dict[str, str] | None = None,
+    from_account: str | None = None,
+    send_now: bool = False,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Update an existing draft. Implemented as delete-and-recreate.
+
+    **Returns a NEW draft_id** — Mail.app forbids mutating saved drafts,
+    so update is implemented by reading the draft's current state,
+    deleting it, and creating a new draft with the merged fields.
+    Threading headers (for reply seeds) and forward anchor are preserved
+    via persisted seed metadata.
+
+    Field merge semantics: any non-None argument overrides the existing
+    value. ``None`` keeps the existing value. ``attachment_paths=None``
+    PRESERVES existing attachments (extracted via Mail's ``save``
+    command); ``[]`` explicitly clears them; a list replaces.
+
+    For drafts created externally (not via ``create_draft``), seed
+    recovery falls back to scanning Mail.app for the In-Reply-To header
+    — this can be slow on large mailboxes (~30s+ per call). Forward
+    seeds without disk state are misclassified as fresh; pass an
+    explicit body if so.
+
+    Args:
+        draft_id: Mail.app id of the existing draft.
+        to/cc/bcc: Override recipient groups (None = keep, [] = clear,
+            list = replace).
+        subject: Override subject. None keeps existing.
+        body: Override body. None keeps existing. Non-None replaces
+            (including the empty string, which clears).
+        attachment_paths: Override attachments. None preserves existing
+            via temp-dir extraction; [] clears; list replaces.
+        template_name / template_vars: Optional template render. User-
+            supplied subject/body override the rendered output.
+        from_account: Override sender.
+        send_now: ``False`` (default) saves new draft. ``True`` sends
+            after eliciting confirmation.
+
+    Returns:
+        ``{"success": True, "draft_id": "<NEW>", "sent_message_id": ""}``.
+    """
+    tempdir: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        if template_vars and not template_name:
+            return {
+                "success": False,
+                "error": "template_vars requires template_name",
+                "error_type": "validation_error",
+            }
+
+        # ----------------------------------------------------------------
+        # Read existing state and resolve seed
+        # ----------------------------------------------------------------
+        try:
+            state = mail.get_draft_state(draft_id)
+        except MailDraftError as e:
+            return _draft_error_response(e)
+
+        store = _get_draft_state_store()
+        seed_record = store.get_seed(draft_id)
+        if seed_record:
+            seed_kind = seed_record.seed_kind
+            seed_id: str | None = seed_record.seed_id
+            reply_all = seed_record.reply_all
+        elif state.get("in_reply_to"):
+            # Fallback for externally-created reply drafts. Slow.
+            logger.warning(
+                "update_draft falling back to In-Reply-To lookup for "
+                "externally-created draft %s — this may take 30s+ on "
+                "large mailboxes",
+                draft_id,
+            )
+            resolved = mail.find_message_by_message_id(state["in_reply_to"])
+            if resolved:
+                seed_kind = "reply"
+                seed_id = resolved
+                reply_all = False
+            else:
+                seed_kind = "new"
+                seed_id = None
+                reply_all = False
+        else:
+            seed_kind = "new"
+            seed_id = None
+            reply_all = False
+
+        # ----------------------------------------------------------------
+        # Template resolution (overrides nothing the user explicitly set)
+        # ----------------------------------------------------------------
+        merged_subject = subject
+        merged_body = body
+        if template_name:
+            try:
+                template = _get_template_store().get(template_name)
+                auto_vars = mail.auto_template_vars(seed_id)
+                merged_vars: dict[str, str] = {
+                    **auto_vars, **(template_vars or {})
+                }
+                rendered = template.render(merged_vars)
+                if merged_subject is None:
+                    merged_subject = rendered["subject"]
+                if merged_body is None:
+                    merged_body = rendered["body"] or ""
+            except MailTemplateError as e:
+                return _template_error_response(e)
+
+        # ----------------------------------------------------------------
+        # Field merge: caller's non-None > existing state
+        # ----------------------------------------------------------------
+        final_to = to if to is not None else state.get("to", [])
+        final_cc = cc if cc is not None else state.get("cc", [])
+        final_bcc = bcc if bcc is not None else state.get("bcc", [])
+        final_subject = (
+            merged_subject if merged_subject is not None else state.get("subject")
+        )
+        final_body = (
+            merged_body if merged_body is not None else state.get("body", "")
+        )
+
+        # ----------------------------------------------------------------
+        # Attachment handling: preserve via extraction when None, replace
+        # otherwise.
+        # ----------------------------------------------------------------
+        existing_names: list[str] = state.get("attachment_names", []) or []
+        if attachment_paths is None:
+            if existing_names:
+                tempdir = tempfile.TemporaryDirectory(prefix="amm-update-attach-")
+                extracted = mail.extract_draft_attachments(
+                    draft_id, existing_names, Path(tempdir.name)
+                )
+                final_attachments: list[Path] | None = extracted
+            else:
+                final_attachments = None
+        elif attachment_paths == []:
+            final_attachments = []
+        else:
+            final_attachments = [Path(p) for p in attachment_paths]
+
+        # ----------------------------------------------------------------
+        # Send-only checks
+        # ----------------------------------------------------------------
+        if send_now:
+            all_recipients = (
+                (final_to or []) + (final_cc or []) + (final_bcc or [])
+            )
+            if all_recipients:
+                safety_err = check_test_mode_safety(
+                    "update_draft", recipients=all_recipients
+                )
+                if safety_err:
+                    return safety_err
+            rate_err = check_rate_limit(
+                "update_draft",
+                {"draft_id": draft_id, "subject": final_subject},
+            )
+            if rate_err:
+                return rate_err
+            summary = _build_draft_send_summary(
+                seed_kind, final_to, final_cc, final_bcc, final_subject,
+                final_body or "",
+            )
+            cancel_err = await _elicit_confirmation(
+                ctx, summary, "update_draft",
+                {"draft_id": draft_id, "send_now": True},
+            )
+            if cancel_err:
+                return cancel_err
+
+        # ----------------------------------------------------------------
+        # Delete + recreate. Clear stale state first so a connector failure
+        # doesn't leave orphan entries.
+        # ----------------------------------------------------------------
+        try:
+            mail.delete_draft(draft_id)
+        except MailDraftNotFoundError:
+            return _draft_error_response(
+                MailDraftNotFoundError(f"no draft with id {draft_id!r}")
+            )
+        store.delete(draft_id)
+
+        result = mail.create_draft(
+            seed=seed_kind,
+            seed_id=seed_id,
+            to=final_to,
+            cc=final_cc,
+            bcc=final_bcc,
+            subject=final_subject,
+            body=final_body or "",
+            attachment_paths=final_attachments,
+            reply_all=reply_all,
+            from_account=from_account,
+            send_now=send_now,
+        )
+        new_draft_id = result.get("draft_id", "")
+
+        # Re-persist seed state for reply/forward drafts under the NEW id.
+        if (
+            not send_now
+            and new_draft_id
+            and seed_kind in ("reply", "forward")
+            and seed_id
+        ):
+            store.set_seed(
+                new_draft_id,
+                SeedRecord(
+                    seed_kind=seed_kind, seed_id=seed_id, reply_all=reply_all
+                ),
+            )
+
+        operation_logger.log_operation(
+            "update_draft",
+            {
+                "old_draft_id": draft_id,
+                "new_draft_id": new_draft_id,
+                "send_now": send_now,
+            },
+            "success",
+        )
+        return {
+            "success": True,
+            "draft_id": new_draft_id,
+            "sent_message_id": result.get("sent_message_id", ""),
+            "details": {"seed_kind": seed_kind, "send_now": send_now},
+        }
+
+    except MailMessageNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "message_not_found",
+        }
+    except MailAccountNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "account_not_found",
+        }
+    except FileNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "file_not_found",
+        }
+    except MailDraftError as e:
+        return _draft_error_response(e)
+    except MailAppleScriptError as e:
+        logger.error(f"AppleScript error in update_draft: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "applescript_error",
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error in update_draft: {e}")
+        return {"success": False, "error": str(e), "error_type": "unknown"}
+    finally:
+        if tempdir is not None:
+            try:
+                tempdir.cleanup()
+            except Exception:
+                pass
+
+
+@mcp.tool()
+def delete_draft(draft_id: str) -> dict[str, Any]:
+    """Delete (move to Trash) an existing draft.
+
+    Lifecycle endpoint for cancellation. Mail.app moves the message to
+    the Deleted Messages mailbox; recovery is technically possible but
+    Mail.app no longer treats trashed drafts as editable, so this is
+    effectively a one-way discard. No elicitation (recoverable from
+    Trash) and no rate limit (local operation).
+
+    Args:
+        draft_id: Mail.app id of the draft.
+
+    Returns:
+        ``{"success": True}`` on a clean delete; an error response if
+        no draft with that id exists.
+    """
+    try:
+        mail.delete_draft(draft_id)
+        _get_draft_state_store().delete(draft_id)
+        operation_logger.log_operation(
+            "delete_draft", {"draft_id": draft_id}, "success"
+        )
+        return {"success": True, "draft_id": draft_id}
+    except MailDraftError as e:
+        return _draft_error_response(e)
+    except MailAppleScriptError as e:
+        logger.error(f"AppleScript error in delete_draft: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "applescript_error",
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error in delete_draft: {e}")
         return {"success": False, "error": str(e), "error_type": "unknown"}
 
 
