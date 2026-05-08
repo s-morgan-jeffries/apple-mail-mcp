@@ -70,44 +70,6 @@ def _build_imap_pool() -> ImapConnectionPool | None:
 mail = AppleMailConnector(imap_pool=_build_imap_pool())
 
 
-def _build_send_summary(
-    subject: str,
-    to: list[str],
-    cc: list[str] | None,
-    bcc: list[str] | None,
-    body: str,
-) -> str:
-    """Build a human-readable confirmation summary for send operations."""
-    lines = [f"To: {', '.join(to)}"]
-    if cc:
-        lines.append(f"CC: {', '.join(cc)}")
-    if bcc:
-        lines.append(f"BCC: {', '.join(bcc)}")
-    lines.append(f"Subject: {subject}")
-    preview = body[:200] + "..." if len(body) > 200 else body
-    lines.append(f"\n{preview}")
-    return "Send this email?\n\n" + "\n".join(lines)
-
-
-def _build_forward_summary(
-    message_id: str,
-    to: list[str],
-    cc: list[str] | None,
-    bcc: list[str] | None,
-    body: str,
-) -> str:
-    """Build a human-readable confirmation summary for forward operations."""
-    lines = [f"Forward message {message_id}", f"To: {', '.join(to)}"]
-    if cc:
-        lines.append(f"CC: {', '.join(cc)}")
-    if bcc:
-        lines.append(f"BCC: {', '.join(bcc)}")
-    if body:
-        preview = body[:200] + "..." if len(body) > 200 else body
-        lines.append(f"\n{preview}")
-    return "Forward this message?\n\n" + "\n".join(lines)
-
-
 async def _elicit_confirmation(
     ctx: Context | None, summary: str, operation: str, params: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -1024,126 +986,6 @@ def get_messages(
 
 
 @mcp.tool()
-async def send_email(
-    subject: str,
-    body: str,
-    to: list[str],
-    from_account: str | None = None,
-    cc: list[str] | None = None,
-    bcc: list[str] | None = None,
-    ctx: Context | None = None,
-) -> dict[str, Any]:
-    """
-    Send an email via Apple Mail.
-
-    Requires user confirmation via MCP elicitation before sending.
-
-    Args:
-        subject: Email subject
-        body: Email body (plain text)
-        to: List of recipient email addresses
-        from_account: Optional Mail.app account name or UUID to send from.
-            None (default) uses Mail.app's default sender. Useful when the
-            user has multiple configured accounts (work + personal + role
-            accounts + Gmail aliases). See #155.
-        cc: List of CC recipients (optional)
-        bcc: List of BCC recipients (optional)
-
-    Returns:
-        Dictionary indicating success or failure
-
-    Example:
-        >>> send_email(
-        ...     subject="Meeting Follow-up",
-        ...     body="Thanks for the great meeting!",
-        ...     to=["alice@example.com"],
-        ...     from_account="Work",
-        ...     cc=["bob@example.com"]
-        ... )
-        {"success": True, "message": "Email sent successfully"}
-    """
-    try:
-        all_recipients = to + (cc or []) + (bcc or [])
-        safety_err = check_test_mode_safety("send_email", recipients=all_recipients)
-        if safety_err:
-            return safety_err
-
-        rate_err = check_rate_limit("send_email", {"subject": subject, "to": to})
-        if rate_err:
-            return rate_err
-
-        # Validate operation
-        is_valid, error_msg = validate_send_operation(to, cc, bcc)
-        if not is_valid:
-            logger.error(f"Validation failed: {error_msg}")
-            return {
-                "success": False,
-                "error": error_msg,
-                "error_type": "validation_error",
-            }
-
-        # Elicit user confirmation
-        summary = _build_send_summary(subject, to, cc, bcc, body)
-        cancel_err = await _elicit_confirmation(
-            ctx, summary, "send_email", {"subject": subject, "to": to}
-        )
-        if cancel_err:
-            return cancel_err
-
-        # Send the email
-        mail.send_email(
-            subject=subject,
-            body=body,
-            to=to,
-            cc=cc,
-            bcc=bcc,
-            from_account=from_account,
-        )
-
-        operation_logger.log_operation(
-            "send_email",
-            {"subject": subject, "to": to, "cc": cc, "bcc": bcc, "from_account": from_account},
-            "success"
-        )
-
-        return {
-            "success": True,
-            "message": "Email sent successfully",
-            "details": {
-                "subject": subject,
-                "recipients": len(to) + len(cc or []) + len(bcc or []),
-            },
-        }
-
-    except MailAccountNotFoundError as e:
-        logger.error(f"Account not found: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "account_not_found",
-        }
-    except MailAppleScriptError as e:
-        logger.error(f"Error sending email: {e}")
-        operation_logger.log_operation(
-            "send_email",
-            {"subject": subject},
-            "failure"
-        )
-        return {
-            "success": False,
-            "error": f"Failed to send email: {str(e)}",
-            "error_type": "send_error",
-        }
-    except Exception as e:
-        logger.error(f"Unexpected error sending email: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
 def update_message(
     message_ids: list[str],
     read_status: bool | None = None,
@@ -1300,153 +1142,6 @@ def update_message(
         }
     except Exception as e:
         logger.error(f"Error updating messages: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
-async def send_email_with_attachments(
-    subject: str,
-    body: str,
-    to: list[str],
-    attachments: list[str],
-    from_account: str | None = None,
-    cc: list[str] | None = None,
-    bcc: list[str] | None = None,
-    ctx: Context | None = None,
-) -> dict[str, Any]:
-    """
-    Send an email with file attachments via Apple Mail.
-
-    Requires user confirmation via MCP elicitation before sending.
-
-    Args:
-        subject: Email subject
-        body: Email body (plain text)
-        to: List of recipient email addresses
-        attachments: List of file paths to attach
-        from_account: Optional Mail.app account name or UUID to send from.
-            None (default) uses Mail.app's default sender. See #155.
-        cc: List of CC recipients (optional)
-        bcc: List of BCC recipients (optional)
-
-    Returns:
-        Dictionary indicating success or failure
-
-    Example:
-        >>> send_email_with_attachments(
-        ...     subject="Report",
-        ...     body="Please find the attached report.",
-        ...     to=["colleague@example.com"],
-        ...     attachments=["/Users/me/Documents/report.pdf"]
-        ... )
-        {"success": True, "message": "Email sent with 1 attachment(s)"}
-    """
-    from pathlib import Path
-
-    try:
-        all_recipients = to + (cc or []) + (bcc or [])
-        safety_err = check_test_mode_safety("send_email_with_attachments", recipients=all_recipients)
-        if safety_err:
-            return safety_err
-
-        rate_err = check_rate_limit("send_email_with_attachments", {"subject": subject, "to": to})
-        if rate_err:
-            return rate_err
-
-        # Convert string paths to Path objects
-        attachment_paths = [Path(p) for p in attachments]
-
-        # Validate operation
-        is_valid, error_msg = validate_send_operation(to, cc, bcc)
-        if not is_valid:
-            logger.error(f"Validation failed: {error_msg}")
-            return {
-                "success": False,
-                "error": error_msg,
-                "error_type": "validation_error",
-            }
-
-        # Validate attachments exist
-        missing_files = [str(p) for p in attachment_paths if not p.exists()]
-        if missing_files:
-            return {
-                "success": False,
-                "error": f"Attachment files not found: {', '.join(missing_files)}",
-                "error_type": "file_not_found",
-            }
-
-        # Elicit user confirmation
-        summary = _build_send_summary(subject, to, cc, bcc, body)
-        cancel_err = await _elicit_confirmation(
-            ctx, summary, "send_email_with_attachments", {"subject": subject, "to": to}
-        )
-        if cancel_err:
-            return cancel_err
-
-        # Send the email
-        mail.send_email_with_attachments(
-            subject=subject,
-            body=body,
-            to=to,
-            attachments=attachment_paths,
-            cc=cc,
-            bcc=bcc,
-            from_account=from_account,
-        )
-
-        operation_logger.log_operation(
-            "send_email_with_attachments",
-            {"subject": subject, "to": to, "attachments": len(attachments)},
-            "success"
-        )
-
-        return {
-            "success": True,
-            "message": f"Email sent with {len(attachments)} attachment(s)",
-            "details": {
-                "subject": subject,
-                "recipients": len(to) + len(cc or []) + len(bcc or []),
-                "attachments": len(attachments),
-            },
-        }
-
-    except (FileNotFoundError, ValueError) as e:
-        logger.error(f"Validation error: {e}")
-        operation_logger.log_operation(
-            "send_email_with_attachments",
-            {"subject": subject},
-            "failure"
-        )
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "validation_error",
-        }
-    except MailAccountNotFoundError as e:
-        logger.error(f"Account not found: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "account_not_found",
-        }
-    except MailAppleScriptError as e:
-        logger.error(f"Error sending email: {e}")
-        operation_logger.log_operation(
-            "send_email_with_attachments",
-            {"subject": subject},
-            "failure"
-        )
-        return {
-            "success": False,
-            "error": f"Failed to send email: {str(e)}",
-            "error_type": "send_error",
-        }
-    except Exception as e:
-        logger.error(f"Unexpected error sending email with attachments: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -1799,205 +1494,6 @@ def delete_messages(
             "error": str(e),
             "error_type": "unknown",
         }
-
-
-@mcp.tool()
-def reply_to_message(
-    message_id: str,
-    body: str,
-    reply_all: bool = False,
-    from_account: str | None = None,
-) -> dict[str, Any]:
-    """
-    Reply to a message.
-
-    Args:
-        message_id: ID of the message to reply to
-        body: Reply body text
-        reply_all: If True, reply to all recipients; if False, reply only to sender (default: False)
-        from_account: Optional Mail.app account name or UUID to send the
-            reply from. None (default) uses Mail.app's default sender for
-            the reply. See #155.
-
-    Returns:
-        Dictionary with success status and reply message ID
-
-    Example:
-        reply_to_message(
-            message_id="12345",
-            body="Thanks for your email! I'll get back to you soon.",
-            reply_all=False
-        )
-    """
-    try:
-        safety_err = check_test_mode_safety("reply_to_message")
-        if safety_err:
-            return safety_err
-
-        rate_err = check_rate_limit("reply_to_message", {"message_id": message_id})
-        if rate_err:
-            return rate_err
-
-        logger.info(f"Creating reply to message {message_id}")
-
-        # Reply to the message
-        reply_id = mail.reply_to_message(
-            message_id=message_id,
-            body=body,
-            reply_all=reply_all,
-            from_account=from_account,
-        )
-
-        return {
-            "success": True,
-            "reply_id": reply_id,
-            "original_message_id": message_id,
-            "reply_all": reply_all,
-        }
-
-    except MailAccountNotFoundError as e:
-        logger.error(f"Account not found: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "account_not_found",
-        }
-    except MailMessageNotFoundError as e:
-        logger.error(f"Message not found: {e}")
-        return {
-            "success": False,
-            "error": f"Message '{message_id}' not found",
-            "error_type": "message_not_found",
-        }
-    except Exception as e:
-        logger.error(f"Error replying to message: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-@mcp.tool()
-async def forward_message(
-    message_id: str,
-    to: list[str],
-    body: str = "",
-    from_account: str | None = None,
-    cc: list[str] | None = None,
-    bcc: list[str] | None = None,
-    ctx: Context | None = None,
-) -> dict[str, Any]:
-    """
-    Forward a message to recipients.
-
-    Requires user confirmation via MCP elicitation before forwarding.
-
-    Args:
-        message_id: ID of the message to forward
-        to: List of recipient email addresses
-        body: Optional body text to add before forwarded content (default: "")
-        from_account: Optional Mail.app account name or UUID to send the
-            forward from. None (default) uses Mail.app's default sender.
-            See #155.
-        cc: Optional CC recipients
-        bcc: Optional BCC recipients
-
-    Returns:
-        Dictionary with success status and forwarded message ID
-
-    Example:
-        forward_message(
-            message_id="12345",
-            to=["colleague@example.com"],
-            body="FYI - thought you'd find this interesting."
-        )
-
-    Note:
-        Original message content and attachments are automatically included.
-    """
-    try:
-        if not to:
-            return {
-                "success": False,
-                "error": "At least one recipient required",
-                "error_type": "validation_error",
-            }
-
-        all_recipients = to + (cc or []) + (bcc or [])
-        safety_err = check_test_mode_safety("forward_message", recipients=all_recipients)
-        if safety_err:
-            return safety_err
-
-        rate_err = check_rate_limit("forward_message", {"message_id": message_id, "to": to})
-        if rate_err:
-            return rate_err
-
-        # Elicit user confirmation
-        summary = _build_forward_summary(message_id, to, cc, bcc, body)
-        cancel_err = await _elicit_confirmation(
-            ctx, summary, "forward_message", {"message_id": message_id, "to": to}
-        )
-        if cancel_err:
-            return cancel_err
-
-        logger.info(f"Forwarding message {message_id} to {len(to)} recipient(s)")
-
-        # Forward the message
-        forward_id = mail.forward_message(
-            message_id=message_id,
-            to=to,
-            body=body,
-            cc=cc,
-            bcc=bcc,
-            from_account=from_account,
-        )
-
-        return {
-            "success": True,
-            "forward_id": forward_id,
-            "original_message_id": message_id,
-            "recipients": to,
-            "cc": cc,
-            "bcc": bcc,
-        }
-
-    except ValueError as e:
-        logger.error(f"Validation error: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "validation_error",
-        }
-    except MailAccountNotFoundError as e:
-        logger.error(f"Account not found: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "account_not_found",
-        }
-    except MailMessageNotFoundError as e:
-        logger.error(f"Message not found: {e}")
-        return {
-            "success": False,
-            "error": f"Message '{message_id}' not found",
-            "error_type": "message_not_found",
-        }
-    except Exception as e:
-        logger.error(f"Error forwarding message: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "unknown",
-        }
-
-
-# ---------------------------------------------------------------------
-# Email templates (#30) — see docs/reference/TOOLS.md for the file format
-# ---------------------------------------------------------------------
-
-# Single shared store; root resolves at call-time via env override so tests
-# and unusual setups can redirect.
 def _get_template_store() -> TemplateStore:
     """Return the active TemplateStore. Re-resolved per call so the
     APPLE_MAIL_MCP_HOME env var (and test-time monkeypatching) take
@@ -2248,6 +1744,91 @@ def _draft_error_response(e: MailDraftError) -> dict[str, Any]:
     return {"success": False, "error": str(e), "error_type": et}
 
 
+def _draft_action_error(op: str, e: Exception) -> dict[str, Any] | None:
+    """Map a catchable draft-action exception to a response dict.
+
+    Returns None if the exception isn't one we model here (caller should
+    fall through to a generic ``unknown`` mapping). Centralizing this
+    keeps the per-tool exception handling small enough to stay under
+    the cyclomatic-complexity threshold."""
+    if isinstance(e, MailMessageNotFoundError):
+        return {"success": False, "error": str(e), "error_type": "message_not_found"}
+    if isinstance(e, MailAccountNotFoundError):
+        return {"success": False, "error": str(e), "error_type": "account_not_found"}
+    if isinstance(e, FileNotFoundError):
+        return {"success": False, "error": str(e), "error_type": "file_not_found"}
+    if isinstance(e, MailDraftError):
+        return _draft_error_response(e)
+    if isinstance(e, MailAppleScriptError):
+        logger.error(f"AppleScript error in {op}: {e}")
+        return {"success": False, "error": str(e), "error_type": "applescript_error"}
+    return None
+
+
+def _resolve_draft_seed(
+    draft_id: str,
+    state: dict[str, Any],
+    store: DraftStateStore,
+) -> tuple[str, str | None, bool]:
+    """Determine the seed kind / id / reply_all for an update_draft call.
+
+    Lookup order: persisted disk state first (fast); In-Reply-To header
+    fallback for externally-created reply drafts (slow); fresh seed
+    if neither yields anything.
+
+    Returns ``(seed_kind, seed_id, reply_all)``.
+    """
+    seed_record = store.get_seed(draft_id)
+    if seed_record:
+        return seed_record.seed_kind, seed_record.seed_id, seed_record.reply_all
+
+    in_reply_to = state.get("in_reply_to") or ""
+    if in_reply_to:
+        logger.warning(
+            "update_draft falling back to In-Reply-To lookup for "
+            "externally-created draft %s — this may take 30s+ on "
+            "large mailboxes",
+            draft_id,
+        )
+        resolved = mail.find_message_by_message_id(in_reply_to)
+        if resolved:
+            return "reply", resolved, False
+
+    return "new", None, False
+
+
+def _resolve_draft_attachments(
+    draft_id: str,
+    attachment_paths: list[str] | None,
+    existing_names: list[str],
+) -> tuple[list[Path] | None, "tempfile.TemporaryDirectory[str] | None"]:
+    """Compute final attachment paths for an update_draft call.
+
+    Semantics:
+        - ``attachment_paths is None`` AND draft has attachments
+            → extract existing to a temp dir; caller must clean it up.
+        - ``attachment_paths is None`` AND no existing attachments → None.
+        - ``attachment_paths == []`` → explicitly clear.
+        - ``attachment_paths == [...]`` → replace with caller-supplied list.
+
+    Returns ``(final_paths, tempdir_to_clean_up)``. Caller is responsible
+    for the tempdir's lifecycle (typically via ``finally`` cleanup).
+    """
+    if attachment_paths is not None:
+        if attachment_paths == []:
+            return [], None
+        return [Path(p) for p in attachment_paths], None
+
+    if not existing_names:
+        return None, None
+
+    tempdir = tempfile.TemporaryDirectory(prefix="amm-update-attach-")
+    extracted = mail.extract_draft_attachments(
+        draft_id, existing_names, Path(tempdir.name)
+    )
+    return extracted, tempdir
+
+
 def _build_draft_send_summary(
     seed_kind: str,
     to: list[str] | None,
@@ -2458,7 +2039,9 @@ async def create_draft(
             _get_draft_state_store().set_seed(
                 draft_id,
                 SeedRecord(
-                    seed_kind=seed_kind, seed_id=seed_id, reply_all=reply_all
+                    seed_kind=cast(Any, seed_kind),
+                    seed_id=seed_id,
+                    reply_all=reply_all,
                 ),
             )
 
@@ -2479,34 +2062,10 @@ async def create_draft(
             "details": {"seed_kind": seed_kind, "send_now": send_now},
         }
 
-    except MailMessageNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "message_not_found",
-        }
-    except MailAccountNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "account_not_found",
-        }
-    except FileNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "file_not_found",
-        }
-    except MailDraftError as e:
-        return _draft_error_response(e)
-    except MailAppleScriptError as e:
-        logger.error(f"AppleScript error in create_draft: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "applescript_error",
-        }
     except Exception as e:
+        handled = _draft_action_error("create_draft", e)
+        if handled is not None:
+            return handled
         logger.exception(f"Unexpected error in create_draft: {e}")
         return {"success": False, "error": str(e), "error_type": "unknown"}
 
@@ -2581,32 +2140,9 @@ async def update_draft(
             return _draft_error_response(e)
 
         store = _get_draft_state_store()
-        seed_record = store.get_seed(draft_id)
-        if seed_record:
-            seed_kind = seed_record.seed_kind
-            seed_id: str | None = seed_record.seed_id
-            reply_all = seed_record.reply_all
-        elif state.get("in_reply_to"):
-            # Fallback for externally-created reply drafts. Slow.
-            logger.warning(
-                "update_draft falling back to In-Reply-To lookup for "
-                "externally-created draft %s — this may take 30s+ on "
-                "large mailboxes",
-                draft_id,
-            )
-            resolved = mail.find_message_by_message_id(state["in_reply_to"])
-            if resolved:
-                seed_kind = "reply"
-                seed_id = resolved
-                reply_all = False
-            else:
-                seed_kind = "new"
-                seed_id = None
-                reply_all = False
-        else:
-            seed_kind = "new"
-            seed_id = None
-            reply_all = False
+        seed_kind, seed_id, reply_all = _resolve_draft_seed(
+            draft_id, state, store
+        )
 
         # ----------------------------------------------------------------
         # Template resolution (overrides nothing the user explicitly set)
@@ -2643,22 +2179,11 @@ async def update_draft(
 
         # ----------------------------------------------------------------
         # Attachment handling: preserve via extraction when None, replace
-        # otherwise.
+        # otherwise. tempdir (if any) is cleaned up in the finally block.
         # ----------------------------------------------------------------
-        existing_names: list[str] = state.get("attachment_names", []) or []
-        if attachment_paths is None:
-            if existing_names:
-                tempdir = tempfile.TemporaryDirectory(prefix="amm-update-attach-")
-                extracted = mail.extract_draft_attachments(
-                    draft_id, existing_names, Path(tempdir.name)
-                )
-                final_attachments: list[Path] | None = extracted
-            else:
-                final_attachments = None
-        elif attachment_paths == []:
-            final_attachments = []
-        else:
-            final_attachments = [Path(p) for p in attachment_paths]
+        final_attachments, tempdir = _resolve_draft_attachments(
+            draft_id, attachment_paths, state.get("attachment_names", []) or []
+        )
 
         # ----------------------------------------------------------------
         # Send-only checks
@@ -2727,7 +2252,9 @@ async def update_draft(
             store.set_seed(
                 new_draft_id,
                 SeedRecord(
-                    seed_kind=seed_kind, seed_id=seed_id, reply_all=reply_all
+                    seed_kind=cast(Any, seed_kind),
+                    seed_id=seed_id,
+                    reply_all=reply_all,
                 ),
             )
 
@@ -2747,34 +2274,10 @@ async def update_draft(
             "details": {"seed_kind": seed_kind, "send_now": send_now},
         }
 
-    except MailMessageNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "message_not_found",
-        }
-    except MailAccountNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "account_not_found",
-        }
-    except FileNotFoundError as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "file_not_found",
-        }
-    except MailDraftError as e:
-        return _draft_error_response(e)
-    except MailAppleScriptError as e:
-        logger.error(f"AppleScript error in update_draft: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "applescript_error",
-        }
     except Exception as e:
+        handled = _draft_action_error("update_draft", e)
+        if handled is not None:
+            return handled
         logger.exception(f"Unexpected error in update_draft: {e}")
         return {"success": False, "error": str(e), "error_type": "unknown"}
     finally:

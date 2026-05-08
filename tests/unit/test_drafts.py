@@ -212,8 +212,9 @@ class TestDraftStateStore:
 
     def test_forward_seed_does_not_persist_reply_all(self, tmp_path):
         """Forward seeds shouldn't carry reply_all (it's reply-only)."""
-        from apple_mail_mcp.drafts import DraftStateStore, SeedRecord
         import json
+
+        from apple_mail_mcp.drafts import DraftStateStore, SeedRecord
 
         store = DraftStateStore(root=tmp_path)
         store.set_seed(

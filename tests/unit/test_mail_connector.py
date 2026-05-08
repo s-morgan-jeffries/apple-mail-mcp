@@ -2247,16 +2247,6 @@ class TestAppleMailConnector:
         # include_content, include_attachments); headers_only is silently dropped.
         as_path.assert_called_once_with("123", True, False)
 
-    @patch.object(AppleMailConnector, "_run_applescript")
-    def test_get_message_send_email_basic_pre_existing_unaffected(
-        self, mock_run: MagicMock, connector: AppleMailConnector
-    ) -> None:
-        """Smoke test: existing positional callers (message_id only) still work."""
-        mock_run.return_value = '{"id":"x","subject":"","sender":"","date_received":"","read_status":false,"flagged":false,"content":""}'
-        result = connector.get_message("x")
-        assert result["id"] == "x"
-
-    # --- Issue #73: get_attachments dispatcher ----------------------------
 
     def test_get_attachments_uses_imap_when_account_and_mailbox_provided(
         self, connector: AppleMailConnector
@@ -2392,45 +2382,6 @@ class TestAppleMailConnector:
         result = connector.get_attachments("x")
         assert result == []
 
-    @patch.object(AppleMailConnector, "_run_applescript")
-    def test_send_email_basic(
-        self, mock_run: MagicMock, connector: AppleMailConnector
-    ) -> None:
-        """Test sending a basic email."""
-        mock_run.return_value = "sent"
-
-        result = connector.send_email(
-            subject="Test",
-            body="Test body",
-            to=["recipient@example.com"]
-        )
-
-        assert result is True
-
-    @patch.object(AppleMailConnector, "_run_applescript")
-    def test_send_email_with_cc_bcc(
-        self, mock_run: MagicMock, connector: AppleMailConnector
-    ) -> None:
-        """Test sending email with CC and BCC."""
-        mock_run.return_value = "sent"
-
-        result = connector.send_email(
-            subject="Test",
-            body="Test body",
-            to=["recipient@example.com"],
-            cc=["cc@example.com"],
-            bcc=["bcc@example.com"]
-        )
-
-        assert result is True
-
-        # Verify script includes recipients
-        call_args = mock_run.call_args[0][0]
-        assert "recipient@example.com" in call_args
-        assert "cc@example.com" in call_args
-        assert "bcc@example.com" in call_args
-
-    # ---- from_account (#155) --------------------------------------------
 
     @patch.object(AppleMailConnector, "list_accounts")
     def test_resolve_account_to_sender_lookup_by_name(
@@ -2488,126 +2439,6 @@ class TestAppleMailConnector:
         with pytest.raises(ValueError, match="email addresses"):
             connector._resolve_account_to_sender("Empty")
 
-    @patch.object(AppleMailConnector, "_run_applescript")
-    @patch.object(AppleMailConnector, "list_accounts")
-    def test_send_email_with_from_account_injects_sender_clause(
-        self,
-        mock_list: MagicMock,
-        mock_run: MagicMock,
-        connector: AppleMailConnector,
-    ) -> None:
-        mock_list.return_value = [
-            {
-                "id": "UUID-1",
-                "name": "iCloud",
-                "email_addresses": ["alice@icloud.com"],
-            },
-        ]
-        mock_run.return_value = "sent"
-
-        connector.send_email(
-            subject="Hi",
-            body="b",
-            to=["x@example.com"],
-            from_account="iCloud",
-        )
-
-        script = mock_run.call_args[0][0]
-        assert "set sender of theMessage" in script
-        assert "alice@icloud.com" in script
-
-    @patch.object(AppleMailConnector, "_run_applescript")
-    def test_send_email_no_from_account_omits_sender_clause(
-        self, mock_run: MagicMock, connector: AppleMailConnector
-    ) -> None:
-        mock_run.return_value = "sent"
-        connector.send_email(subject="Hi", body="b", to=["x@example.com"])
-        script = mock_run.call_args[0][0]
-        assert "set sender of theMessage" not in script
-
-    @patch.object(AppleMailConnector, "_run_applescript")
-    @patch.object(AppleMailConnector, "list_accounts")
-    def test_reply_to_message_with_from_account_injects_sender_clause(
-        self,
-        mock_list: MagicMock,
-        mock_run: MagicMock,
-        connector: AppleMailConnector,
-    ) -> None:
-        mock_list.return_value = [
-            {
-                "id": "UUID-1",
-                "name": "Gmail",
-                "email_addresses": ["alice@gmail.com"],
-            },
-        ]
-        mock_run.return_value = "reply-1"
-
-        connector.reply_to_message(
-            message_id="1", body="thanks", from_account="Gmail"
-        )
-
-        script = mock_run.call_args[0][0]
-        assert "set sender of replyMsg" in script
-        assert "alice@gmail.com" in script
-
-    @patch.object(AppleMailConnector, "_run_applescript")
-    @patch.object(AppleMailConnector, "list_accounts")
-    def test_forward_message_with_from_account_injects_sender_clause(
-        self,
-        mock_list: MagicMock,
-        mock_run: MagicMock,
-        connector: AppleMailConnector,
-    ) -> None:
-        mock_list.return_value = [
-            {
-                "id": "UUID-1",
-                "name": "Gmail",
-                "email_addresses": ["alice@gmail.com"],
-            },
-        ]
-        mock_run.return_value = "fwd-1"
-
-        connector.forward_message(
-            message_id="1",
-            to=["c@example.com"],
-            from_account="Gmail",
-        )
-
-        script = mock_run.call_args[0][0]
-        assert "set sender of fwdMsg" in script
-        assert "alice@gmail.com" in script
-
-    @patch.object(AppleMailConnector, "_run_applescript")
-    @patch.object(AppleMailConnector, "list_accounts")
-    def test_send_email_with_attachments_with_from_account_injects_sender_clause(
-        self,
-        mock_list: MagicMock,
-        mock_run: MagicMock,
-        connector: AppleMailConnector,
-        tmp_path: Any,
-    ) -> None:
-        mock_list.return_value = [
-            {
-                "id": "UUID-1",
-                "name": "iCloud",
-                "email_addresses": ["alice@icloud.com"],
-            },
-        ]
-        att = tmp_path / "r.pdf"
-        att.write_bytes(b"x")
-        mock_run.return_value = "sent"
-
-        connector.send_email_with_attachments(
-            subject="Hi",
-            body="b",
-            to=["x@example.com"],
-            attachments=[att],
-            from_account="iCloud",
-        )
-
-        script = mock_run.call_args[0][0]
-        assert "set sender of theMessage" in script
-        assert "alice@icloud.com" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_mark_as_read(
@@ -2895,27 +2726,6 @@ class TestMessageIdAppleScriptInjection:
         script = mock_run.call_args[0][0]
         assert '"evil\\""' in script
         assert '"ok"' in script
-
-    @patch.object(AppleMailConnector, "_run_applescript")
-    def test_reply_to_message_escapes_id(
-        self, mock_run: MagicMock, connector: AppleMailConnector
-    ) -> None:
-        mock_run.return_value = "msg-id"
-        connector.reply_to_message('craft"ed-id', body="hi")
-        script = mock_run.call_args[0][0]
-        # Quoted and escaped — no raw quote breaks out of the string.
-        assert 'whose id is "craft\\"ed-id"' in script
-
-    @patch.object(AppleMailConnector, "_run_applescript")
-    def test_forward_message_escapes_id(
-        self, mock_run: MagicMock, connector: AppleMailConnector
-    ) -> None:
-        mock_run.return_value = "msg-id"
-        connector.forward_message(
-            'craft"ed-id', to=["a@example.com"], body="hi"
-        )
-        script = mock_run.call_args[0][0]
-        assert 'whose id is "craft\\"ed-id"' in script
 
 
 class TestBulkOpsSourceMailbox:
