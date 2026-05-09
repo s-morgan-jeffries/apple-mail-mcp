@@ -76,6 +76,44 @@ def mock_ctx_decline() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
+# atexit pool-close hook (#127)
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterPoolAtexit:
+    """Issue #127: when an IMAP connection pool is built, register its
+    close() as an atexit hook so cached sessions get a clean LOGOUT on
+    process exit instead of an abnormal disconnect."""
+
+    def test_register_pool_atexit_registers_close_when_pool_set(self) -> None:
+        from apple_mail_mcp.server import _register_pool_atexit
+
+        pool = MagicMock()
+        with patch("apple_mail_mcp.server.atexit") as mock_atexit:
+            _register_pool_atexit(pool)
+        mock_atexit.register.assert_called_once_with(pool.close)
+
+    def test_register_pool_atexit_noop_when_pool_none(self) -> None:
+        from apple_mail_mcp.server import _register_pool_atexit
+
+        with patch("apple_mail_mcp.server.atexit") as mock_atexit:
+            _register_pool_atexit(None)
+        mock_atexit.register.assert_not_called()
+
+    def test_registered_handler_invokes_pool_close(self) -> None:
+        """The registered callable, when invoked at exit time, calls
+        pool.close() exactly once."""
+        from apple_mail_mcp.server import _register_pool_atexit
+
+        pool = MagicMock()
+        with patch("apple_mail_mcp.server.atexit") as mock_atexit:
+            _register_pool_atexit(pool)
+        registered = mock_atexit.register.call_args.args[0]
+        registered()
+        pool.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # 0. list_accounts
 # ---------------------------------------------------------------------------
 

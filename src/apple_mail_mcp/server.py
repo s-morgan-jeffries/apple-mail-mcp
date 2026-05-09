@@ -3,6 +3,7 @@ FastMCP server for Apple Mail integration.
 """
 
 import argparse
+import atexit
 import logging
 import tempfile
 from pathlib import Path
@@ -69,7 +70,18 @@ def _build_imap_pool() -> ImapConnectionPool | None:
     return None
 
 
-mail = AppleMailConnector(imap_pool=_build_imap_pool())
+def _register_pool_atexit(pool: ImapConnectionPool | None) -> None:
+    """Register ``pool.close()`` as an atexit hook so cached IMAP sessions
+    get a clean LOGOUT on process exit instead of an abnormal disconnect
+    (#127). No-op when ``pool`` is ``None`` (the default — pool is opt-in
+    via ``APPLE_MAIL_MCP_IMAP_POOL=1``)."""
+    if pool is not None:
+        atexit.register(pool.close)
+
+
+_imap_pool = _build_imap_pool()
+_register_pool_atexit(_imap_pool)
+mail = AppleMailConnector(imap_pool=_imap_pool)
 
 
 async def _elicit_confirmation(
