@@ -32,11 +32,10 @@ EXPECTED_TOOLS = {
     "search_messages",
     "get_messages",
     "get_thread",
-    # Send / reply / forward
-    "send_email",
-    "send_email_with_attachments",
-    "reply_to_message",
-    "forward_message",
+    # Drafts lifecycle (#134)
+    "create_draft",
+    "update_draft",
+    "delete_draft",
     # Mutations
     "update_message",
     "save_attachments",

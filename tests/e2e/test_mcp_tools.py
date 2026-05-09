@@ -29,11 +29,10 @@ EXPECTED_TOOLS = {
     "search_messages",
     "get_messages",
     "get_thread",
-    # Send / reply / forward
-    "send_email",
-    "send_email_with_attachments",
-    "reply_to_message",
-    "forward_message",
+    # Drafts lifecycle (#134)
+    "create_draft",
+    "update_draft",
+    "delete_draft",
     # Mutations
     "update_message",
     "save_attachments",
@@ -85,8 +84,8 @@ class TestToolRegistration:
     @pytest.mark.parametrize(
         "tool_name,expected_required",
         [
-            ("send_email", {"to", "subject", "body"}),
             ("update_message", {"message_ids"}),
+            ("delete_draft", {"draft_id"}),
         ],
     )
     async def test_tool_schema_required_fields(
@@ -154,27 +153,22 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
           "date_received": "Mon", "read_status": True, "flagged": False}],
     ),
     (
-        "send_email",
+        "create_draft",
         {"to": ["a@example.com"], "subject": "s", "body": "b"},
-        "send_email",
-        None,
+        "create_draft",
+        {"draft_id": "draft-1", "sent_message_id": ""},
+    ),
+    (
+        "delete_draft",
+        {"draft_id": "draft-1"},
+        "delete_draft",
+        True,
     ),
     (
         "update_message",
         {"message_ids": ["msg-1"], "read_status": True},
         "update_message",
         1,
-    ),
-    (
-        "send_email_with_attachments",
-        {
-            "to": ["a@example.com"],
-            "subject": "s",
-            "body": "b",
-            "attachments": [_TMP_FILE],
-        },
-        "send_email_with_attachments",
-        None,
     ),
     (
         "save_attachments",
@@ -193,18 +187,6 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         {"message_ids": ["msg-1"]},
         "delete_messages",
         1,
-    ),
-    (
-        "reply_to_message",
-        {"message_id": "msg-1", "body": "b"},
-        "reply_to_message",
-        "reply-1",
-    ),
-    (
-        "forward_message",
-        {"message_id": "msg-1", "to": ["a@example.com"]},
-        "forward_message",
-        "forward-1",
     ),
 ]
 

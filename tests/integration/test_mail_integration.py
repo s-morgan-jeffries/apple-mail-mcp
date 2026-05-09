@@ -391,27 +391,161 @@ class TestMailIntegration:
             assert att["downloaded"] is False
 
 
-class TestMailSendIntegration:
+class TestDraftsLifecycleIntegration:
+    """Integration tests for the drafts lifecycle (#134).
+
+    These exercise the connector primitives against real Mail.app —
+    create_draft / get_draft_state / extract_draft_attachments /
+    delete_draft. update_draft is server-layer orchestration (delete +
+    recreate) so it is covered there; here we verify the AppleScript
+    primitives that update_draft composes.
+
+    Each test cleans up its own drafts.
     """
-    Integration tests for sending emails.
 
-    WARNING: These tests will send real emails!
-    Only run if you have a test account configured.
-    """
+    @pytest.fixture
+    def anchor_message_id(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> str:
+        """Return Mail.app's internal id of the newest INBOX message —
+        used as a seed for reply / forward tests.
 
-    @pytest.mark.skip(reason="Sends real email - enable manually")
-    def test_send_email(self, connector: AppleMailConnector) -> None:
+        Note: search_messages returns the RFC 5322 Message-ID, but
+        create_draft's seed lookup uses Mail's internal numeric id
+        (`whose id is`). Fetch via osascript directly to keep the
+        integration test self-contained.
         """
-        Test sending a real email.
-
-        MANUALLY ENABLE THIS TEST and update recipient!
-        """
-        result = connector.send_email(
-            subject="Test Email from Apple Mail MCP",
-            body="This is a test email sent via the MCP integration test suite.",
-            to=["YOUR_TEST_EMAIL@example.com"]  # UPDATE THIS!
+        import subprocess
+        script = f'''
+        tell application "Mail"
+            set acc to first account whose name is "{test_account}"
+            set mb to first mailbox of acc whose name is "INBOX"
+            if (count of messages of mb) is 0 then return ""
+            return id of (item 1 of messages of mb) as text
+        end tell
+        '''
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-e", script],
+            capture_output=True, text=True, timeout=30,
         )
-        assert result is True
+        seed_id = result.stdout.strip()
+        if not seed_id:
+            pytest.skip("test account has no INBOX messages to anchor on")
+        return seed_id
+
+    def test_fresh_save_then_read_state_then_delete(
+        self, connector: AppleMailConnector
+    ) -> None:
+        result = connector.create_draft(
+            seed="new",
+            to=["test1@example.com"],
+            cc=["test2@example.com"],
+            subject="ZZZ-AMM-INTEG-FRESH",
+            body="integration fresh body",
+        )
+        draft_id = result["draft_id"]
+        assert draft_id, "create_draft should return a non-empty draft_id"
+
+        try:
+            state = connector.get_draft_state(draft_id)
+            assert state["to"] == ["test1@example.com"]
+            assert state["cc"] == ["test2@example.com"]
+            assert state["subject"] == "ZZZ-AMM-INTEG-FRESH"
+            assert "integration fresh body" in state["body"]
+            # Fresh draft has no threading headers.
+            assert state["in_reply_to"] == ""
+        finally:
+            connector.delete_draft(draft_id)
+
+    def test_reply_save_preserves_threading_headers(
+        self,
+        connector: AppleMailConnector,
+        anchor_message_id: str,
+    ) -> None:
+        result = connector.create_draft(
+            seed="reply",
+            seed_id=anchor_message_id,
+            body="ZZZ-AMM-INTEG-REPLY-BODY",
+        )
+        draft_id = result["draft_id"]
+        assert draft_id
+
+        try:
+            state = connector.get_draft_state(draft_id)
+            # Threading header populated by Mail.app's reply primitive.
+            assert state["in_reply_to"], "reply must have In-Reply-To"
+            # Subject auto-prefixed by Mail.
+            assert state["subject"].startswith("Re:"), \
+                f"expected Re: prefix; got {state['subject']!r}"
+            # User body replaces Mail's auto-quote (per design tradeoff:
+            # auto-quote isn't readable from outgoing-msg-ref before save).
+            assert "ZZZ-AMM-INTEG-REPLY-BODY" in state["body"]
+        finally:
+            connector.delete_draft(draft_id)
+
+    def test_attachment_extraction_round_trip(
+        self,
+        connector: AppleMailConnector,
+        tmp_path: Path,
+    ) -> None:
+        """Verify the preserve-on-None pipeline works: attach a file,
+        save as draft, extract via the connector, content matches."""
+        original = tmp_path / "src" / "report.pdf"
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b"%PDF-FAKE-INTEG-CONTENT")
+
+        result = connector.create_draft(
+            seed="new",
+            to=["target@example.com"],
+            subject="ZZZ-AMM-INTEG-ATTACH",
+            body="see attached",
+            attachment_paths=[original],
+        )
+        draft_id = result["draft_id"]
+
+        try:
+            state = connector.get_draft_state(draft_id)
+            assert "report.pdf" in state["attachment_names"]
+
+            extract_dir = tmp_path / "extract"
+            extract_dir.mkdir()
+            extracted = connector.extract_draft_attachments(
+                draft_id, state["attachment_names"], extract_dir
+            )
+            assert len(extracted) == 1
+            assert extracted[0].is_file()
+            # Content must match the original byte-for-byte.
+            assert extracted[0].read_bytes() == b"%PDF-FAKE-INTEG-CONTENT"
+        finally:
+            connector.delete_draft(draft_id)
+
+    def test_delete_draft_removes_from_drafts_mailbox(
+        self,
+        connector: AppleMailConnector,
+    ) -> None:
+        import time
+
+        from apple_mail_mcp.exceptions import MailDraftNotFoundError
+
+        result = connector.create_draft(
+            seed="new",
+            to=["x@example.com"],
+            subject="ZZZ-AMM-INTEG-DELETE",
+            body="delete me",
+        )
+        draft_id = result["draft_id"]
+        assert connector.delete_draft(draft_id) is True
+
+        # IMAP sync lag: the delete returns synchronously but the
+        # Drafts mailbox enumeration can take several seconds to
+        # reflect the move. Poll briefly before asserting.
+        for _ in range(20):
+            try:
+                connector.get_draft_state(draft_id)
+                time.sleep(0.5)
+            except MailDraftNotFoundError:
+                return  # success
+        pytest.fail("draft still queryable 10s after delete")
 
 
 class TestErrorHandling:

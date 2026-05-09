@@ -238,76 +238,6 @@ full = get_messages(ids)
 
 ---
 
-### send_email
-
-Send an email via Apple Mail.
-
-**⚠️ Security Note:** This operation requires user confirmation before sending.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `subject` | string | Yes | - | Email subject line |
-| `body` | string | Yes | - | Email body (plain text) |
-| `to` | array[string] | Yes | - | List of recipient email addresses |
-| `from_account` | string | No | None | Mail.app account name or UUID to send from. None = Mail.app default sender. Useful when the user has multiple configured accounts. Returns `error_type: "account_not_found"` if no match. |
-| `cc` | array[string] | No | [] | List of CC recipients |
-| `bcc` | array[string] | No | [] | List of BCC recipients |
-
-**Returns:**
-
-```json
-{
-  "success": true,
-  "message": "Email sent successfully",
-  "details": {
-    "subject": "Meeting Tomorrow",
-    "recipients": 3
-  }
-}
-```
-
-**Examples:**
-
-```python
-# Simple email
-send_email(
-    subject="Hello",
-    body="Just wanted to say hi!",
-    to=["friend@example.com"]
-)
-
-# Email with CC and BCC
-send_email(
-    subject="Project Update",
-    body="Here's the latest status...",
-    to=["team@company.com"],
-    cc=["manager@company.com"],
-    bcc=["archive@company.com"]
-)
-
-# Email to multiple recipients
-send_email(
-    subject="Team Meeting",
-    body="Meeting at 2pm today.",
-    to=["alice@company.com", "bob@company.com", "charlie@company.com"]
-)
-```
-
-**Validation Rules:**
-
-- At least one `to` recipient required
-- Maximum 100 total recipients (to + cc + bcc)
-- All email addresses must be valid format
-- User confirmation required before sending
-
-**Error Codes:**
-
-- `validation_error`: Invalid recipients or parameters
-- `cancelled`: User cancelled the send operation
-- `send_error`: Mail.app failed to send the email
-- `unknown`: Unexpected error occurred
 
 ---
 
@@ -446,13 +376,6 @@ update_message(
 
 ## Coming Soon (Phase 2 - v0.2.0)
 
-### send_email_with_attachments
-
-Send email with file attachments.
-
-**Parameters:**
-- `subject`, `body`, `to`, `cc`, `bcc` (same as send_email)
-- `attachments`: array[string] - File paths to attach
 
 ### create_mailbox
 
@@ -583,62 +506,6 @@ list_mailboxes(account="my gmail account")
 
 ## Phase 2 Tools (v0.2.0)
 
-### send_email_with_attachments
-
-Send an email with file attachments via Apple Mail.
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `subject` | string | Yes | - | Email subject line |
-| `body` | string | Yes | - | Email body content |
-| `to` | list[string] | Yes | - | List of recipient email addresses |
-| `attachments` | list[string] | Yes | - | List of file paths to attach |
-| `from_account` | string | No | None | Mail.app account name or UUID to send from. None = Mail.app default sender. Returns `error_type: "account_not_found"` if no match. |
-| `cc` | list[string] | No | None | CC recipients |
-| `bcc` | list[string] | No | None | BCC recipients |
-
-**Returns:**
-
-```json
-{
-  "success": true,
-  "message_id": "67890",
-  "recipients": ["recipient@example.com"],
-  "attachment_count": 2
-}
-```
-
-**Examples:**
-
-```python
-# Send email with single attachment
-send_email_with_attachments(
-    subject="Monthly Report",
-    body="Please find the report attached.",
-    to=["manager@company.com"],
-    attachments=["/Users/me/Documents/report.pdf"]
-)
-
-# Send with multiple attachments
-send_email_with_attachments(
-    subject="Project Files",
-    body="Here are all the project files.",
-    to=["team@company.com"],
-    cc=["manager@company.com"],
-    attachments=[
-        "/Users/me/Projects/design.pdf",
-        "/Users/me/Projects/specs.docx"
-    ]
-)
-```
-
-**Security Notes:**
-- File size limit: 25MB per attachment (default)
-- Dangerous file types blocked by default (.exe, .bat, .sh, etc.)
-- Path traversal attacks prevented
-- All file paths validated before sending
 
 ---
 
@@ -785,122 +652,180 @@ Mail.app's AppleScript dictionary exposes no path to permanent-delete that bypas
 
 ---
 
-## Phase 3 Tools (v0.3.0)
+## Drafts Lifecycle (v0.7.0)
 
-### reply_to_message
+The drafts lifecycle replaces the v0.6 send group (`send_email`,
+`send_email_with_attachments`, `reply_to_message`, `forward_message`)
+with three tools that match Mail.app's actual primitive: every outgoing
+message is a draft until you `send` it. Net surface: 4 → 3, with
+`update_draft` and `delete_draft` being net-new capabilities (deferred
+sends, edit-before-send, discard).
 
-Reply to a message.
+### create_draft
+
+Create a draft (fresh, reply, or forward). Optionally send immediately.
+
+**⚠️ Security Note:** When `send_now=True`, requires user confirmation.
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `message_id` | string | Yes | - | ID of the message to reply to |
-| `body` | string | Yes | - | Reply body text |
-| `reply_all` | boolean | No | False | If True, reply to all recipients; if False, reply only to sender |
-| `from_account` | string | No | None | Mail.app account name or UUID to send the reply from. None = Mail.app default sender. Returns `error_type: "account_not_found"` if no match. |
+| `reply_to` | string | No | None | Mail.app id of a message to reply to. Mutually exclusive with `forward_of`. When set, `to`/`cc` recipients and `subject` are auto-derived (override by passing them explicitly). |
+| `forward_of` | string | No | None | Mail.app id of a message to forward. Mutually exclusive with `reply_to`. `to` is required (recipient of the forward). |
+| `to` | array[string] | When fresh | None | Recipient list. For reply/forward: `None` keeps auto-derived; `[]` clears; populated list replaces. |
+| `cc` | array[string] | No | None | CC recipients (same semantics as `to` for reply/forward). |
+| `bcc` | array[string] | No | None | BCC recipients. |
+| `subject` | string | When fresh | None | Subject. For reply/forward, `None` keeps Mail's `Re:`/`Fwd:` prefix. |
+| `body` | string | No | "" | Body text. For reply/forward, a non-empty body **replaces** Mail's auto-quoted content (the auto-quote isn't readable from AppleScript before save). Empty body leaves Mail's auto-quote intact. |
+| `attachment_paths` | array[string] | No | None | List of file paths to attach. |
+| `reply_all` | boolean | No | False | For `reply_to` only — use `reply to all`. |
+| `template_name` | string | No | None | Optional template to render for `subject` + `body`. Caller-supplied `subject`/`body` override the rendered output. |
+| `template_vars` | object | No | None | Variables for the template renderer. Requires `template_name`. |
+| `from_account` | string | No | None | Mail.app account name or UUID. None = Mail's default. |
+| `send_now` | boolean | No | False | `False` saves as draft. `True` sends immediately and elicits confirmation. |
 
 **Returns:**
 
 ```json
 {
   "success": true,
-  "reply_id": "67890",
-  "original_message_id": "12345",
-  "reply_all": false
+  "draft_id": "161055",
+  "sent_message_id": "",
+  "details": {"seed_kind": "new", "send_now": false}
 }
 ```
+
+`draft_id` is empty when sent (`send_now=True`); `sent_message_id` is
+reserved for future use.
 
 **Examples:**
 
 ```python
-# Reply to sender only
-reply_to_message(
-    message_id="12345",
-    body="Thanks for your email! I'll get back to you soon."
+# Save a fresh draft for later
+create_draft(
+    to=["alice@example.com"],
+    subject="Project Update",
+    body="Here's the latest..."
 )
 
-# Reply to all recipients
-reply_to_message(
-    message_id="12345",
-    body="Thanks everyone for the discussion.",
-    reply_all=True
+# Reply, save as draft (preserves Mail's auto-quote)
+create_draft(reply_to="160989")
+
+# Reply with custom body, then send
+create_draft(reply_to="160989", body="Sounds good, thanks!", send_now=True)
+
+# Forward with attachment
+create_draft(
+    forward_of="160989",
+    to=["recipient@example.com"],
+    body="FYI",
+    attachment_paths=["/tmp/report.pdf"]
 )
 
-# Quick acknowledgment
-reply_to_message(
-    message_id="12345",
-    body="Received, thank you!"
+# Template-driven send
+create_draft(
+    reply_to="160989",
+    template_name="thanks-for-meeting",
+    send_now=True
 )
 ```
 
-**Notes:**
-- Reply automatically maintains proper email threading
-- Original subject is preserved with "Re:" prefix
-- Reply-To headers are respected
-- Message is sent immediately after creation
+**Error Codes:**
+
+- `validation_error`: Mutually exclusive seeds, missing required fields, or `template_vars` without `template_name`.
+- `message_not_found`: `reply_to` / `forward_of` doesn't match any Mail.app message.
+- `account_not_found`: `from_account` doesn't match.
+- `file_not_found`: An attachment path doesn't exist.
+- `cancelled`: User declined the elicitation prompt (when `send_now=True`).
+- `applescript_error`, `unknown`: Lower-level failures.
 
 ---
 
-### forward_message
+### update_draft
 
-Forward a message to recipients.
+Update an existing draft. Implemented as **delete-and-recreate** —
+Mail.app forbids mutating saved drafts, so this tool reads the
+current state, deletes the draft, and creates a new one with the
+merged fields. Threading headers (for replies) and forward anchors
+are preserved via persisted seed metadata.
+
+**⚠️ Returns a NEW `draft_id`** — the input id is no longer valid
+after this call. Callers caching the id must re-read the response.
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `message_id` | string | Yes | - | ID of the message to forward |
-| `to` | list[string] | Yes | - | List of recipient email addresses |
-| `body` | string | No | "" | Optional body text to add before forwarded content |
-| `from_account` | string | No | None | Mail.app account name or UUID to send the forward from. None = Mail.app default sender. Returns `error_type: "account_not_found"` if no match. |
-| `cc` | list[string] | No | None | Optional CC recipients |
-| `bcc` | list[string] | No | None | Optional BCC recipients |
+| `draft_id` | string | Yes | - | Mail.app id of the existing draft. |
+| `to` / `cc` / `bcc` | array[string] | No | None | Override recipient groups: `None` keeps existing, `[]` clears, populated list replaces. |
+| `subject` | string | No | None | Override subject. `None` keeps existing. |
+| `body` | string | No | None | Override body. `None` keeps existing; non-None replaces (including `""`). |
+| `attachment_paths` | array[string] | No | None | Override attachments: `None` **preserves existing** (extracted to a temp dir and re-attached); `[]` clears; populated list replaces. |
+| `template_name` / `template_vars` | string / object | No | None | Optional template render. User-supplied `subject`/`body` override the rendered output. |
+| `from_account` | string | No | None | Override sender. |
+| `send_now` | boolean | No | False | `False` saves new draft. `True` sends after eliciting confirmation. |
 
 **Returns:**
 
 ```json
 {
   "success": true,
-  "forward_id": "67890",
-  "original_message_id": "12345",
-  "recipients": ["colleague@example.com"],
-  "cc": null,
-  "bcc": null
+  "draft_id": "161200",
+  "sent_message_id": "",
+  "details": {"seed_kind": "reply", "send_now": false}
 }
 ```
+
+**Externally-created drafts:** for drafts not created via `create_draft`,
+seed recovery falls back to scanning Mail.app for the draft's
+`In-Reply-To` header — this can take 30s+ on large mailboxes. Forward
+seeds without persisted state are misclassified as fresh.
 
 **Examples:**
 
 ```python
-# Simple forward
-forward_message(
-    message_id="12345",
-    to=["colleague@example.com"]
-)
+# Fix a typo in the body, keep recipients/attachments/threading
+update_draft(draft_id="161055", body="Corrected body text")
 
-# Forward with context
-forward_message(
-    message_id="12345",
-    to=["team@company.com"],
-    body="FYI - thought this would be relevant to our project."
-)
+# Add a recipient (replaces the to list)
+update_draft(draft_id="161055", to=["alice@example.com", "bob@example.com"])
 
-# Forward to multiple recipients with CC
-forward_message(
-    message_id="12345",
-    to=["colleague1@example.com", "colleague2@example.com"],
-    cc=["manager@example.com"],
-    body="Please review this email thread."
-)
+# Clear all attachments
+update_draft(draft_id="161055", attachment_paths=[])
+
+# Send the draft after editing
+update_draft(draft_id="161055", body="Final version", send_now=True)
 ```
 
-**Notes:**
-- Original message content is automatically included
-- Attachments are preserved by default
-- Subject is prefixed with "Fwd:"
-- Email validation is enforced for all recipients
-- Message is sent immediately after creation
+**Error Codes:** Same as `create_draft`, plus:
+
+- `draft_not_found`: `draft_id` doesn't match any existing draft.
+- `invalid_draft_id`: `draft_id` failed validation (path traversal, etc.).
+
+---
+
+### delete_draft
+
+Move a draft to Trash. One-way discard for the lifecycle; Mail.app no
+longer treats trashed drafts as editable.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `draft_id` | string | Yes | - | Mail.app id of the draft. |
+
+**Returns:**
+
+```json
+{"success": true, "draft_id": "161055"}
+```
+
+**Error Codes:**
+
+- `draft_not_found`: `draft_id` doesn't match any existing draft.
+- `invalid_draft_id`: `draft_id` failed validation.
 
 ---
 
@@ -938,11 +863,12 @@ results = search_messages(
 # 2. Get full message
 original = get_message(message_id=results["messages"][0]["id"])
 
-# 3. Send reply
-send_email(
-    subject=f"Re: {original['message']['subject']}",
+# 3. Send reply (use create_draft with send_now=True to skip the
+#    save-then-send dance)
+create_draft(
+    reply_to=results["messages"][0]["id"],
     body="Thank you for your proposal...",
-    to=[original["message"]["sender"]]
+    send_now=True,
 )
 ```
 
@@ -1201,36 +1127,24 @@ Remove a template by name. **Elicits user confirmation** before deleting.
 ### render_template
 
 Render a template into ready-to-send text. **No side effects** — the
-caller passes the rendered subject + body to `reply_to_message`,
-`forward_message`, or `send_email` to actually send.
+caller passes the rendered subject + body to `create_draft` to send.
+For most workflows, use `create_draft(template_name=...)` directly,
+which folds rendering into the send call.
 
 ```python
-# Render a reply template against a real message:
-rendered = render_template(
-    name="polite-decline",
-    message_id="<abc@example.com>",
-)
-# rendered = {
-#   "success": True,
-#   "subject": "Re: Project X update",
-#   "body": "Hi Alice,\n\nUnfortunately I won't be able to...",
-#   "used_vars": {"today": "2026-04-25", "recipient_name": "Alice", ...}
-# }
-reply_to_message(
-    message_id="<abc@example.com>",
-    body=rendered["body"],
+# Inline render-then-send (one tool call):
+create_draft(
+    reply_to="<abc@example.com>",
+    template_name="polite-decline",
+    send_now=True,
 )
 
-# Or for a fresh send with custom vars:
+# Standalone render for a "preview" workflow (no draft created):
 rendered = render_template(
     name="status-update",
     vars={"project": "Q3 plan", "status": "on track"},
 )
-send_email(
-    to=["alice@example.com"],
-    subject=rendered["subject"] or "Status update",
-    body=rendered["body"],
-)
+# rendered = {"success": True, "subject": "...", "body": "...", "used_vars": {...}}
 ```
 
 User-supplied `vars` override auto-fills. Missing placeholders return
