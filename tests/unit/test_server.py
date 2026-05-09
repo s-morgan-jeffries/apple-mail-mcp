@@ -2948,7 +2948,11 @@ class TestDraftToolErrorPaths:
         )
 
         # Have extract create a real file so the path is non-empty.
-        def fake_extract(draft_id: str, names: list[str], dest: Path) -> list[Path]:
+        from pathlib import Path
+
+        def fake_extract(
+            draft_id: str, names: list[str], dest: Path
+        ) -> list[Path]:
             (dest / "0").mkdir(parents=True, exist_ok=True)
             p = dest / "0" / "report.pdf"
             p.write_bytes(b"x")
@@ -3024,9 +3028,8 @@ class TestDraftToolErrorPaths:
         mock_logger: MagicMock,
     ) -> None:
         """Template renders subject + body when caller didn't supply them."""
-        from apple_mail_mcp.drafts import default_root  # noqa: F401
         from apple_mail_mcp.server import update_draft
-        from apple_mail_mcp.templates import TemplateStore, Template
+        from apple_mail_mcp.templates import Template, TemplateStore
 
         # Write a template the renderer can pick up.
         store = TemplateStore()
