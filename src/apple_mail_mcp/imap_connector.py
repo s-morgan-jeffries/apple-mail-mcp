@@ -275,6 +275,42 @@ def _strip_brackets(s: str) -> str:
     return s
 
 
+def _flatten_thread_clusters(tree: Any) -> Iterator[set[int]]:
+    """Yield each top-level cluster of a THREAD result as a flat set of UIDs.
+
+    IMAPClient's ``client.thread()`` returns nested tuples per RFC 5256 —
+    each top-level element is one thread, with possibly-nested replies
+    representing the reply tree. For dispatch (#123 Tier 2) we don't care
+    about the tree shape; we just need to know which UIDs belong to which
+    cluster so we can intersect with the anchor's relevant_uids.
+
+    Edge cases:
+    - The result may be ``None`` if the server returned an empty THREAD
+      response — we yield nothing.
+    - Each leaf may be an int or a string-coerced int depending on the
+      IMAP server / IMAPClient version; we coerce to int.
+    """
+    if not tree:
+        return
+    for top in tree:
+        out: set[int] = set()
+        _flatten_one(top, out)
+        if out:
+            yield out
+
+
+def _flatten_one(node: Any, out: set[int]) -> None:
+    """Recursive walk of a THREAD nested-tuple node, adding UIDs to ``out``."""
+    if isinstance(node, (tuple, list)):
+        for child in node:
+            _flatten_one(child, out)
+    else:
+        try:
+            out.add(int(node))
+        except (TypeError, ValueError):
+            pass
+
+
 def _format_sender(envelope: Envelope) -> str:
     from_ = envelope.from_ or ()
     if not from_:
@@ -720,36 +756,47 @@ class ImapConnector:
     ) -> list[dict[str, Any]]:
         """Return all messages in the anchor's thread across the account.
 
-        Tiered, capability-detected dispatch (issue #122):
+        Tiered, capability-detected dispatch:
 
-        - **Tier 1 (Gmail X-GM-THRID)** — when ``X-GM-EXT-1`` is in the
-          server's CAPABILITY list, look the conversation up by Gmail's
-          64-bit thread ID against ``[Gmail]/All Mail`` (resolved via
-          ``\\All`` SPECIAL-USE flag, which is localization-safe). Five
-          round-trips total, mailbox-count-independent — replaces a
-          ~1100-round-trip BFS on a 91-label Gmail account with ~5.
+        - **Tier 1 (Gmail X-GM-THRID via All Mail)** (#122) — when
+          ``X-GM-EXT-1`` is advertised AND ``[Gmail]/All Mail`` is
+          visible (``\\All`` SPECIAL-USE flag), look the conversation
+          up by Gmail's 64-bit thread ID. ~5 round-trips,
+          mailbox-count-independent.
+
+        - **Tier 1.5 (Gmail X-GM-THRID per-mailbox)** (#125) — when
+          ``X-GM-EXT-1`` is advertised but All Mail is hidden over IMAP
+          (per-folder-size opt-out in Gmail Settings — common). Find
+          the anchor's UID + X-GM-THRID in INBOX or Sent, then search
+          every selectable folder by X-GM-THRID. ~2+M*2 round-trips
+          (~186 on a 92-folder account vs ~1100 for BFS).
+
+        - **Tier 2 (RFC 5256 THREAD)** (#123) — when ``THREAD=REFERENCES``
+          or ``THREAD=REFS`` is advertised (Fastmail, some Dovecot;
+          NOT Gmail typically, NOT iCloud). Per mailbox: a single
+          THREAD command returns nested UID tuples representing the
+          full thread structure; walk to find clusters containing
+          relevant UIDs. ~M*2-4 round-trips depending on anchor
+          locality.
 
         - **Tier 3 (header-search BFS)** — universal fallback. Iterates
-          every mailbox on the server; searches Message-ID / In-Reply-To /
-          References for every known thread ID. Used on iCloud, Fastmail,
-          and any provider that doesn't advertise the X-GM-EXT-1 path.
-          Also used when Tier 1 advertises but rejects mid-flight (server
-          lied about its capabilities).
+          every mailbox; searches Message-ID / In-Reply-To /
+          References for every known thread ID. Used on iCloud and
+          any provider not covered above. Also used when a higher tier
+          advertises but rejects mid-flight (server lied about its
+          capabilities).
 
-        Tier 2 (RFC 5256 THREAD) is reserved for #123 — slot in another
-        capability check between Tier 1 and Tier 3 there.
-
-        A single ``_session()`` covers all tiers, so a Tier 1 → Tier 3
-        fall-through doesn't pay a second connect+login. With the pool
-        (#75), both tiers share the cached connection.
+        A single ``_session()`` covers all tiers, so fall-through
+        doesn't pay a second connect+login. With the pool (#75),
+        all tiers share the cached connection.
 
         Args:
             anchor_rfc_message_id: RFC 5322 Message-ID of the thread anchor,
                 bracketless (as returned by _strip_brackets).
             anchor_references: List of Message-IDs from the anchor's
                 References header, bracketless, order preserved. Used by
-                Tier 3; Tier 1 doesn't need them (X-GM-THRID is the
-                authoritative grouping).
+                Tier 2 + Tier 3; Tier 1 / 1.5 don't need them
+                (X-GM-THRID is the authoritative grouping).
 
         Returns:
             List of message dicts in the same shape as search_messages
@@ -758,12 +805,29 @@ class ImapConnector:
             chronologically ascending.
         """
         with self._session() as client:
-            # Tier 1: Gmail X-GM-THRID — fastest, mailbox-count-independent.
+            # Tier 1: Gmail X-GM-THRID via [Gmail]/All Mail
             if self._has_capability(client, b"X-GM-EXT-1"):
                 tier1 = self._thread_via_xgm_thrid(client, anchor_rfc_message_id)
                 if tier1 is not None:
                     return tier1
-                # Else fall through to Tier 3 in the same session.
+
+                # Tier 1.5: Gmail X-GM-THRID per-mailbox (when All Mail hidden)
+                tier_1_5 = self._thread_via_xgm_per_mailbox(
+                    client, anchor_rfc_message_id
+                )
+                if tier_1_5 is not None:
+                    return tier_1_5
+
+            # Tier 2: RFC 5256 THREAD (Fastmail, Dovecot)
+            if (
+                self._has_capability(client, b"THREAD=REFERENCES")
+                or self._has_capability(client, b"THREAD=REFS")
+            ):
+                tier2 = self._thread_via_imap_thread(
+                    client, anchor_rfc_message_id, anchor_references
+                )
+                if tier2 is not None:
+                    return tier2
 
             # Tier 3: header-search BFS — universal fallback.
             return self._find_thread_members_bfs(
@@ -863,6 +927,19 @@ class ImapConnector:
                 return cast(str, name)
         return None
 
+    @staticmethod
+    def _find_sent_folder(client: IMAPClient) -> str | None:
+        """Return the Sent folder name via the ``\\Sent`` SPECIAL-USE flag,
+        or None if not found. Used by Tier 1.5 (#125) as the second
+        anchor-lookup target after INBOX — covers the common case of a
+        thread anchored at a sent message."""
+        for flags, _delim, name in client.list_folders():
+            if b"\\Sent" in flags:
+                if isinstance(name, (bytes, bytearray)):
+                    return name.decode("utf-8", errors="replace")
+                return cast(str, name)
+        return None
+
     def _thread_via_xgm_thrid(
         self,
         client: IMAPClient,
@@ -921,6 +998,225 @@ class ImapConnector:
                 continue
             flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
             collected[clean_msgid] = _envelope_to_dict(envelope, flags)
+
+        return sorted(
+            collected.values(),
+            key=lambda m: m.get("date_received") or "",
+        )
+
+    def _thread_via_xgm_per_mailbox(
+        self,
+        client: IMAPClient,
+        anchor_rfc_message_id: str,
+    ) -> list[dict[str, Any]] | None:
+        """Tier 1.5 (Gmail X-GM-THRID per-mailbox, #125).
+
+        Used when ``X-GM-EXT-1`` is advertised but ``[Gmail]/All Mail`` is
+        hidden over IMAP (Gmail Settings → Forwarding and POP/IMAP →
+        Folder size limits). The per-mailbox X-GM-THRID search covers
+        the same conversation-grouping the All Mail path would, just with
+        ~M*2 round-trips instead of ~5.
+
+        Returns ``None`` (not raise) when the strategy can't find the
+        anchor or the X-GM-THRID query gets rejected — dispatcher then
+        falls through to Tier 2 / Tier 3.
+        """
+        # Step 1: locate the anchor's UID. Try INBOX first, then \\Sent.
+        bracketed = f"<{anchor_rfc_message_id}>"
+        anchor_uid: int | None = None
+        for folder_name in self._anchor_lookup_folders(client):
+            try:
+                client.select_folder(folder_name, readonly=True)
+            except IMAPClientError:
+                continue
+            try:
+                uids = client.search(["HEADER", "Message-ID", bracketed])
+            except IMAPClientError:
+                continue
+            if uids:
+                anchor_uid = uids[0]
+                break
+
+        if anchor_uid is None:
+            # Anchor not in INBOX or Sent → fall through to Tier 2 / Tier 3.
+            return None
+
+        # Step 2: get the anchor's X-GM-THRID.
+        try:
+            thrid_fetch = client.fetch([anchor_uid], [b"X-GM-THRID"])
+        except IMAPClientError:
+            return None
+        thrid_entry: dict[bytes, Any] = next(iter(thrid_fetch.values()), {})
+        thrid = thrid_entry.get(b"X-GM-THRID")
+        if thrid is None:
+            return None
+
+        # Step 3: iterate every selectable folder, collect cluster UIDs by
+        # X-GM-THRID, FETCH ENVELOPE+FLAGS for matches.
+        collected: dict[str, dict[str, Any]] = {}
+        thrid_str = str(thrid)
+        for flags, _delim, raw_name in client.list_folders():
+            if b"\\Noselect" in flags:
+                continue
+            if isinstance(raw_name, (bytes, bytearray)):
+                folder_name = raw_name.decode("utf-8", errors="replace")
+            else:
+                folder_name = cast(str, raw_name)
+            try:
+                client.select_folder(folder_name, readonly=True)
+            except IMAPClientError as exc:
+                logger.debug(
+                    "Tier 1.5: skipping mailbox %s (SELECT rejected): %s",
+                    folder_name, exc,
+                )
+                continue
+            try:
+                uids = client.search(["X-GM-THRID", thrid_str])
+            except IMAPClientError as exc:
+                logger.debug(
+                    "Tier 1.5: skipping mailbox %s (X-GM-THRID search "
+                    "rejected): %s",
+                    folder_name, exc,
+                )
+                continue
+            if not uids:
+                continue
+            try:
+                fetched = client.fetch(uids, [b"ENVELOPE", b"FLAGS"])
+            except IMAPClientError:
+                continue
+            for fetch_entry in fetched.values():
+                envelope = fetch_entry.get(b"ENVELOPE")
+                if envelope is None:
+                    continue
+                raw_msgid = getattr(envelope, "message_id", None)
+                if not raw_msgid:
+                    continue
+                clean_msgid = _strip_brackets(_decode(raw_msgid))
+                if clean_msgid in collected:
+                    continue
+                fetch_flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
+                collected[clean_msgid] = _envelope_to_dict(
+                    envelope, fetch_flags
+                )
+
+        return sorted(
+            collected.values(),
+            key=lambda m: m.get("date_received") or "",
+        )
+
+    def _anchor_lookup_folders(
+        self, client: IMAPClient
+    ) -> Iterator[str]:
+        """Yield folder names to try in order when looking up the
+        anchor's UID for Tier 1.5: INBOX first, then ``\\Sent`` (if
+        distinct). Covers ~95% of cases per #125."""
+        yield "INBOX"
+        sent = self._find_sent_folder(client)
+        if sent and sent != "INBOX":
+            yield sent
+
+    def _thread_via_imap_thread(
+        self,
+        client: IMAPClient,
+        anchor_rfc_message_id: str,
+        anchor_references: list[str],
+    ) -> list[dict[str, Any]] | None:
+        """Tier 2 (RFC 5256 THREAD, #123).
+
+        Used when the server advertises ``THREAD=REFERENCES`` or
+        ``THREAD=REFS`` (Fastmail, some Dovecot deployments). Per
+        mailbox: SELECT, narrow-search for any UID containing the
+        anchor's Message-ID or referencing it, then THREAD on the
+        full mailbox to collect the cluster(s) those UIDs belong to,
+        then FETCH ENVELOPE+FLAGS.
+
+        Returns ``None`` (not raise) when THREAD gets rejected
+        mid-flight — dispatcher then falls through to Tier 3.
+        """
+        bracketed = f"<{anchor_rfc_message_id}>"
+        # Pick the algorithm name the server actually advertises.
+        if self._has_capability(client, b"THREAD=REFERENCES"):
+            algo = "REFERENCES"
+        elif self._has_capability(client, b"THREAD=REFS"):
+            algo = "REFS"
+        else:
+            return None
+
+        collected: dict[str, dict[str, Any]] = {}
+        for flags, _delim, raw_name in client.list_folders():
+            if b"\\Noselect" in flags:
+                continue
+            if isinstance(raw_name, (bytes, bytearray)):
+                folder_name = raw_name.decode("utf-8", errors="replace")
+            else:
+                folder_name = cast(str, raw_name)
+            try:
+                client.select_folder(folder_name, readonly=True)
+            except IMAPClientError as exc:
+                logger.debug(
+                    "Tier 2: skipping mailbox %s (SELECT rejected): %s",
+                    folder_name, exc,
+                )
+                continue
+            # Narrow-search: anchor UID + sibling-replies in this mailbox.
+            try:
+                anchor_uids = client.search(
+                    ["HEADER", "Message-ID", bracketed]
+                )
+                ref_uids = client.search(
+                    ["HEADER", "References", bracketed]
+                )
+            except IMAPClientError:
+                continue
+            relevant_uids = set(anchor_uids) | set(ref_uids)
+            if not relevant_uids:
+                continue
+            # Run THREAD; walk tree for clusters intersecting relevant_uids.
+            try:
+                tree = client.thread(
+                    algorithm=algo, criteria="ALL", charset="UTF-8"
+                )
+            except IMAPClientError as exc:
+                logger.debug(
+                    "Tier 2: THREAD rejected on mailbox %s: %s. "
+                    "Falling through to Tier 3.",
+                    folder_name, exc,
+                )
+                # Mid-flight rejection — server lied about advertised cap.
+                # Surface as None so the dispatcher falls through.
+                return None
+            cluster_uids: set[int] = set()
+            for cluster in _flatten_thread_clusters(tree):
+                if cluster & relevant_uids:
+                    cluster_uids |= cluster
+            if not cluster_uids:
+                continue
+            try:
+                fetched = client.fetch(
+                    sorted(cluster_uids), [b"ENVELOPE", b"FLAGS"]
+                )
+            except IMAPClientError:
+                continue
+            for fetch_entry in fetched.values():
+                envelope = fetch_entry.get(b"ENVELOPE")
+                if envelope is None:
+                    continue
+                raw_msgid = getattr(envelope, "message_id", None)
+                if not raw_msgid:
+                    continue
+                clean_msgid = _strip_brackets(_decode(raw_msgid))
+                if clean_msgid in collected:
+                    continue
+                fetch_flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
+                collected[clean_msgid] = _envelope_to_dict(
+                    envelope, fetch_flags
+                )
+
+        if not collected:
+            # No mailbox in the account had any matching message — Tier 2
+            # didn't help. Fall through.
+            return None
 
         return sorted(
             collected.values(),

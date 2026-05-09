@@ -153,10 +153,11 @@ The universal fallback when neither extension is advertised. Stays as-is. **iClo
 
 ## Follow-up issues filed
 
-- **#122 — `[perf] Use X-GM-THRID for get_thread on Gmail accounts`** — implements Tier 1.
-- **#123 — `[perf] Use RFC 5256 THREAD for get_thread when server advertises capability`** — implements Tier 2.
+- **#122 — `[perf] Use X-GM-THRID for get_thread on Gmail accounts`** — implements Tier 1. **Shipped.**
+- **#125 — `[perf] X-GM-THRID per-mailbox iteration when [Gmail]/All Mail is hidden from IMAP`** — implements Tier 1.5. **Shipped.** Smoke-verified against real Gmail (92 folders): 25.5s vs ~100s for Tier 3 BFS, ~4× win. Triggered when `X-GM-EXT-1` is advertised but the `\\All` SPECIAL-USE flag is not present in the folder listing.
+- **#123 — `[perf] Use RFC 5256 THREAD for get_thread when server advertises capability`** — implements Tier 2. **Shipped.** Unit-tested only (no Fastmail/Dovecot account configured for live verification — first real-server use will surface any quirks). Triggered when `THREAD=REFERENCES` or `THREAD=REFS` is advertised.
 
-Both are independent of each other and of the current iCloud path. iCloud users get no benefit from either; their best win remains improving the BFS itself (e.g. parallelizing across mailboxes, bounding by `\\Trash` / `\\Junk` mailbox skip lists, or accepting partial coverage on huge accounts) — but that's a separate research question and is **not** the same as the THREAD/X-GM-THRID question this doc answers.
+All three tiers are now in production for the connector's `find_thread_members`. iCloud users get no benefit from any of them; their best win remains improving the BFS itself (e.g. parallelizing across mailboxes, bounding by `\\Trash` / `\\Junk` mailbox skip lists, or accepting partial coverage on huge accounts) — but that's a separate research question and is **not** the same as the THREAD/X-GM-THRID question this doc answers.
 
 ## Provenance
 

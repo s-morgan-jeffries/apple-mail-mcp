@@ -1583,3 +1583,333 @@ class TestFindThreadMembersGmail:
         )
 
         assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #125: Gmail X-GM-THRID per-mailbox iteration (Tier 1.5)
+# ---------------------------------------------------------------------------
+
+
+def _gmail_folder_listing_no_all_with_sent() -> list:
+    """Gmail-style listing where [Gmail]/All Mail is hidden (per-folder
+    IMAP opt-out). \\Sent is still visible. This is the configuration
+    Tier 1.5 (#125) is designed for."""
+    return [
+        ((b"\\HasNoChildren",), b"/", "INBOX"),
+        ((b"\\HasNoChildren", b"\\Drafts"), b"/", "[Gmail]/Drafts"),
+        ((b"\\HasNoChildren", b"\\Sent"), b"/", "[Gmail]/Sent Mail"),
+        ((b"\\HasNoChildren", b"\\Trash"), b"/", "[Gmail]/Trash"),
+        ((b"\\HasNoChildren",), b"/", "Receipts"),
+        ((b"\\HasNoChildren",), b"/", "Newsletters"),
+    ]
+
+
+class TestFindThreadMembersGmailPerMailbox:
+    """Tier 1.5 (Gmail X-GM-THRID per-mailbox, #125) dispatch.
+
+    Triggered when X-GM-EXT-1 is advertised but \\All is not in the
+    folder listing. Anchor lookup tries INBOX then \\Sent; per-mailbox
+    SEARCH X-GM-THRID collects siblings."""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_uses_per_mailbox_when_all_mail_hidden(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """X-GM-EXT-1 advertised, no \\All folder → Tier 1 returns None,
+        Tier 1.5 fires: SELECT INBOX, SEARCH for anchor, FETCH X-GM-THRID,
+        then iterate all selectable folders SEARCHing X-GM-THRID."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_no_all_with_sent()
+
+        # Searches in order:
+        # 1. INBOX HEADER Message-ID anchor → [42]
+        # 2-7. Per-folder X-GM-THRID search (6 folders)
+        client.search.side_effect = [
+            [42],         # anchor in INBOX
+            [42, 43],     # INBOX X-GM-THRID
+            [],           # Drafts: empty
+            [101],        # Sent Mail: 1 hit
+            [],           # Trash: empty
+            [],           # Receipts: empty
+            [],           # Newsletters: empty
+        ]
+        # FETCHes:
+        # 1. X-GM-THRID for the anchor UID
+        # 2. ENVELOPE+FLAGS for INBOX hits
+        # 3. ENVELOPE+FLAGS for Sent hit
+        client.fetch.side_effect = [
+            {42: {b"X-GM-THRID": 9876543210987654321}},
+            _fake_fetch_result([42, 43]),
+            _fake_fetch_result([101]),
+        ]
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        # Anchor SELECTed INBOX, then per-mailbox iteration SELECTed each.
+        select_paths = [
+            call.args[0] for call in client.select_folder.call_args_list
+        ]
+        assert select_paths[0] == "INBOX"  # anchor lookup
+        assert "[Gmail]/Sent Mail" in select_paths
+        # Three messages collected (deduped: anchor's UID 42 appears once).
+        assert len(result) == 3
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_falls_back_to_sent_when_anchor_not_in_inbox(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """If INBOX SEARCH returns no anchor UID, Tier 1.5 SELECTs the
+        \\Sent folder and tries again. Anchor found there → continue."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_no_all_with_sent()
+
+        client.search.side_effect = [
+            [],         # INBOX anchor SEARCH: not here
+            [55],       # Sent anchor SEARCH: found
+            [55],       # INBOX X-GM-THRID
+            [],         # Drafts
+            [55],       # Sent X-GM-THRID
+            [],         # Trash
+            [],         # Receipts
+            [],         # Newsletters
+        ]
+        client.fetch.side_effect = [
+            {55: {b"X-GM-THRID": 1111}},
+            _fake_fetch_result([55]),  # INBOX
+            _fake_fetch_result([55]),  # Sent (deduped by msg-id)
+        ]
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        select_paths = [
+            call.args[0] for call in client.select_folder.call_args_list
+        ]
+        assert select_paths[0] == "INBOX"
+        assert select_paths[1] == "[Gmail]/Sent Mail"
+        # Single result (deduped from INBOX+Sent).
+        assert len(result) == 1
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_returns_none_when_anchor_in_neither_inbox_nor_sent(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Anchor SEARCH returns [] in both INBOX and Sent → Tier 1.5
+        returns None → dispatcher falls through to BFS (Tier 3)."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_no_all_with_sent()
+
+        client.search.return_value = []  # blanket empty
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        # No FETCH X-GM-THRID was issued (anchor never found).
+        for call in client.fetch.call_args_list:
+            data = call[0][1]
+            assert b"X-GM-THRID" not in data, (
+                "Tier 1.5 should not FETCH X-GM-THRID after failed anchor lookup"
+            )
+        # Tier 3 (BFS) ran with empty results.
+        assert result == []
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_xgm_thrid_query_rejection_per_mailbox_continues(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """A single folder's X-GM-THRID search rejection is logged DEBUG
+        and skipped; doesn't tank the whole strategy."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _gmail_caps_with_xgm()
+        client.list_folders.return_value = _gmail_folder_listing_no_all_with_sent()
+
+        client.search.side_effect = [
+            [42],                            # anchor in INBOX
+            [42],                            # INBOX X-GM-THRID OK
+            IMAPClientError("rejected"),     # Drafts rejects
+            [101],                           # Sent Mail OK
+            [],                              # Trash
+            [],                              # Receipts
+            [],                              # Newsletters
+        ]
+        client.fetch.side_effect = [
+            {42: {b"X-GM-THRID": 1111}},
+            _fake_fetch_result([42]),
+            _fake_fetch_result([101]),
+        ]
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@gmail.com",
+            anchor_references=[],
+        )
+
+        assert len(result) == 2  # INBOX + Sent (Drafts skipped)
+
+
+# ---------------------------------------------------------------------------
+# Issue #123: RFC 5256 THREAD dispatch (Tier 2)
+# ---------------------------------------------------------------------------
+
+
+def _fastmail_caps_with_thread() -> set[bytes]:
+    """Capability list for a Fastmail-like server: THREAD=REFERENCES
+    advertised, no X-GM-EXT-1."""
+    return {
+        b"IMAP4REV1", b"UNSELECT", b"IDLE", b"NAMESPACE", b"QUOTA",
+        b"ID", b"UIDPLUS", b"ENABLE", b"CONDSTORE", b"ESEARCH",
+        b"SPECIAL-USE", b"THREAD=REFERENCES",
+    }
+
+
+def _caps_with_thread_refs_alias() -> set[bytes]:
+    """Capability set advertising the THREAD=REFS alias (RFC 5256)."""
+    return {
+        b"IMAP4REV1", b"UNSELECT", b"IDLE", b"NAMESPACE",
+        b"UIDPLUS", b"ENABLE", b"THREAD=REFS",
+    }
+
+
+def _fastmail_folder_listing() -> list:
+    """A small folder listing for THREAD-dispatch tests."""
+    return [
+        ((b"\\HasNoChildren",), b"/", "INBOX"),
+        ((b"\\HasNoChildren", b"\\Sent"), b"/", "Sent"),
+        ((b"\\HasNoChildren",), b"/", "Archive"),
+    ]
+
+
+class TestFindThreadMembersImapThread:
+    """Tier 2 (RFC 5256 THREAD, #123) dispatch."""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_uses_imap_thread_when_capability_advertised(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """THREAD=REFERENCES advertised → Tier 2 fires: per mailbox, narrow
+        SEARCH for anchor + sibling refs, then THREAD command, then walk
+        tree for matching clusters."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _fastmail_caps_with_thread()
+        client.list_folders.return_value = _fastmail_folder_listing()
+
+        # Per-mailbox: 2 SEARCHes (anchor MsgID, References) + (if any
+        # match) THREAD + FETCH.
+        client.search.side_effect = [
+            [7],   # INBOX HEADER Message-ID
+            [],    # INBOX HEADER References
+            [],    # Sent HEADER Message-ID
+            [],    # Sent HEADER References
+            [],    # Archive HEADER Message-ID
+            [99],  # Archive HEADER References (sibling reply)
+        ]
+        # THREAD response: nested tuples per RFC 5256.
+        client.thread.side_effect = [
+            ((7, 8, 9),),                  # INBOX cluster contains anchor
+            ((99, (100,)),),               # Archive cluster contains sibling
+        ]
+        client.fetch.side_effect = [
+            _fake_fetch_result([7, 8, 9]),
+            _fake_fetch_result([99, 100]),
+        ]
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@example.com",
+            anchor_references=[],
+        )
+
+        # THREAD called twice (INBOX + Archive); not on Sent.
+        assert client.thread.call_count == 2
+        for thread_call in client.thread.call_args_list:
+            assert thread_call.kwargs.get("algorithm") == "REFERENCES"
+        assert len(result) == 5
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_accepts_thread_refs_alias(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """THREAD=REFS (Gmail's shorter form) also triggers Tier 2;
+        algorithm passed to client.thread() is 'REFS' not 'REFERENCES'."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _caps_with_thread_refs_alias()
+        client.list_folders.return_value = _fastmail_folder_listing()
+        client.search.side_effect = [
+            [1],   # INBOX MsgID
+            [],    # INBOX References
+            [],    # Sent MsgID
+            [],    # Sent References
+            [],    # Archive MsgID
+            [],    # Archive References
+        ]
+        client.thread.return_value = ((1,),)
+        client.fetch.return_value = _fake_fetch_result([1])
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@example.com",
+            anchor_references=[],
+        )
+
+        algos = [
+            c.kwargs.get("algorithm") for c in client.thread.call_args_list
+        ]
+        assert all(a == "REFS" for a in algos)
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_skips_when_capability_missing(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """No THREAD=* in caps → Tier 2 helper never invoked."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _generic_caps_no_xgm()
+        client.list_folders.return_value = _generic_folder_listing_no_all()
+        client.search.return_value = []  # BFS finds nothing → fast exit
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@example.com",
+            anchor_references=[],
+        )
+
+        assert client.thread.call_count == 0
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_thread_command_rejection_falls_through_to_bfs(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """If client.thread() raises mid-flight (server lied about
+        THREAD capability), Tier 2 returns None → BFS runs."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = _fastmail_caps_with_thread()
+        client.list_folders.return_value = _fastmail_folder_listing()
+
+        client.search.side_effect = [
+            [1],   # INBOX MsgID
+            [],    # INBOX References
+        ] + [[]] * 100  # plenty for BFS to fast-exit
+        client.thread.side_effect = IMAPClientError("THREAD rejected")
+        client.fetch.return_value = {}
+
+        ImapConnector("h", 993, "u@e.com", "pw").find_thread_members(
+            anchor_rfc_message_id="anchor@example.com",
+            anchor_references=[],
+        )
+
+        # Tier 2 only made 2 SEARCHes (first folder, until THREAD raised).
+        # BFS then ran more SEARCHes — assert the count exceeds Tier 2's.
+        assert client.search.call_count > 2
