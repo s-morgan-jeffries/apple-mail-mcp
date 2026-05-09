@@ -20,8 +20,10 @@ from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
     MailDraftNotFoundError,
+    MailImapRequiredError,
     MailKeychainAccessDeniedError,
     MailKeychainEntryNotFoundError,
+    MailMailboxNotEmptyError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
     MailRuleNotFoundError,
@@ -2322,64 +2324,185 @@ class AppleMailConnector:
         self,
         account: str,
         name: str,
-        new_name: str,
+        new_name: str | None = None,
+        new_parent: str | None = None,
     ) -> bool:
-        """Rename an existing mailbox.
+        """Rename and/or re-parent an existing mailbox.
 
-        v1 supports rename only. Mail.app's AppleScript dictionary does
-        not expose working primitives for delete or re-parent on
-        mailboxes — those are tracked as IMAP-based follow-ups (#162,
-        #163). The IMAP `RENAME` operation does support move via path
-        change, but that's deferred for a unified IMAP write path.
+        - **Rename only** (``new_name`` set, ``new_parent`` is ``None``):
+          AppleScript's ``set name of mailbox X to "Y"``. Fast, no IMAP
+          credentials needed.
+        - **Move** (``new_parent`` set): IMAP RENAME with the destination
+          path computed from ``new_parent`` + the leaf of ``name``.
+          ``new_parent=""`` means move to top-level.
+          Requires IMAP credentials in Keychain (#73 opt-in flow).
+
+        At least one of ``new_name`` / ``new_parent`` must be provided.
+        Combined ("move and rename") works in one IMAP RENAME.
 
         Args:
             account: Account name or UUID.
             name: Current mailbox name. Slash-separated for nested
-                mailboxes (e.g. "Archive/2024").
-            new_name: Replacement name. Validated + sanitized against
-                path-traversal via ``sanitize_mailbox_name``.
+                mailboxes (e.g. ``"Archive/2024"``).
+            new_name: Replacement leaf name. ``None`` to keep the current
+                leaf. Sanitized via ``sanitize_mailbox_name``.
+            new_parent: Destination parent path. ``None`` means keep
+                current parent (rename only). ``""`` (empty string) means
+                move to top-level. Non-empty string means move under that
+                path.
 
         Returns:
             True on success.
 
         Raises:
-            ValueError: If new_name is invalid after sanitization.
+            ValueError: If neither ``new_name`` nor ``new_parent`` was
+                provided, or ``new_name`` sanitizes to empty.
             MailAccountNotFoundError: If account doesn't exist.
             MailMailboxNotFoundError: If the source mailbox doesn't exist.
-            MailAppleScriptError: If the rename otherwise fails.
+            MailImapRequiredError: If a move was requested but no IMAP
+                credentials are configured for ``account``.
+            MailAppleScriptError: If a rename-only path otherwise fails.
+            imapclient.exceptions.IMAPClientError: If a move otherwise
+                fails on the IMAP server.
         """
         from .utils import sanitize_mailbox_name
 
-        sanitized_new = sanitize_mailbox_name(new_name)
-        if not sanitized_new:
-            raise ValueError(f"Invalid new_name: {new_name}")
+        if new_name is None and new_parent is None:
+            raise ValueError(
+                "update_mailbox requires at least one of new_name or new_parent"
+            )
 
-        account_clause = applescript_account_clause(account)
-        name_safe = escape_applescript_string(sanitize_input(name))
-        new_name_safe = escape_applescript_string(sanitized_new)
+        sanitized_new_name: str | None = None
+        if new_name is not None:
+            sanitized_new_name = sanitize_mailbox_name(new_name)
+            if not sanitized_new_name:
+                raise ValueError(f"Invalid new_name: {new_name}")
 
-        script = f"""
-        tell application "Mail"
-            set accountRef to {account_clause}
-            try
-                set mb to mailbox "{name_safe}" of accountRef
-            on error
-                error "MAILBOX_NOT_FOUND"
-            end try
-            set name of mb to "{new_name_safe}"
-            return "success"
-        end tell
-        """
+        # ------------------------------------------------------------------
+        # Rename-only path (no parent change) -> AppleScript
+        # ------------------------------------------------------------------
+        if new_parent is None:
+            assert sanitized_new_name is not None  # narrowed by the guard above
+            account_clause = applescript_account_clause(account)
+            name_safe = escape_applescript_string(sanitize_input(name))
+            new_name_safe = escape_applescript_string(sanitized_new_name)
+
+            script = f"""
+            tell application "Mail"
+                set accountRef to {account_clause}
+                try
+                    set mb to mailbox "{name_safe}" of accountRef
+                on error
+                    error "MAILBOX_NOT_FOUND"
+                end try
+                set name of mb to "{new_name_safe}"
+                return "success"
+            end tell
+            """
+
+            try:
+                result = self._run_applescript(script)
+            except MailAppleScriptError as e:
+                if "MAILBOX_NOT_FOUND" in str(e):
+                    raise MailMailboxNotFoundError(
+                        f"mailbox {name!r} not found in account {account!r}"
+                    ) from e
+                raise
+            return result == "success"
+
+        # ------------------------------------------------------------------
+        # Move (with optional rename) -> IMAP RENAME
+        # ------------------------------------------------------------------
+        # Destination path = new_parent + "/" + (new_name or current leaf).
+        leaf = sanitized_new_name if sanitized_new_name else name.rsplit("/", 1)[-1]
+        if new_parent == "":
+            destination = leaf
+        else:
+            destination = f"{new_parent}/{leaf}"
 
         try:
-            result = self._run_applescript(script)
-        except MailAppleScriptError as e:
-            if "MAILBOX_NOT_FOUND" in str(e):
+            host, port, email = self._resolve_imap_config(account)
+            password = get_imap_password(account, email)
+        except (
+            MailKeychainEntryNotFoundError, MailKeychainAccessDeniedError
+        ) as e:
+            raise MailImapRequiredError(
+                f"moving a mailbox requires IMAP credentials for account "
+                f"{account!r}; configure them via the Keychain opt-in flow"
+            ) from e
+
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
+        try:
+            imap.rename_mailbox(name, destination)
+        except IMAPClientError as e:
+            # Map "mailbox doesn't exist" to the typed error; let other
+            # IMAP errors propagate for the server layer to translate.
+            msg = str(e).lower()
+            if "no such" in msg or "doesn't exist" in msg or "doesn't exist" in msg:
                 raise MailMailboxNotFoundError(
                     f"mailbox {name!r} not found in account {account!r}"
                 ) from e
             raise
-        return result == "success"
+        return True
+
+    def delete_mailbox(
+        self,
+        account: str,
+        name: str,
+        delete_messages: bool = False,
+    ) -> int:
+        """Delete a mailbox via IMAP DELETE.
+
+        Mail.app's AppleScript ``delete`` command's handler refuses
+        mailbox specifiers (verified by probe), so this operation is
+        IMAP-only. Requires Keychain credentials per the #73 opt-in
+        flow; raises ``MailImapRequiredError`` otherwise.
+
+        Args:
+            account: Account name or UUID.
+            name: Mailbox name. Slash-separated for nested mailboxes.
+            delete_messages: When False (default), refuse if the mailbox
+                contains messages. When True, cascade-delete the mailbox
+                and its contents.
+
+        Returns:
+            Number of messages that existed at delete time (0 for empty
+            mailbox; positive when ``delete_messages=True`` cascaded).
+
+        Raises:
+            MailAccountNotFoundError: If account doesn't exist.
+            MailMailboxNotFoundError: If the mailbox doesn't exist on
+                the IMAP server.
+            MailMailboxNotEmptyError: If ``delete_messages=False`` and
+                the mailbox is non-empty.
+            MailImapRequiredError: If no Keychain credentials.
+            imapclient.exceptions.IMAPClientError: Other server-side
+                error.
+        """
+        try:
+            host, port, email = self._resolve_imap_config(account)
+            password = get_imap_password(account, email)
+        except (
+            MailKeychainEntryNotFoundError, MailKeychainAccessDeniedError
+        ) as e:
+            raise MailImapRequiredError(
+                f"deleting a mailbox requires IMAP credentials for account "
+                f"{account!r}; configure them via the Keychain opt-in flow"
+            ) from e
+
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
+        try:
+            return imap.delete_mailbox(name, allow_non_empty=delete_messages)
+        except ValueError as e:
+            # ImapConnector raises ValueError on the non-empty refusal.
+            raise MailMailboxNotEmptyError(str(e)) from e
+        except IMAPClientError as e:
+            msg = str(e).lower()
+            if "no such" in msg or "doesn't exist" in msg or "nonexistent" in msg:
+                raise MailMailboxNotFoundError(
+                    f"mailbox {name!r} not found in account {account!r}"
+                ) from e
+            raise
 
     def create_mailbox(
         self,

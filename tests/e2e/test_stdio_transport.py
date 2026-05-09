@@ -41,6 +41,7 @@ EXPECTED_TOOLS = {
     "save_attachments",
     "create_mailbox",
     "update_mailbox",
+    "delete_mailbox",
     "delete_messages",
     # Rule CRUD (#63)
     "create_rule",

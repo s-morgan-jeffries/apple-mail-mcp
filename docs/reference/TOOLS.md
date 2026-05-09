@@ -614,12 +614,12 @@ create_mailbox(account="Gmail", name="Q2", parent_mailbox="2024")
 
 ### update_mailbox
 
-Rename an existing mailbox.
+Rename and/or re-parent (move) an existing mailbox.
 
-**Scope (v0.7.0):** rename only. Re-parenting (moving a mailbox between
-parents) and deletion are tracked as IMAP-based follow-ups (#163, #162)
-because Mail.app's AppleScript dictionary does not expose working
-primitives for either.
+**Two delivery paths:**
+
+- **Rename only** (`new_name` set, `new_parent` is `None`): AppleScript's `set name of mailbox X to "Y"`. Fast, no IMAP credentials needed.
+- **Move** (`new_parent` set, optionally combined with rename): IMAP `RENAME`. Requires IMAP credentials in Keychain (#73 opt-in flow) — returns `error_type: "imap_required"` when missing.
 
 **Parameters:**
 
@@ -627,7 +627,8 @@ primitives for either.
 |-----------|------|----------|---------|-------------|
 | `account` | string | Yes | - | Mail.app account name or UUID (from `list_accounts`) |
 | `name` | string | Yes | - | Current mailbox name. Slash-separated for nested mailboxes (e.g. `"Archive/2024"`) |
-| `new_name` | string | Yes | - | Replacement name. Path-traversal characters (`..`, `/`, `\`) are stripped via `sanitize_mailbox_name`; an entirely-stripped value returns `validation_error` |
+| `new_name` | string | No | None | Replacement leaf name. `None` keeps the current leaf when moving. Path-traversal characters stripped via `sanitize_mailbox_name`. At least one of `new_name` / `new_parent` is required. |
+| `new_parent` | string | No | None | Destination parent path. `None` keeps current parent (rename-only). `""` (empty string) moves to top-level. Non-empty string moves under that path. |
 
 **Returns:**
 
@@ -635,36 +636,109 @@ primitives for either.
 {
   "success": true,
   "account": "Gmail",
-  "name": "Archive",
-  "new_name": "Archive-2024"
+  "name": "Archive/2024",
+  "new_name": null,
+  "new_parent": "OldStuff"
 }
 ```
 
 **Examples:**
 
 ```python
-# Simple rename
+# Simple rename (no IMAP needed)
 update_mailbox(account="Gmail", name="ToDo", new_name="Tasks")
 
 # Rename a nested mailbox (slash-separated path)
 update_mailbox(
-    account="Gmail",
-    name="Projects/Q1",
-    new_name="Q1-Archive",
+    account="Gmail", name="Projects/Q1", new_name="Q1-Archive",
 )
+
+# Move a nested mailbox to a different parent (IMAP)
+update_mailbox(
+    account="Gmail", name="Inbox/Projects/Q1",
+    new_parent="Archive/2024",
+)
+# -> "Inbox/Projects/Q1" becomes "Archive/2024/Q1"
+
+# Promote a nested mailbox to top-level
+update_mailbox(account="Gmail", name="Inbox/Old", new_parent="")
+# -> "Inbox/Old" becomes "Old"
+
+# Move + rename in one IMAP RENAME
+update_mailbox(
+    account="Gmail", name="A/B", new_name="Renamed", new_parent="C",
+)
+# -> "A/B" becomes "C/Renamed"
 ```
 
-**Caveat — Gmail system labels:** Renaming a Gmail folder under
+**Caveat — Gmail system labels:** Renaming or moving a Gmail folder under
 `[Gmail]/` (Drafts, Sent Mail, Trash, etc.) may not stick — Gmail's
 IMAP server may auto-restore the canonical name. User-created Gmail
 labels behave normally. Tracked as #164.
 
 **Error Codes:**
 
-- `validation_error`: Empty / whitespace-only `name` or `new_name`, or `new_name` sanitizes to empty.
-- `mailbox_not_found`: No mailbox at `name` in `account`.
-- `account_not_found`: `account` doesn't match any configured Mail.app account.
-- `applescript_error`: Mail.app rejected the rename for an underlying reason.
+- `validation_error`: Empty / whitespace-only `name`, missing both `new_name` and `new_parent`, or `new_name` sanitizes to empty.
+- `imap_required`: Move requested but no IMAP credentials in Keychain for `account`.
+- `mailbox_not_found`: No mailbox at `name`.
+- `account_not_found`: `account` doesn't match any configured account.
+- `applescript_error`: Mail.app rejected a rename for an underlying reason.
+- `unknown`: Unexpected error.
+
+---
+
+### delete_mailbox
+
+Delete a mailbox via IMAP. Mail.app's AppleScript dictionary doesn't
+expose a working delete primitive for mailboxes (verified by probe), so
+this operation requires IMAP credentials in Keychain (#73 opt-in flow).
+
+**Always elicits user confirmation** (destructive). Refuses non-empty
+mailboxes by default to prevent accidental data loss; pass
+`delete_messages=True` to cascade.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `account` | string | Yes | - | Mail.app account name or UUID |
+| `name` | string | Yes | - | Mailbox name. Slash-separated for nested. |
+| `delete_messages` | boolean | No | False | When False, refuses if the mailbox contains messages. When True, cascade-deletes the mailbox and its contents. |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "account": "Gmail",
+  "name": "Old/Archive",
+  "deleted_message_count": 0
+}
+```
+
+`deleted_message_count` is 0 when the mailbox was empty; positive when
+`delete_messages=True` cascaded.
+
+**Examples:**
+
+```python
+# Safe delete (refuses if any messages)
+delete_mailbox(account="Gmail", name="Old/Empty")
+
+# Cascade-delete a non-empty mailbox
+delete_mailbox(
+    account="Gmail", name="Old/Archive", delete_messages=True,
+)
+```
+
+**Error Codes:**
+
+- `cancelled`: User declined the elicitation prompt.
+- `validation_error`: Empty `name`.
+- `imap_required`: No IMAP credentials in Keychain for `account`.
+- `mailbox_not_empty`: Mailbox contains messages and `delete_messages=False`.
+- `mailbox_not_found`: No mailbox at `name`.
+- `account_not_found`: `account` doesn't match any configured account.
 - `unknown`: Unexpected error.
 
 ---

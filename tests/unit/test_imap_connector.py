@@ -1200,6 +1200,86 @@ class TestGetAttachments:
 
 
 # ---------------------------------------------------------------------------
+# Mailbox write operations (#162, #163): delete_mailbox / rename_mailbox
+# ---------------------------------------------------------------------------
+
+
+class TestImapDeleteMailbox:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_delete_empty_mailbox_returns_zero(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.select_folder.return_value = {b"EXISTS": 0}
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").delete_mailbox(
+            "Empty"
+        )
+        assert result == 0
+        client.delete_folder.assert_called_once_with("Empty")
+        client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_delete_non_empty_refuses_by_default(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.select_folder.return_value = {b"EXISTS": 5}
+
+        with pytest.raises(ValueError, match="not empty"):
+            ImapConnector("h", 993, "u@e.com", "pw").delete_mailbox(
+                "Big"
+            )
+        # Did not invoke delete_folder.
+        client.delete_folder.assert_not_called()
+        client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_delete_non_empty_with_allow_non_empty_cascades(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.select_folder.return_value = {b"EXISTS": 42}
+
+        result = ImapConnector("h", 993, "u@e.com", "pw").delete_mailbox(
+            "Big", allow_non_empty=True
+        )
+        assert result == 42
+        client.delete_folder.assert_called_once_with("Big")
+
+
+class TestImapRenameMailbox:
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_rename_calls_imap_rename(self, mock_cls: MagicMock) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+
+        ImapConnector("h", 993, "u@e.com", "pw").rename_mailbox(
+            "Old", "New"
+        )
+        client.rename_folder.assert_called_once_with("Old", "New")
+        client.logout.assert_called_once()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_rename_with_path_change_passes_through(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Move semantics: dest path with a different parent."""
+        client = MagicMock()
+        mock_cls.return_value = client
+
+        ImapConnector("h", 993, "u@e.com", "pw").rename_mailbox(
+            "OldParent/Child", "NewParent/Child"
+        )
+        client.rename_folder.assert_called_once_with(
+            "OldParent/Child", "NewParent/Child"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Issue #122: Gmail X-GM-THRID dispatch in find_thread_members
 # ---------------------------------------------------------------------------
 

@@ -547,6 +547,51 @@ class TestDraftsLifecycleIntegration:
                 return  # success
         pytest.fail("draft still queryable 10s after delete")
 
+    def test_delete_mailbox_via_imap_round_trip(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+    ) -> None:
+        """#162: create -> delete via IMAP -> verify gone via direct IMAP query.
+
+        Uses direct IMAP listing for verification because Mail.app's local
+        mailbox-list cache lags IMAP server changes by minutes; the truth
+        is on the server."""
+        import uuid as _uuid
+
+        from imapclient import IMAPClient
+
+        from apple_mail_mcp.keychain import get_imap_password
+
+        fixture = f"ZZZ-AMM-DEL-INT-{_uuid.uuid4().hex[:8]}"
+        assert connector.create_mailbox(account=test_account, name=fixture)
+
+        try:
+            count = connector.delete_mailbox(
+                account=test_account, name=fixture
+            )
+            assert count == 0  # empty fixture
+        except Exception:
+            # Best-effort cleanup if delete itself fails so we don't orphan.
+            try:
+                connector.delete_mailbox(
+                    account=test_account, name=fixture, delete_messages=True
+                )
+            except Exception:
+                pass
+            raise
+
+        # Verify via direct IMAP — Mail.app's view lags
+        host, port, email = connector._resolve_imap_config(test_account)
+        pw = get_imap_password(test_account, email)
+        client = IMAPClient(host, port=port, ssl=True, timeout=30)
+        client.login(email, pw)
+        try:
+            folders = {f[2] for f in client.list_folders()}
+        finally:
+            client.logout()
+        assert fixture not in folders, f"{fixture} still on IMAP server after delete"
+
     def test_update_mailbox_renames_in_place(
         self,
         connector: AppleMailConnector,

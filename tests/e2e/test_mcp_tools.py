@@ -38,6 +38,7 @@ EXPECTED_TOOLS = {
     "save_attachments",
     "create_mailbox",
     "update_mailbox",
+    "delete_mailbox",
     "delete_messages",
     # Rule CRUD (#63)
     "create_rule",
@@ -188,6 +189,12 @@ INVOCATION_CASES: list[tuple[str, dict[str, Any], str, Any]] = [
         {"account": "TestAccount", "name": "Old", "new_name": "New"},
         "update_mailbox",
         True,
+    ),
+    (
+        "delete_mailbox",
+        {"account": "TestAccount", "name": "Empty"},
+        "delete_mailbox",
+        0,
     ),
     (
         "delete_messages",

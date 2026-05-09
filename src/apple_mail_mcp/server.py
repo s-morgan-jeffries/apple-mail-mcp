@@ -18,6 +18,8 @@ from .exceptions import (
     MailDraftError,
     MailDraftInvalidIdError,
     MailDraftNotFoundError,
+    MailImapRequiredError,
+    MailMailboxNotEmptyError,
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
     MailRuleNotFoundError,
@@ -1403,33 +1405,40 @@ def create_mailbox(
 def update_mailbox(
     account: str,
     name: str,
-    new_name: str,
+    new_name: str | None = None,
+    new_parent: str | None = None,
 ) -> dict[str, Any]:
-    """Rename an existing mailbox in Apple Mail.
+    """Rename and/or re-parent (move) an existing mailbox.
 
-    v1 ships rename only. Re-parenting (move) and deletion are tracked
-    as IMAP-based follow-ups (#163, #162) — Mail.app's AppleScript
-    dictionary does not expose working primitives for either, so they
-    require a different delivery path.
+    Two delivery paths:
 
-    Caveat (#164): renaming a Gmail system label under ``[Gmail]/``
-    (Drafts, Sent Mail, Trash, etc.) may not stick — Gmail's IMAP
-    server may auto-restore the canonical name. User-created Gmail
-    labels behave normally.
+    - **Rename only** (``new_name`` set, ``new_parent`` is ``None``):
+      AppleScript. Fast, no IMAP credentials needed.
+    - **Move** (``new_parent`` set; optionally combined with rename):
+      IMAP RENAME. Requires IMAP credentials in Keychain (#73 opt-in
+      flow) — returns ``error_type: "imap_required"`` when missing.
+
+    At least one of ``new_name`` / ``new_parent`` must be provided.
+
+    Caveat (#164): renaming Gmail system labels under ``[Gmail]/`` may
+    not stick — Gmail's IMAP server may auto-restore canonical names.
+    User-created Gmail labels behave normally.
 
     Args:
-        account: Mail.app account display name or UUID (from
-            ``list_accounts``).
-        name: Current mailbox name. Slash-separated for nested
-            mailboxes (e.g. "Archive/2024").
-        new_name: Replacement name. Path-traversal characters are
-            stripped via ``sanitize_mailbox_name``; an entirely-stripped
-            value returns a ``validation_error``.
+        account: Mail.app account display name or UUID.
+        name: Current mailbox name. Slash-separated for nested mailboxes
+            (e.g. ``"Archive/2024"``).
+        new_name: Replacement leaf name. ``None`` to keep the current
+            leaf when moving. Path-traversal characters stripped via
+            ``sanitize_mailbox_name``; an entirely-stripped value
+            returns ``validation_error``.
+        new_parent: Destination parent path. ``None`` keeps current
+            parent (rename-only). ``""`` (empty string) moves to
+            top-level. Non-empty string moves under that path.
 
     Returns:
-        ``{"success": True, "account": ..., "name": <old>, "new_name": <new>}``
-        on success, or a structured ``{success: False, error_type, error}``
-        response on failure.
+        ``{success, account, name, new_name, new_parent}`` on success,
+        or structured error response.
     """
     try:
         safety_err = check_test_mode_safety("update_mailbox", account=account)
@@ -1442,30 +1451,40 @@ def update_mailbox(
                 "error": "Mailbox name cannot be empty",
                 "error_type": "validation_error",
             }
-        if not new_name or not new_name.strip():
+        if new_name is None and new_parent is None:
             return {
                 "success": False,
-                "error": "new_name cannot be empty",
+                "error": "At least one of new_name or new_parent is required",
+                "error_type": "validation_error",
+            }
+        if new_name is not None and not new_name.strip():
+            return {
+                "success": False,
+                "error": "new_name cannot be empty (pass None to keep current leaf)",
                 "error_type": "validation_error",
             }
 
         rate_err = check_rate_limit(
             "update_mailbox",
-            {"account": account, "name": name, "new_name": new_name},
+            {"account": account, "name": name, "new_name": new_name,
+             "new_parent": new_parent},
         )
         if rate_err:
             return rate_err
 
         logger.info(
-            f"Renaming mailbox {name!r} -> {new_name!r} in account {account}"
+            f"Updating mailbox {name!r} in {account}: "
+            f"new_name={new_name!r}, new_parent={new_parent!r}"
         )
 
         success = mail.update_mailbox(
-            account=account, name=name, new_name=new_name
+            account=account, name=name,
+            new_name=new_name, new_parent=new_parent,
         )
         operation_logger.log_operation(
             "update_mailbox",
-            {"account": account, "name": name, "new_name": new_name},
+            {"account": account, "name": name,
+             "new_name": new_name, "new_parent": new_parent},
             "success" if success else "failure",
         )
 
@@ -1474,6 +1493,7 @@ def update_mailbox(
             "account": account,
             "name": name,
             "new_name": new_name,
+            "new_parent": new_parent,
         }
 
     except ValueError as e:
@@ -1481,6 +1501,12 @@ def update_mailbox(
             "success": False,
             "error": str(e),
             "error_type": "validation_error",
+        }
+    except MailImapRequiredError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "imap_required",
         }
     except MailMailboxNotFoundError as e:
         return {
@@ -1503,6 +1529,125 @@ def update_mailbox(
         }
     except Exception as e:
         logger.exception(f"Unexpected error in update_mailbox: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
+async def delete_mailbox(
+    account: str,
+    name: str,
+    delete_messages: bool = False,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Delete a mailbox via IMAP.
+
+    Mail.app's AppleScript dictionary doesn't expose a working delete
+    primitive for mailboxes, so this operation goes through IMAP. Requires
+    IMAP credentials in Keychain (#73 opt-in flow) — returns
+    ``error_type: "imap_required"`` when missing.
+
+    Always elicits user confirmation (destructive). By default refuses
+    non-empty mailboxes to prevent accidental data loss; pass
+    ``delete_messages=True`` to cascade.
+
+    Args:
+        account: Mail.app account display name or UUID.
+        name: Mailbox name. Slash-separated for nested mailboxes.
+        delete_messages: When False (default), refuse if the mailbox
+            contains messages. When True, cascade-delete the mailbox
+            and its contents.
+
+    Returns:
+        ``{success, account, name, deleted_message_count}`` on success.
+    """
+    try:
+        safety_err = check_test_mode_safety("delete_mailbox", account=account)
+        if safety_err:
+            return safety_err
+
+        if not name or not name.strip():
+            return {
+                "success": False,
+                "error": "Mailbox name cannot be empty",
+                "error_type": "validation_error",
+            }
+
+        rate_err = check_rate_limit(
+            "delete_mailbox",
+            {"account": account, "name": name,
+             "delete_messages": delete_messages},
+        )
+        if rate_err:
+            return rate_err
+
+        verb = "delete (cascading messages)" if delete_messages else "delete (refuse if non-empty)"
+        summary = (
+            f"{verb} mailbox?\n\n"
+            f"Account: {account}\n"
+            f"Mailbox: {name}\n\n"
+            f"This is destructive. The mailbox will be removed from the IMAP server."
+        )
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "delete_mailbox",
+            {"account": account, "name": name,
+             "delete_messages": delete_messages},
+        )
+        if cancel_err:
+            return cancel_err
+
+        count = mail.delete_mailbox(
+            account=account, name=name, delete_messages=delete_messages
+        )
+        operation_logger.log_operation(
+            "delete_mailbox",
+            {"account": account, "name": name,
+             "delete_messages": delete_messages,
+             "deleted_message_count": count},
+            "success",
+        )
+        return {
+            "success": True,
+            "account": account,
+            "name": name,
+            "deleted_message_count": count,
+        }
+
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "validation_error",
+        }
+    except MailImapRequiredError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "imap_required",
+        }
+    except MailMailboxNotEmptyError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "mailbox_not_empty",
+        }
+    except MailMailboxNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "mailbox_not_found",
+        }
+    except MailAccountNotFoundError:
+        return {
+            "success": False,
+            "error": f"Account {account!r} not found",
+            "error_type": "account_not_found",
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error in delete_mailbox: {e}")
         return {
             "success": False,
             "error": str(e),

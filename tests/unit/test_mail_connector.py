@@ -3875,3 +3875,221 @@ class TestUpdateMailbox:
         script = mock_run.call_args[0][0]
         # applescript_account_clause emits `account id "<UUID>"`.
         assert 'account id "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"' in script
+
+    def test_requires_at_least_one_of_new_name_or_new_parent(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="at least one"):
+            connector.update_mailbox(account="Gmail", name="Old")
+
+
+class TestUpdateMailboxMove:
+    """IMAP-dispatched move path of update_mailbox (#163)."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_move_to_top_uses_imap_rename_with_leaf_only(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """new_parent="" means top-level — destination is just the leaf."""
+        mock_pw.return_value = "secret"
+        mock_imap = mock_imap_cls.return_value
+        connector.update_mailbox(
+            account="Gmail", name="Archive/2024", new_parent=""
+        )
+        mock_imap.rename_mailbox.assert_called_once_with("Archive/2024", "2024")
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_move_under_new_parent_keeps_leaf(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_pw.return_value = "secret"
+        mock_imap = mock_imap_cls.return_value
+        connector.update_mailbox(
+            account="Gmail", name="Archive/2024", new_parent="Old"
+        )
+        mock_imap.rename_mailbox.assert_called_once_with(
+            "Archive/2024", "Old/2024"
+        )
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_move_with_rename_combines_in_one_rename(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_pw.return_value = "secret"
+        mock_imap = mock_imap_cls.return_value
+        connector.update_mailbox(
+            account="Gmail", name="Old/Sub",
+            new_name="Renamed", new_parent="New",
+        )
+        mock_imap.rename_mailbox.assert_called_once_with(
+            "Old/Sub", "New/Renamed"
+        )
+
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_no_keychain_credentials_raises_imap_required(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from apple_mail_mcp.exceptions import (
+            MailImapRequiredError,
+            MailKeychainEntryNotFoundError,
+        )
+        mock_pw.side_effect = MailKeychainEntryNotFoundError("no entry")
+        with pytest.raises(MailImapRequiredError):
+            connector.update_mailbox(
+                account="Gmail", name="X", new_parent="Y"
+            )
+
+
+class TestDeleteMailbox:
+    """delete_mailbox via IMAP (#162)."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_delete_empty_mailbox_returns_zero(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_pw.return_value = "secret"
+        mock_imap = mock_imap_cls.return_value
+        mock_imap.delete_mailbox.return_value = 0
+        result = connector.delete_mailbox(account="Gmail", name="Empty")
+        assert result == 0
+        mock_imap.delete_mailbox.assert_called_once_with(
+            "Empty", allow_non_empty=False
+        )
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_delete_messages_true_passes_through(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_pw.return_value = "secret"
+        mock_imap = mock_imap_cls.return_value
+        mock_imap.delete_mailbox.return_value = 42
+        result = connector.delete_mailbox(
+            account="Gmail", name="Big", delete_messages=True
+        )
+        assert result == 42
+        mock_imap.delete_mailbox.assert_called_once_with(
+            "Big", allow_non_empty=True
+        )
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_non_empty_refusal_raises_typed_error(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailMailboxNotEmptyError
+        mock_pw.return_value = "secret"
+        mock_imap = mock_imap_cls.return_value
+        mock_imap.delete_mailbox.side_effect = ValueError(
+            "mailbox 'X' is not empty (5 messages); pass allow_non_empty=True"
+        )
+        with pytest.raises(MailMailboxNotEmptyError):
+            connector.delete_mailbox(account="Gmail", name="X")
+
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_no_such_mailbox_maps_to_typed_error(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        mock_imap_cls: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from imapclient.exceptions import IMAPClientError
+        mock_pw.return_value = "secret"
+        mock_imap = mock_imap_cls.return_value
+        mock_imap.delete_mailbox.side_effect = IMAPClientError(
+            "DELETE: No such mailbox"
+        )
+        with pytest.raises(MailMailboxNotFoundError):
+            connector.delete_mailbox(account="Gmail", name="Missing")
+
+    @patch("apple_mail_mcp.mail_connector.get_imap_password")
+    @patch.object(
+        AppleMailConnector, "_resolve_imap_config",
+        return_value=("imap.gmail.com", 993, "x@gmail.com"),
+    )
+    def test_no_keychain_raises_imap_required(
+        self,
+        _mock_cfg: MagicMock,
+        mock_pw: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        from apple_mail_mcp.exceptions import (
+            MailImapRequiredError,
+            MailKeychainEntryNotFoundError,
+        )
+        mock_pw.side_effect = MailKeychainEntryNotFoundError("nope")
+        with pytest.raises(MailImapRequiredError):
+            connector.delete_mailbox(account="Gmail", name="X")

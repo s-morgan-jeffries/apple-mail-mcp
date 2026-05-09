@@ -224,6 +224,7 @@ class TestCheckRateLimit:
             "list_accounts", "list_rules", "list_mailboxes", "get_messages",
             "get_thread", "save_attachments", "search_messages",
             "update_message", "create_mailbox", "update_mailbox",
+            "delete_mailbox",
             "delete_messages", "reply_to_message", "send_email",
             "send_email_with_attachments", "forward_message",
             "delete_rule", "create_rule", "update_rule",

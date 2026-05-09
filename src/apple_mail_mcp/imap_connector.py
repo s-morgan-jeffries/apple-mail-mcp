@@ -770,6 +770,77 @@ class ImapConnector:
                 client, anchor_rfc_message_id, anchor_references,
             )
 
+    def delete_mailbox(self, name: str, *, allow_non_empty: bool = False) -> int:
+        """Delete an IMAP mailbox via the IMAP DELETE command.
+
+        Pre-flight: SELECT readonly to read the EXISTS count. Refuses if
+        the mailbox has messages and ``allow_non_empty=False`` — surface
+        as ``MailMailboxNotEmptyError`` from the caller.
+
+        Args:
+            name: Mailbox name (slash-separated for nested).
+            allow_non_empty: When True, skips the message-count refusal
+                and lets IMAP DELETE remove the mailbox along with its
+                contents.
+
+        Returns:
+            The message count that was on the mailbox at the moment of
+            delete (0 if empty, N if cascading).
+
+        Raises:
+            ValueError: If the mailbox is non-empty and the caller did
+                not opt in to ``allow_non_empty``.
+            imapclient.exceptions.IMAPClientError: Server-side error
+                (mailbox doesn't exist, permission denied, etc.).
+        """
+        with self._session() as client:
+            try:
+                info = client.select_folder(name, readonly=True)
+            except IMAPClientError:
+                # Surface "mailbox doesn't exist" via the original IMAP error.
+                raise
+            count = int(info.get(b"EXISTS", 0))
+            if count > 0 and not allow_non_empty:
+                # CLOSE the readonly select before raising — leaves the
+                # connection clean for any subsequent reuse via the pool.
+                try:
+                    client.close_folder()
+                except IMAPClientError:
+                    pass
+                raise ValueError(
+                    f"mailbox {name!r} is not empty ({count} messages); "
+                    f"pass allow_non_empty=True to cascade-delete"
+                )
+            # IMAP DELETE requires the mailbox NOT to be selected on most
+            # servers; CLOSE first.
+            try:
+                client.close_folder()
+            except IMAPClientError:
+                pass
+            client.delete_folder(name)
+            return count
+
+    def rename_mailbox(self, old_name: str, new_name: str) -> None:
+        """Rename a mailbox via the IMAP RENAME command.
+
+        IMAP RENAME also serves as the move primitive — destination path
+        with a different parent (e.g. ``"OldParent/Child"`` →
+        ``"NewParent/Child"``) re-parents the mailbox in one operation.
+
+        Args:
+            old_name: Current mailbox name (slash-separated for nested).
+            new_name: Destination name. Slash-separated; intermediate
+                parents must exist (server behavior varies — most refuse
+                to auto-create missing parents).
+
+        Raises:
+            imapclient.exceptions.IMAPClientError: Server-side error
+                (source missing, destination exists, parent missing,
+                permission denied, etc.).
+        """
+        with self._session() as client:
+            client.rename_folder(old_name, new_name)
+
     @staticmethod
     def _has_capability(client: IMAPClient, name: bytes) -> bool:
         """True if ``name`` (e.g. ``b"X-GM-EXT-1"``) is in the post-login

@@ -130,6 +130,7 @@ OPERATION_TIERS: dict[str, str] = {
     "update_message": "expensive_ops",
     "create_mailbox": "expensive_ops",
     "update_mailbox": "expensive_ops",
+    "delete_mailbox": "expensive_ops",
     "delete_messages": "expensive_ops",
     "delete_rule": "expensive_ops",
     "create_rule": "expensive_ops",

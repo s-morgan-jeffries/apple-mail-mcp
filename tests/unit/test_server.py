@@ -1673,15 +1673,64 @@ class TestUpdateMailboxTool:
         mock_mail.update_mailbox.return_value = True
         result = update_mailbox(account="Gmail", name="Old", new_name="New")
 
-        assert result == {
-            "success": True,
-            "account": "Gmail",
-            "name": "Old",
-            "new_name": "New",
-        }
+        assert result["success"] is True
+        assert result["account"] == "Gmail"
+        assert result["name"] == "Old"
+        assert result["new_name"] == "New"
+        assert result["new_parent"] is None
         mock_mail.update_mailbox.assert_called_once_with(
-            account="Gmail", name="Old", new_name="New"
+            account="Gmail", name="Old", new_name="New", new_parent=None,
         )
+
+    def test_move_only_success(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """#163: new_parent set, new_name None — pure move via IMAP."""
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.return_value = True
+        result = update_mailbox(
+            account="Gmail", name="A/B", new_parent="C"
+        )
+        assert result["success"] is True
+        mock_mail.update_mailbox.assert_called_once_with(
+            account="Gmail", name="A/B", new_name=None, new_parent="C",
+        )
+
+    def test_move_to_top_with_empty_string_parent(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.return_value = True
+        update_mailbox(account="Gmail", name="A/B", new_parent="")
+        mock_mail.update_mailbox.assert_called_once_with(
+            account="Gmail", name="A/B", new_name=None, new_parent="",
+        )
+
+    def test_imap_required_maps_to_typed_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailImapRequiredError
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.side_effect = MailImapRequiredError(
+            "no creds"
+        )
+        result = update_mailbox(
+            account="Gmail", name="A/B", new_parent="C"
+        )
+        assert result["error_type"] == "imap_required"
+
+    def test_neither_new_name_nor_parent_validation_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        result = update_mailbox(account="Gmail", name="Old")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_mail.update_mailbox.assert_not_called()
 
     def test_empty_name_validation_error(
         self, mock_mail: MagicMock, mock_logger: MagicMock
@@ -1763,6 +1812,160 @@ class TestUpdateMailboxTool:
 
         mock_mail.update_mailbox.side_effect = RuntimeError("boom")
         result = update_mailbox(account="Gmail", name="Old", new_name="New")
+        assert result["error_type"] == "unknown"
+
+
+class TestDeleteMailboxTool:
+    """Tests for the delete_mailbox MCP tool (#162, IMAP-dispatched)."""
+
+    @pytest.mark.asyncio
+    async def test_success_default_refuses_non_empty(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import delete_mailbox
+
+        mock_mail.delete_mailbox.return_value = 0
+        result = await delete_mailbox(
+            account="Gmail", name="Empty", ctx=mock_ctx_accept
+        )
+        assert result == {
+            "success": True,
+            "account": "Gmail",
+            "name": "Empty",
+            "deleted_message_count": 0,
+        }
+        mock_mail.delete_mailbox.assert_called_once_with(
+            account="Gmail", name="Empty", delete_messages=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_cascade_with_delete_messages_true(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import delete_mailbox
+
+        mock_mail.delete_mailbox.return_value = 42
+        result = await delete_mailbox(
+            account="Gmail", name="Big",
+            delete_messages=True, ctx=mock_ctx_accept,
+        )
+        assert result["deleted_message_count"] == 42
+
+    @pytest.mark.asyncio
+    async def test_declined_elicitation_blocks_delete(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_decline: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import delete_mailbox
+
+        result = await delete_mailbox(
+            account="Gmail", name="X", ctx=mock_ctx_decline
+        )
+        assert result["error_type"] == "cancelled"
+        mock_mail.delete_mailbox.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_name_validation_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import delete_mailbox
+
+        result = await delete_mailbox(account="Gmail", name="")
+        assert result["error_type"] == "validation_error"
+        mock_mail.delete_mailbox.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_imap_required_maps_to_typed_error(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailImapRequiredError
+        from apple_mail_mcp.server import delete_mailbox
+
+        mock_mail.delete_mailbox.side_effect = MailImapRequiredError(
+            "no creds"
+        )
+        result = await delete_mailbox(
+            account="Gmail", name="X", ctx=mock_ctx_accept
+        )
+        assert result["error_type"] == "imap_required"
+
+    @pytest.mark.asyncio
+    async def test_non_empty_refusal_maps_to_typed_error(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailMailboxNotEmptyError
+        from apple_mail_mcp.server import delete_mailbox
+
+        mock_mail.delete_mailbox.side_effect = MailMailboxNotEmptyError(
+            "not empty"
+        )
+        result = await delete_mailbox(
+            account="Gmail", name="X", ctx=mock_ctx_accept
+        )
+        assert result["error_type"] == "mailbox_not_empty"
+
+    @pytest.mark.asyncio
+    async def test_mailbox_not_found_maps_to_typed_error(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailMailboxNotFoundError
+        from apple_mail_mcp.server import delete_mailbox
+
+        mock_mail.delete_mailbox.side_effect = MailMailboxNotFoundError(
+            "no such"
+        )
+        result = await delete_mailbox(
+            account="Gmail", name="Missing", ctx=mock_ctx_accept
+        )
+        assert result["error_type"] == "mailbox_not_found"
+
+    @pytest.mark.asyncio
+    async def test_account_not_found_maps_to_typed_error(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import delete_mailbox
+
+        mock_mail.delete_mailbox.side_effect = MailAccountNotFoundError(
+            "no acct"
+        )
+        result = await delete_mailbox(
+            account="Bogus", name="X", ctx=mock_ctx_accept
+        )
+        assert result["error_type"] == "account_not_found"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_maps_to_unknown(
+        self,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        from apple_mail_mcp.server import delete_mailbox
+
+        mock_mail.delete_mailbox.side_effect = RuntimeError("boom")
+        result = await delete_mailbox(
+            account="Gmail", name="X", ctx=mock_ctx_accept
+        )
         assert result["error_type"] == "unknown"
 
 

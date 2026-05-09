@@ -21,6 +21,22 @@ class MailMailboxNotFoundError(MailError):
     pass
 
 
+class MailMailboxNotEmptyError(MailError):
+    """Mailbox cannot be deleted because it contains messages and the
+    caller did not opt in to cascade-delete via ``delete_messages=True``."""
+
+    pass
+
+
+class MailImapRequiredError(MailError):
+    """The requested operation requires IMAP credentials and the user
+    hasn't opted in (no Keychain entry, or entry is unreachable). Surfaces
+    the gap so the caller can prompt the user to set up IMAP if they want
+    the operation."""
+
+    pass
+
+
 class MailMessageNotFoundError(MailError):
     """Message does not exist."""
 
