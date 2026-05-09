@@ -3764,3 +3764,114 @@ class TestExtractDraftAttachments:
         script = mock_run.call_args[0][0]
         assert "save a in (POSIX file tp)" in script
         assert "mail attachments of foundDraft" in script
+
+
+class TestUpdateMailbox:
+    """Tests for AppleMailConnector.update_mailbox (rename only — #102)."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_rename_success(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "success"
+        assert connector.update_mailbox(
+            account="Gmail", name="Old", new_name="New"
+        ) is True
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_script_uses_set_name(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "success"
+        connector.update_mailbox(
+            account="Gmail", name="Old", new_name="New"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'set name of mb to "New"' in script
+        assert 'mailbox "Old"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_script_handles_nested_path(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Slash-separated path passes through to Mail.app's
+        `mailbox "Parent/Child"` form."""
+        mock_run.return_value = "success"
+        connector.update_mailbox(
+            account="Gmail", name="Archive/2024", new_name="Archive2024"
+        )
+        script = mock_run.call_args[0][0]
+        assert 'mailbox "Archive/2024"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_mailbox_not_found_raises(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = MailAppleScriptError("MAILBOX_NOT_FOUND")
+        from apple_mail_mcp.exceptions import MailMailboxNotFoundError
+        with pytest.raises(MailMailboxNotFoundError):
+            connector.update_mailbox(
+                account="Gmail", name="Missing", new_name="New"
+            )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_other_applescript_errors_propagate(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.side_effect = MailAppleScriptError("something else")
+        with pytest.raises(MailAppleScriptError):
+            connector.update_mailbox(
+                account="Gmail", name="Old", new_name="New"
+            )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_path_traversal_chars_stripped_before_applescript(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """``sanitize_mailbox_name`` strips traversal chars (``..``, ``/``,
+        ``\\``) rather than rejecting them outright. Verify the AppleScript
+        embeds the sanitized form, not the raw user input."""
+        mock_run.return_value = "success"
+        connector.update_mailbox(
+            account="Gmail", name="Old", new_name="../../bad-name"
+        )
+        script = mock_run.call_args[0][0]
+        # The dots and slashes are stripped; what's left is "bad-name".
+        assert '"../../bad-name"' not in script
+        assert '"bad-name"' in script
+
+    def test_new_name_that_sanitizes_to_empty_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """A new_name of just traversal chars sanitizes to empty -> reject."""
+        with pytest.raises(ValueError, match="Invalid new_name"):
+            connector.update_mailbox(
+                account="Gmail", name="Old", new_name="../"
+            )
+
+    def test_empty_new_name_raises(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with pytest.raises(ValueError, match="Invalid new_name"):
+            connector.update_mailbox(
+                account="Gmail", name="Old", new_name=""
+            )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_account_clause_uses_uuid_when_uuid_passed(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Mirror the convention from create_mailbox: account UUIDs
+        produce `account id "..."` and names produce `account "..."`."""
+        mock_run.return_value = "success"
+        connector.update_mailbox(
+            account="DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5",
+            name="Old", new_name="New",
+        )
+        script = mock_run.call_args[0][0]
+        # applescript_account_clause emits `account id "<UUID>"`.
+        assert 'account id "DC5AC137-2F7A-4299-B3D0-4D3E06C18DD5"' in script

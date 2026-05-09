@@ -23,11 +23,12 @@ make coverage              # Coverage report
 
 **Running the server:** `uv run python -m apple_mail_mcp.server` or via Claude Desktop config.
 
-## API Surface (21 MCP tools)
+## API Surface (22 MCP tools)
 
 **Core:** list_mailboxes, search_messages, get_messages, update_message
 **Drafts lifecycle (#134):** create_draft, update_draft, delete_draft
-**Attachments & Management:** save_attachments, create_mailbox, delete_messages
+**Mailbox CRUD:** create_mailbox, update_mailbox (rename only — delete and move via IMAP follow-ups #162/#163)
+**Attachments & Management:** save_attachments, delete_messages
 **Discovery & Rules:** list_accounts, list_rules, get_thread, create_rule, update_rule, delete_rule
 **Templates:** list_templates, get_template, save_template, delete_template, render_template
 

@@ -1662,6 +1662,110 @@ class TestCreateMailbox:
         assert result["error_type"] == "unknown"
 
 
+class TestUpdateMailboxTool:
+    """Tests for the update_mailbox MCP tool (rename only — #102)."""
+
+    def test_rename_success(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.return_value = True
+        result = update_mailbox(account="Gmail", name="Old", new_name="New")
+
+        assert result == {
+            "success": True,
+            "account": "Gmail",
+            "name": "Old",
+            "new_name": "New",
+        }
+        mock_mail.update_mailbox.assert_called_once_with(
+            account="Gmail", name="Old", new_name="New"
+        )
+
+    def test_empty_name_validation_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        result = update_mailbox(account="Gmail", name="", new_name="New")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_mail.update_mailbox.assert_not_called()
+
+    def test_empty_new_name_validation_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        result = update_mailbox(account="Gmail", name="Old", new_name="")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_mail.update_mailbox.assert_not_called()
+
+    def test_whitespace_only_new_name_validation_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        result = update_mailbox(account="Gmail", name="Old", new_name="   ")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+
+    def test_mailbox_not_found(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailMailboxNotFoundError
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.side_effect = MailMailboxNotFoundError(
+            "no mailbox 'Old'"
+        )
+        result = update_mailbox(account="Gmail", name="Old", new_name="New")
+        assert result["error_type"] == "mailbox_not_found"
+
+    def test_account_not_found(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.side_effect = MailAccountNotFoundError(
+            "no account"
+        )
+        result = update_mailbox(account="Bogus", name="Old", new_name="New")
+        assert result["error_type"] == "account_not_found"
+
+    def test_connector_value_error_maps_to_validation_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """sanitize_mailbox_name in the connector can reject a new_name
+        whose sanitized form is empty (e.g. '../') — surface as
+        validation_error to the caller."""
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.side_effect = ValueError("Invalid new_name")
+        result = update_mailbox(account="Gmail", name="Old", new_name="../")
+        assert result["error_type"] == "validation_error"
+
+    def test_applescript_error(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.side_effect = MailAppleScriptError("boom")
+        result = update_mailbox(account="Gmail", name="Old", new_name="New")
+        assert result["error_type"] == "applescript_error"
+
+    def test_unexpected_exception_maps_to_unknown(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.server import update_mailbox
+
+        mock_mail.update_mailbox.side_effect = RuntimeError("boom")
+        result = update_mailbox(account="Gmail", name="Old", new_name="New")
+        assert result["error_type"] == "unknown"
+
+
 # ---------------------------------------------------------------------------
 # 12. delete_messages
 # ---------------------------------------------------------------------------

@@ -2318,6 +2318,69 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
 
+    def update_mailbox(
+        self,
+        account: str,
+        name: str,
+        new_name: str,
+    ) -> bool:
+        """Rename an existing mailbox.
+
+        v1 supports rename only. Mail.app's AppleScript dictionary does
+        not expose working primitives for delete or re-parent on
+        mailboxes — those are tracked as IMAP-based follow-ups (#162,
+        #163). The IMAP `RENAME` operation does support move via path
+        change, but that's deferred for a unified IMAP write path.
+
+        Args:
+            account: Account name or UUID.
+            name: Current mailbox name. Slash-separated for nested
+                mailboxes (e.g. "Archive/2024").
+            new_name: Replacement name. Validated + sanitized against
+                path-traversal via ``sanitize_mailbox_name``.
+
+        Returns:
+            True on success.
+
+        Raises:
+            ValueError: If new_name is invalid after sanitization.
+            MailAccountNotFoundError: If account doesn't exist.
+            MailMailboxNotFoundError: If the source mailbox doesn't exist.
+            MailAppleScriptError: If the rename otherwise fails.
+        """
+        from .utils import sanitize_mailbox_name
+
+        sanitized_new = sanitize_mailbox_name(new_name)
+        if not sanitized_new:
+            raise ValueError(f"Invalid new_name: {new_name}")
+
+        account_clause = applescript_account_clause(account)
+        name_safe = escape_applescript_string(sanitize_input(name))
+        new_name_safe = escape_applescript_string(sanitized_new)
+
+        script = f"""
+        tell application "Mail"
+            set accountRef to {account_clause}
+            try
+                set mb to mailbox "{name_safe}" of accountRef
+            on error
+                error "MAILBOX_NOT_FOUND"
+            end try
+            set name of mb to "{new_name_safe}"
+            return "success"
+        end tell
+        """
+
+        try:
+            result = self._run_applescript(script)
+        except MailAppleScriptError as e:
+            if "MAILBOX_NOT_FOUND" in str(e):
+                raise MailMailboxNotFoundError(
+                    f"mailbox {name!r} not found in account {account!r}"
+                ) from e
+            raise
+        return result == "success"
+
     def create_mailbox(
         self,
         account: str,

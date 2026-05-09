@@ -612,6 +612,63 @@ create_mailbox(account="Gmail", name="Q2", parent_mailbox="2024")
 
 ---
 
+### update_mailbox
+
+Rename an existing mailbox.
+
+**Scope (v0.7.0):** rename only. Re-parenting (moving a mailbox between
+parents) and deletion are tracked as IMAP-based follow-ups (#163, #162)
+because Mail.app's AppleScript dictionary does not expose working
+primitives for either.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `account` | string | Yes | - | Mail.app account name or UUID (from `list_accounts`) |
+| `name` | string | Yes | - | Current mailbox name. Slash-separated for nested mailboxes (e.g. `"Archive/2024"`) |
+| `new_name` | string | Yes | - | Replacement name. Path-traversal characters (`..`, `/`, `\`) are stripped via `sanitize_mailbox_name`; an entirely-stripped value returns `validation_error` |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "account": "Gmail",
+  "name": "Archive",
+  "new_name": "Archive-2024"
+}
+```
+
+**Examples:**
+
+```python
+# Simple rename
+update_mailbox(account="Gmail", name="ToDo", new_name="Tasks")
+
+# Rename a nested mailbox (slash-separated path)
+update_mailbox(
+    account="Gmail",
+    name="Projects/Q1",
+    new_name="Q1-Archive",
+)
+```
+
+**Caveat — Gmail system labels:** Renaming a Gmail folder under
+`[Gmail]/` (Drafts, Sent Mail, Trash, etc.) may not stick — Gmail's
+IMAP server may auto-restore the canonical name. User-created Gmail
+labels behave normally. Tracked as #164.
+
+**Error Codes:**
+
+- `validation_error`: Empty / whitespace-only `name` or `new_name`, or `new_name` sanitizes to empty.
+- `mailbox_not_found`: No mailbox at `name` in `account`.
+- `account_not_found`: `account` doesn't match any configured Mail.app account.
+- `applescript_error`: Mail.app rejected the rename for an underlying reason.
+- `unknown`: Unexpected error.
+
+---
+
 ### delete_messages
 
 Delete messages — always moves them to the account's Trash mailbox.

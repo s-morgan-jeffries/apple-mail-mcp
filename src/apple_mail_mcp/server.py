@@ -1400,6 +1400,117 @@ def create_mailbox(
 
 
 @mcp.tool()
+def update_mailbox(
+    account: str,
+    name: str,
+    new_name: str,
+) -> dict[str, Any]:
+    """Rename an existing mailbox in Apple Mail.
+
+    v1 ships rename only. Re-parenting (move) and deletion are tracked
+    as IMAP-based follow-ups (#163, #162) — Mail.app's AppleScript
+    dictionary does not expose working primitives for either, so they
+    require a different delivery path.
+
+    Caveat (#164): renaming a Gmail system label under ``[Gmail]/``
+    (Drafts, Sent Mail, Trash, etc.) may not stick — Gmail's IMAP
+    server may auto-restore the canonical name. User-created Gmail
+    labels behave normally.
+
+    Args:
+        account: Mail.app account display name or UUID (from
+            ``list_accounts``).
+        name: Current mailbox name. Slash-separated for nested
+            mailboxes (e.g. "Archive/2024").
+        new_name: Replacement name. Path-traversal characters are
+            stripped via ``sanitize_mailbox_name``; an entirely-stripped
+            value returns a ``validation_error``.
+
+    Returns:
+        ``{"success": True, "account": ..., "name": <old>, "new_name": <new>}``
+        on success, or a structured ``{success: False, error_type, error}``
+        response on failure.
+    """
+    try:
+        safety_err = check_test_mode_safety("update_mailbox", account=account)
+        if safety_err:
+            return safety_err
+
+        if not name or not name.strip():
+            return {
+                "success": False,
+                "error": "Mailbox name cannot be empty",
+                "error_type": "validation_error",
+            }
+        if not new_name or not new_name.strip():
+            return {
+                "success": False,
+                "error": "new_name cannot be empty",
+                "error_type": "validation_error",
+            }
+
+        rate_err = check_rate_limit(
+            "update_mailbox",
+            {"account": account, "name": name, "new_name": new_name},
+        )
+        if rate_err:
+            return rate_err
+
+        logger.info(
+            f"Renaming mailbox {name!r} -> {new_name!r} in account {account}"
+        )
+
+        success = mail.update_mailbox(
+            account=account, name=name, new_name=new_name
+        )
+        operation_logger.log_operation(
+            "update_mailbox",
+            {"account": account, "name": name, "new_name": new_name},
+            "success" if success else "failure",
+        )
+
+        return {
+            "success": success,
+            "account": account,
+            "name": name,
+            "new_name": new_name,
+        }
+
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "validation_error",
+        }
+    except MailMailboxNotFoundError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "mailbox_not_found",
+        }
+    except MailAccountNotFoundError:
+        return {
+            "success": False,
+            "error": f"Account {account!r} not found",
+            "error_type": "account_not_found",
+        }
+    except MailAppleScriptError as e:
+        logger.error(f"AppleScript error in update_mailbox: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "applescript_error",
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error in update_mailbox: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
 def delete_messages(
     message_ids: list[str],
     permanent: bool = False,

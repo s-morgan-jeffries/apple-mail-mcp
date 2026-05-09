@@ -547,6 +547,38 @@ class TestDraftsLifecycleIntegration:
                 return  # success
         pytest.fail("draft still queryable 10s after delete")
 
+    def test_update_mailbox_renames_in_place(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+    ) -> None:
+        """#102: full create -> rename via update_mailbox -> verify cycle.
+
+        Doesn't test delete (Mail.app's AppleScript dictionary doesn't
+        expose a working delete primitive — tracked as #162). This means
+        the test leaves the renamed fixture mailbox behind for cleanup
+        via Mail.app's GUI."""
+        import uuid as _uuid
+        fixture = f"ZZZ-AMM-RENAME-INT-{_uuid.uuid4().hex[:8]}"
+        new_name = f"{fixture}-renamed"
+
+        # Create the fixture.
+        assert connector.create_mailbox(account=test_account, name=fixture)
+
+        # Rename via update_mailbox.
+        assert connector.update_mailbox(
+            account=test_account, name=fixture, new_name=new_name
+        )
+
+        # Verify via list_mailboxes — old name gone, new name present.
+        names = {m["name"] for m in connector.list_mailboxes(test_account)}
+        assert new_name in names, (
+            f"renamed mailbox {new_name!r} not in listing"
+        )
+        assert fixture not in names, (
+            f"old name {fixture!r} still in listing"
+        )
+
     def test_from_account_emits_display_name_sender(
         self,
         connector: AppleMailConnector,
