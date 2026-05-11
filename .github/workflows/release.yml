@@ -25,20 +25,21 @@ jobs:
         id: changelog
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          # Extract section between ## [VERSION] and next ## [
-          NOTES=$(awk "/^## \[$VERSION\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md)
-          if [ -z "$NOTES" ]; then
-            NOTES="Release $VERSION"
+          # Extract section between ## [VERSION] and next ## [ to a workspace
+          # file. Writing to a file (vs a step output consumed by --notes)
+          # avoids shell-interpolating CHANGELOG content — backticks in
+          # markdown code spans like `update_message` would otherwise be
+          # parsed as command substitution by bash on the next step. (#177)
+          awk "/^## \[$VERSION\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release $VERSION" > release-notes.md
           fi
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          echo "$NOTES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "Release $GITHUB_REF_NAME" \
-            --notes "${{ steps.changelog.outputs.notes }}"
+            --notes-file release-notes.md
         env:
           GH_TOKEN: ${{ github.token }}
 
