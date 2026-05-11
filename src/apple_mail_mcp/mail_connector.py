@@ -3151,11 +3151,16 @@ class AppleMailConnector:
             else None
         )
 
-        # Sender clause.
+        # Sender clause. Apply the SECURITY_CHECKLIST two-step idiom
+        # (sanitize_input then escape_applescript_string) even though the
+        # resolver pulls from Mail.app's own account list — the convention
+        # exists so we don't have to risk-assess each site individually,
+        # and the Display-Name <email> form from #158 broadened what
+        # characters can appear here. (#173)
         sender_clause = ""
         if from_account is not None:
             sender_email = self._resolve_account_to_sender(from_account)
-            sender_safe = escape_applescript_string(sender_email)
+            sender_safe = escape_applescript_string(sanitize_input(sender_email))
             sender_clause = f'set sender of theMessage to "{sender_safe}"'
 
         # Recipient blocks: AppleScript fragments that, when included,

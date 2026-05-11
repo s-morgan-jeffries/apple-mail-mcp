@@ -3844,6 +3844,32 @@ class TestCreateDraft:
         assert 'set sender of theMessage to "me@x.com"' in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_with_from_account_sanitizes_sender_null_bytes(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """#173: sender string is run through sanitize_input before
+        escape_applescript_string, so embedded null bytes (which would
+        otherwise truncate or confuse the AppleScript at runtime) are
+        stripped per the SECURITY_CHECKLIST two-step convention."""
+        mock_run.return_value = "1"
+        with patch.object(
+            connector, "_resolve_account_to_sender",
+            return_value="Alice\x00Smith <me@x.com>",
+        ):
+            connector.create_draft(
+                seed="new",
+                to=["a@example.com"],
+                subject="hi",
+                body="x",
+                from_account="Gmail",
+            )
+        script = mock_run.call_args[0][0]
+        assert "\x00" not in script
+        assert (
+            'set sender of theMessage to "AliceSmith <me@x.com>"' in script
+        )
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_new_with_attachments_includes_paths(
         self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Any
     ) -> None:
