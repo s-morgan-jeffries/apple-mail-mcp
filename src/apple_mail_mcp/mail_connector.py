@@ -20,6 +20,7 @@ from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
     MailDraftNotFoundError,
+    MailImapMoveUnsupportedError,
     MailImapRequiredError,
     MailKeychainAccessDeniedError,
     MailKeychainEntryNotFoundError,
@@ -52,6 +53,7 @@ _IMAP_FALLBACK_EXCS: tuple[type[Exception], ...] = (
     OSError,
     LoginError,
     IMAPClientError,
+    MailImapMoveUnsupportedError,
 )
 
 logger = logging.getLogger(__name__)
@@ -280,6 +282,16 @@ class AppleMailConnector:
         if isinstance(exc, MailKeychainEntryNotFoundError):
             logger.debug(
                 "IMAP not configured for %s (no Keychain entry); using AppleScript",
+                account,
+            )
+            return
+
+        if isinstance(exc, MailImapMoveUnsupportedError):
+            # Capability gap is permanent for that server; opening the
+            # 30s breaker would skip IMAP for read paths that work fine.
+            logger.debug(
+                "IMAP server for %s lacks MOVE/UIDPLUS; using AppleScript "
+                "for the move-only patch",
                 account,
             )
             return
@@ -1760,6 +1772,96 @@ class AppleMailConnector:
             anchor_references=cast(list[str], anchor.get("references") or []),
         )
 
+    def _imap_move_messages(
+        self,
+        *,
+        account: str,
+        message_ids: list[str],
+        source_mailbox: str,
+        destination_mailbox: str,
+    ) -> int:
+        """IMAP path for the move-only branch of update_message (#149).
+
+        Resolves config and Keychain credentials, then delegates to
+        ImapConnector.move_messages. Propagates all fallback-triggering
+        exceptions unchanged — the caller (_try_imap_move_only) catches
+        and falls back via _IMAP_FALLBACK_EXCS.
+        """
+        host, port, email = self._resolve_imap_config(account)
+        password = get_imap_password(account, email)
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
+        return imap.move_messages(
+            message_ids=message_ids,
+            source_mailbox=source_mailbox,
+            destination_mailbox=destination_mailbox,
+        )
+
+    def _try_imap_move_only(
+        self,
+        message_ids: list[str],
+        *,
+        account: str,
+        source_mailbox: str,
+        destination_mailbox: str,
+    ) -> int | None:
+        """Attempt the move-only IMAP fast path. Returns the move count
+        on success, or None to signal the caller should fall through to
+        the AppleScript pass.
+
+        Caller must already have verified this is a move-only patch
+        (read_status / flagged / flag_color all None) and that account +
+        source_mailbox + destination_mailbox are all provided.
+        """
+        if self._imap_breaker_open(account):
+            return None
+        try:
+            result = self._imap_move_messages(
+                account=account,
+                message_ids=message_ids,
+                source_mailbox=source_mailbox,
+                destination_mailbox=destination_mailbox,
+            )
+            self._imap_clear_breaker(account)
+            return result
+        except _IMAP_FALLBACK_EXCS as exc:
+            self._log_imap_fallback(account, exc)
+            return None
+
+    def _maybe_imap_move_only(
+        self,
+        message_ids: list[str],
+        *,
+        read_status: bool | None,
+        flagged: bool | None,
+        flag_color: str | None,
+        destination_mailbox: str | None,
+        source_mailbox: str | None,
+        account: str | None,
+    ) -> int | None:
+        """Branch out to the IMAP fast path (#149) when this update_message
+        call is a move-only patch with a source_mailbox hint. Returns the
+        moved-count on success, or None when the caller should fall
+        through to the AppleScript pass.
+
+        Combined patches (move + read/flag) and patches without
+        source_mailbox return None unconditionally — those stay on
+        AppleScript pending #150 / #151 / #152.
+        """
+        move_only = (
+            destination_mailbox is not None
+            and read_status is None
+            and flagged is None
+            and flag_color is None
+        )
+        if not move_only or source_mailbox is None:
+            return None
+        return self._try_imap_move_only(
+            message_ids,
+            account=cast(str, account),
+            source_mailbox=source_mailbox,
+            destination_mailbox=cast(str, destination_mailbox),
+        )
+
     def _get_thread_applescript(self, message_id: str) -> list[dict[str, Any]]:
         """AppleScript path for get_thread (the universal baseline).
 
@@ -2217,8 +2319,19 @@ class AppleMailConnector:
                 ``destination_mailbox`` is set). Also used with
                 ``source_mailbox`` for narrow-path optimization.
             source_mailbox: Optional source mailbox. With ``account``,
-                narrows the AppleScript scan to one mailbox.
+                narrows the AppleScript scan to one mailbox. Required to
+                unlock the IMAP fast path on move-only patches (#149) —
+                without it, the move runs via AppleScript even when
+                IMAP is configured.
             gmail_mode: Use Gmail-specific copy+delete for the move.
+
+        IMAP fast path (#149): when the patch is move-only
+        (``destination_mailbox`` is the only field set) and
+        ``source_mailbox`` is provided, the move runs server-side via
+        IMAP ``UID MOVE`` (RFC 6851), avoiding the AppleScript ``whose
+        message id is`` linear scan that costs ~57s on a 47k-message
+        mailbox. Combined patches (move + read/flag in one call) stay on
+        AppleScript until siblings #150 / #151 / #152 land.
 
         Returns:
             Number of messages updated.
@@ -2249,6 +2362,18 @@ class AppleMailConnector:
                 "update_message: account is required when "
                 "destination_mailbox is set"
             )
+
+        imap_count = self._maybe_imap_move_only(
+            message_ids,
+            read_status=read_status,
+            flagged=flagged,
+            flag_color=flag_color,
+            destination_mailbox=destination_mailbox,
+            source_mailbox=source_mailbox,
+            account=account,
+        )
+        if imap_count is not None:
+            return imap_count
 
         from .utils import get_flag_index, validate_flag_color
 

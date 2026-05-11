@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance
+
+**IMAP fast path for move-only `update_message` (#149):** When a caller invokes `update_message` with only `destination_mailbox` set (no `read_status`, `flagged`, or `flag_color`) and provides `source_mailbox`, the move now runs server-side via IMAP `UID MOVE` (RFC 6851) — atomic, single round-trip after Message-ID resolution. Resolves the dual-ID problem from #147: callers feeding RFC 5322 Message-IDs from `search_messages`'s IMAP path no longer pay the AppleScript `whose message id is` linear scan (~57s on a 47k-message Gmail INBOX). Capability detection prefers `MOVE`, falls back to `UID COPY` + `UID STORE +FLAGS \Deleted` + `UID EXPUNGE` when only `UIDPLUS` (RFC 4315) is advertised — the scoped `UID EXPUNGE` is safe (removes only the just-moved UIDs, not other `\Deleted`-flagged messages in the mailbox). Servers advertising neither MOVE nor UIDPLUS fall through to AppleScript via the existing graceful-degradation path. Combined patches (move + read/flag in one call) still run via AppleScript pending #150 / #151 / #152. Requires `source_mailbox` — without it, IMAP would have to SEARCH every mailbox per Message-ID, defeating the speed win.
+
 ## [0.7.0] - 2026-05-10
 
 API-surface release. Two parallel arcs landed: (1) the #129 audit-driven consolidation that collapsed seven near-duplicate tools into shared verbs (`update_message`, `update_rule`, `get_messages`, expanded `search_messages` filters), and (2) the mailbox + drafts CRUD additions that complete the write-side surface (`update_mailbox`, `delete_mailbox`, `create_draft` / `update_draft` / `delete_draft`). The IMAP thread-discovery work from v0.6.0 is now fully tiered with Tier 1.5 (Gmail per-mailbox X-GM-THRID) and Tier 2 (RFC 5256 THREAD) shipped. Net tool count: 27 → 23 — fewer surfaces, broader coverage.

@@ -38,7 +38,7 @@ from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError, LoginError
 from imapclient.response_types import Envelope
 
-from .exceptions import MailMessageNotFoundError
+from .exceptions import MailImapMoveUnsupportedError, MailMessageNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -904,6 +904,78 @@ class ImapConnector:
         """
         with self._session() as client:
             client.rename_folder(old_name, new_name)
+
+    def move_messages(
+        self,
+        message_ids: list[str],
+        source_mailbox: str,
+        destination_mailbox: str,
+    ) -> int:
+        """Move messages between mailboxes via IMAP. Issue #149.
+
+        Resolves each RFC 5322 Message-ID to a UID via
+        ``SEARCH HEADER "Message-ID" "<id>"`` against ``source_mailbox``,
+        then issues one server-side move per session:
+
+        - When ``MOVE`` (RFC 6851) is advertised: ``UID MOVE <uids> <dest>``
+          — atomic, single round-trip after resolution.
+        - Else when ``UIDPLUS`` (RFC 4315) is advertised: ``UID COPY`` +
+          ``UID STORE +FLAGS (\\Deleted)`` + ``UID EXPUNGE``. The expunge
+          is scoped to the just-deleted UIDs only — safe even if other
+          ``\\Deleted``-flagged messages exist in the mailbox.
+        - Else: raises :class:`MailImapMoveUnsupportedError`. A non-UIDPLUS
+          unscoped EXPUNGE would remove all flagged messages in the
+          mailbox, not just the ones we just moved.
+
+        Args:
+            message_ids: RFC 5322 Message-IDs, with or without surrounding
+                ``<>``. Bracketless is what ``search_messages`` returns;
+                either form works.
+            source_mailbox: Mailbox the messages currently live in.
+            destination_mailbox: Target mailbox.
+
+        Returns:
+            Count of resolved + moved messages. Message-IDs that don't
+            resolve to a UID are silently skipped, matching the
+            AppleScript path's best-effort partial-success behavior.
+
+        Raises:
+            MailImapMoveUnsupportedError: Server advertises neither MOVE
+                nor UIDPLUS.
+            IMAPClientError: SELECT / SEARCH / MOVE / COPY / STORE /
+                EXPUNGE failed at the protocol level.
+        """
+        bracketed_ids = [
+            mid if mid.startswith("<") and mid.endswith(">") else f"<{mid}>"
+            for mid in message_ids
+        ]
+
+        with self._session() as client:
+            client.select_folder(source_mailbox, readonly=False)
+
+            has_move = self._has_capability(client, b"MOVE")
+            has_uidplus = self._has_capability(client, b"UIDPLUS")
+            if not has_move and not has_uidplus:
+                raise MailImapMoveUnsupportedError(
+                    f"IMAP server at {self._host} advertises neither MOVE "
+                    f"(RFC 6851) nor UIDPLUS (RFC 4315); cannot perform a "
+                    f"safe scoped move"
+                )
+
+            uids: list[int] = []
+            for bracketed in bracketed_ids:
+                found = client.search(["HEADER", "Message-ID", bracketed])
+                uids.extend(found)
+            if not uids:
+                return 0
+
+            if has_move:
+                client.move(uids, destination_mailbox)
+            else:
+                client.copy(uids, destination_mailbox)
+                client.add_flags(uids, [b"\\Deleted"], silent=True)
+                client.uid_expunge(uids)
+            return len(uids)
 
     @staticmethod
     def _has_capability(client: IMAPClient, name: bytes) -> bool:

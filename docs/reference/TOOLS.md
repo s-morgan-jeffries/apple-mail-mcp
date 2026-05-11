@@ -305,12 +305,14 @@ Patch one or more messages: change read state, flag color, and/or move to anothe
 | `flag_color` | string \| null | No | null | One of `orange`, `red`, `yellow`, `blue`, `green`, `purple`, `gray`, `none`. `"none"` clears the flag. Implies `flagged=True` for non-`none` values. |
 | `destination_mailbox` | string \| null | No | null | Target mailbox name to move to. Requires `account`. |
 | `account` | string \| null | No | null | Account name (required when `destination_mailbox` is set; also unlocks the IMAP narrow-path optimization) |
-| `source_mailbox` | string \| null | No | null | Optional narrow-path hint — if all messages live in this mailbox, the AppleScript scan is bypassed (IMAP fast path) |
+| `source_mailbox` | string \| null | No | null | Optional narrow-path hint — narrows the AppleScript scan to one mailbox. Required to unlock the IMAP fast path on move-only patches (#149) — without it, the move runs via AppleScript even when IMAP is configured. |
 | `gmail_mode` | boolean | No | false | Use Gmail-specific copy+delete instead of move (label-based accounts) |
 
 **Patch semantics:** caller specifies only the fields they want changed. At least one field parameter must be set; otherwise returns `validation_error`.
 
 **Order of operations:** read-state and flag changes apply first (in the source mailbox), then the move. IMAP requires the message to exist in the source folder for STORE before MOVE.
+
+**Performance — IMAP fast path (#149):** When the patch is move-only (`destination_mailbox` is the only field set) and `source_mailbox` is provided, the move runs server-side via IMAP `UID MOVE`. On a 47k-message Gmail INBOX this drops the move from ~57s to <1s — the AppleScript path uses `whose message id is`, which is a linear scan against RFC 5322 Message-IDs. Combined patches (move + read/flag in one call) currently run via AppleScript regardless. Requires Keychain credentials per the IMAP setup flow (`apple-mail-mcp setup-imap --account <name>`); falls back to AppleScript transparently when IMAP isn't configured or the server lacks `MOVE` / `UIDPLUS`.
 
 **Returns:**
 

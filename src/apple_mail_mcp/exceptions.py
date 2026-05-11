@@ -50,6 +50,16 @@ class MailImapRequiredError(MailError):
     pass
 
 
+class MailImapMoveUnsupportedError(MailError):
+    """The IMAP server advertises neither MOVE (RFC 6851) nor UIDPLUS
+    (RFC 4315). No safe scoped move is possible; the orchestrator must
+    fall back to AppleScript. A non-UIDPLUS unscoped EXPUNGE would
+    remove every \\Deleted-flagged message in the mailbox, not just the
+    ones we just moved."""
+
+    pass
+
+
 class MailMessageNotFoundError(MailError):
     """Message does not exist."""
 

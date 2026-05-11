@@ -1279,6 +1279,146 @@ class TestImapRenameMailbox:
         )
 
 
+class TestImapMoveMessages:
+    """Issue #149: server-side message move via UID MOVE (RFC 6851)
+    or UID COPY + STORE \\Deleted + UID EXPUNGE (RFC 4315 UIDPLUS)."""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_move_uses_uid_move_when_capability_present(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Headline path: server advertises MOVE → one round-trip after
+        the per-id Message-ID resolution."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = {b"IMAP4REV1", b"MOVE", b"UIDPLUS"}
+        client.search.side_effect = [[101], [102]]
+
+        moved = ImapConnector("h", 993, "u@e.com", "pw").move_messages(
+            ["msg-a@example.com", "<msg-b@example.com>"],
+            source_mailbox="INBOX",
+            destination_mailbox="Archive",
+        )
+
+        assert moved == 2
+        client.select_folder.assert_called_once_with("INBOX", readonly=False)
+        client.move.assert_called_once_with([101, 102], "Archive")
+        # The UIDPLUS fallback path must not have fired.
+        client.copy.assert_not_called()
+        client.uid_expunge.assert_not_called()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_move_falls_back_to_copy_store_expunge_when_only_uidplus(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """No MOVE capability but UIDPLUS present: COPY + STORE \\Deleted
+        + scoped UID EXPUNGE. Scoped expunge keeps it safe."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = {b"IMAP4REV1", b"UIDPLUS"}
+        client.search.side_effect = [[201], [202]]
+
+        moved = ImapConnector("h", 993, "u@e.com", "pw").move_messages(
+            ["a@example.com", "b@example.com"],
+            source_mailbox="INBOX",
+            destination_mailbox="Archive",
+        )
+
+        assert moved == 2
+        client.move.assert_not_called()
+        client.copy.assert_called_once_with([201, 202], "Archive")
+        client.add_flags.assert_called_once_with(
+            [201, 202], [b"\\Deleted"], silent=True
+        )
+        client.uid_expunge.assert_called_once_with([201, 202])
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_move_raises_when_neither_move_nor_uidplus(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Without MOVE or UIDPLUS we'd have to do an unscoped EXPUNGE
+        (which removes ALL \\Deleted-flagged messages). Refuse instead;
+        orchestrator handles the AppleScript fallback."""
+        from apple_mail_mcp.exceptions import MailImapMoveUnsupportedError
+
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = {b"IMAP4REV1"}
+
+        with pytest.raises(MailImapMoveUnsupportedError, match="MOVE"):
+            ImapConnector("h", 993, "u@e.com", "pw").move_messages(
+                ["a@example.com"],
+                source_mailbox="INBOX",
+                destination_mailbox="Archive",
+            )
+        client.move.assert_not_called()
+        client.copy.assert_not_called()
+        client.uid_expunge.assert_not_called()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_move_returns_zero_when_no_uids_resolve(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """All Message-IDs miss in the source mailbox → no-op, return 0."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = {b"MOVE"}
+        client.search.return_value = []
+
+        moved = ImapConnector("h", 993, "u@e.com", "pw").move_messages(
+            ["missing-1@example.com", "missing-2@example.com"],
+            source_mailbox="INBOX",
+            destination_mailbox="Archive",
+        )
+
+        assert moved == 0
+        client.move.assert_not_called()
+        client.copy.assert_not_called()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_move_strips_and_re_adds_brackets_for_search(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Mix of bracketless and bracketed Message-IDs as input. Both
+        arrive at SEARCH HEADER as the bracketed RFC 5322 form."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = {b"MOVE"}
+        client.search.side_effect = [[1], [2]]
+
+        ImapConnector("h", 993, "u@e.com", "pw").move_messages(
+            ["bare@example.com", "<wrapped@example.com>"],
+            source_mailbox="INBOX",
+            destination_mailbox="Archive",
+        )
+
+        searches = [c[0][0] for c in client.search.call_args_list]
+        assert searches == [
+            ["HEADER", "Message-ID", "<bare@example.com>"],
+            ["HEADER", "Message-ID", "<wrapped@example.com>"],
+        ]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_move_skips_message_ids_that_dont_resolve(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Best-effort partial-success: 3 ids in, 2 resolve → MOVE on
+        the 2; return 2. Matches the AppleScript path's behavior."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = {b"MOVE"}
+        client.search.side_effect = [[10], [], [11]]
+
+        moved = ImapConnector("h", 993, "u@e.com", "pw").move_messages(
+            ["a@x", "b@x", "c@x"],
+            source_mailbox="INBOX",
+            destination_mailbox="Archive",
+        )
+
+        assert moved == 2
+        client.move.assert_called_once_with([10, 11], "Archive")
+
+
 # ---------------------------------------------------------------------------
 # Issue #122: Gmail X-GM-THRID dispatch in find_thread_members
 # ---------------------------------------------------------------------------

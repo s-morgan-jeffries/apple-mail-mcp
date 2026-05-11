@@ -6,14 +6,19 @@ fixture in conftest.py handles setup (move BULK_SIZE messages into
 The benchmarks themselves operate on the bench mailbox so test data
 is isolated from real mail.
 
-Two benchmarks here:
+Three benchmarks here:
 - `mark_as_read_50_msgs` — bulk read-state toggle (single AppleScript
   call covering all N messages; the key scaling-pattern signal)
-- `move_messages_50_msgs` — bulk move (round-trip: bench → source → bench
-  per iteration, leaving state unchanged at iteration end)
+- `move_messages_50_msgs` — bulk move via the legacy connector method
+  (AppleScript-only baseline: round-trip bench → source → bench)
+- `update_message_move_50_msgs_imap` — bulk move via update_message's
+  IMAP fast path (#149); side-by-side companion to the AppleScript
+  baseline above.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from apple_mail_mcp.mail_connector import AppleMailConnector
 
@@ -113,6 +118,86 @@ def test_move_messages_50_msgs(
         current_ids[:] = [m["id"] for m in in_bench[: len(current_ids)]]
 
     # 3 runs (not 5) — each run is two moves on 50 messages.
+    result: BenchmarkResult = measure_median(run, name=name, runs=3)
+    assert_within_baseline(name, result, baselines, capture_mode)
+
+
+def test_update_message_move_50_msgs_imap(
+    connector: AppleMailConnector,
+    test_account: str,
+    bench_source: str,
+    bench_mailbox: str,
+    baselines: dict[str, float],
+    capture_mode: bool,
+) -> None:
+    """#149: bulk-move BULK_SIZE messages via update_message's move-only
+    IMAP fast path. Side-by-side with ``move_messages_50_msgs`` (which
+    measures the AppleScript baseline).
+
+    Skipped when IMAP isn't configured for the test account — the IMAP
+    fast path needs Keychain credentials and falls back to AppleScript
+    silently otherwise, which would mask the comparison.
+
+    The IDs handed to update_message are RFC 5322 Message-IDs from the
+    IMAP search path; passing AppleScript internal numeric IDs would
+    silently no-op the IMAP MOVE (server can't resolve them via SEARCH
+    HEADER Message-ID)."""
+    from apple_mail_mcp.exceptions import MailKeychainEntryNotFoundError
+    from apple_mail_mcp.keychain import get_imap_password
+
+    # Skip cleanly when IMAP isn't configured.
+    try:
+        _, _, email = connector._resolve_imap_config(test_account)
+        get_imap_password(test_account, email)
+    except MailKeychainEntryNotFoundError:
+        pytest.skip(
+            f"IMAP not configured for {test_account!r}; nothing to "
+            f"benchmark. Run `apple-mail-mcp setup-imap --account "
+            f"{test_account}` to enable."
+        )
+
+    name = "update_message_move_50_msgs_imap"
+
+    # Force IMAP search to get RFC 5322 Message-IDs. Falling back to
+    # AppleScript would yield internal numeric IDs which the IMAP MOVE
+    # path can't resolve via SEARCH HEADER Message-ID.
+    rfc_ids = [
+        m["id"]
+        for m in connector._imap_search(
+            account=test_account, mailbox=bench_source, limit=50,
+        )
+    ]
+    if len(rfc_ids) < 50:
+        pytest.skip(
+            f"bench_source {bench_source!r} returned only {len(rfc_ids)} "
+            f"RFC ids via IMAP search; need 50 for the benchmark."
+        )
+
+    # Move bench_source → bench, then bench → bench_source. After each
+    # leg, re-fetch IDs via IMAP search since UIDs change on move.
+    current = list(rfc_ids)
+    src = bench_source
+    dst = bench_mailbox
+
+    def run() -> None:
+        nonlocal current, src, dst
+        connector.update_message(
+            current,
+            destination_mailbox=dst,
+            account=test_account,
+            source_mailbox=src,
+        )
+        # Re-fetch from the new source (was the destination).
+        current = [
+            m["id"]
+            for m in connector._imap_search(
+                account=test_account, mailbox=dst, limit=50,
+            )
+        ][:50]
+        src, dst = dst, src
+
+    # 3 runs (each is one move on 50 messages — half the round-trip cost
+    # of move_messages_50_msgs).
     result: BenchmarkResult = measure_median(run, name=name, runs=3)
     assert_within_baseline(name, result, baselines, capture_mode)
 

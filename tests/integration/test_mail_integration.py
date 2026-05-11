@@ -592,6 +592,87 @@ class TestDraftsLifecycleIntegration:
             client.logout()
         assert fixture not in folders, f"{fixture} still on IMAP server after delete"
 
+    def test_update_message_move_via_imap_round_trip(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+    ) -> None:
+        """#149: move-only update_message → IMAP MOVE → verify via direct
+        IMAP. Mail.app's mailbox view lags IMAP server changes; the
+        truth lives on the server."""
+        import uuid as _uuid
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+
+        from imapclient import IMAPClient
+
+        from apple_mail_mcp.keychain import get_imap_password
+
+        suffix = _uuid.uuid4().hex[:8]
+        src = f"ZZZ-AMM-MV-SRC-{suffix}"
+        dst = f"ZZZ-AMM-MV-DST-{suffix}"
+        msg_id_local = f"{_uuid.uuid4().hex}@apple-mail-mcp-test.invalid"
+        bracketed = f"<{msg_id_local}>"
+
+        host, port, email = connector._resolve_imap_config(test_account)
+        pw = get_imap_password(test_account, email)
+
+        assert connector.create_mailbox(account=test_account, name=src)
+        assert connector.create_mailbox(account=test_account, name=dst)
+
+        try:
+            # APPEND a synthetic message into source via direct IMAP — this
+            # gives us a known Message-ID without going through Mail.app.
+            now = format_datetime(datetime.now(tz=timezone.utc))
+            raw = (
+                f"From: sender@apple-mail-mcp-test.invalid\r\n"
+                f"To: rcpt@apple-mail-mcp-test.invalid\r\n"
+                f"Subject: AMM #149 IMAP move test\r\n"
+                f"Date: {now}\r\n"
+                f"Message-ID: {bracketed}\r\n"
+                f"\r\n"
+                f"body\r\n"
+            ).encode()
+
+            append_client = IMAPClient(host, port=port, ssl=True, timeout=30)
+            append_client.login(email, pw)
+            try:
+                append_client.append(src, raw)
+            finally:
+                append_client.logout()
+
+            # Drive the IMAP move via update_message's move-only branch.
+            moved = connector.update_message(
+                [msg_id_local],
+                destination_mailbox=dst,
+                account=test_account,
+                source_mailbox=src,
+            )
+            assert moved == 1
+
+            # Verify via direct IMAP — Mail.app's local view lags.
+            verify = IMAPClient(host, port=port, ssl=True, timeout=30)
+            verify.login(email, pw)
+            try:
+                verify.select_folder(src, readonly=True)
+                src_uids = verify.search(["HEADER", "Message-ID", bracketed])
+                verify.select_folder(dst, readonly=True)
+                dst_uids = verify.search(["HEADER", "Message-ID", bracketed])
+            finally:
+                verify.logout()
+
+            assert src_uids == [], f"message still in source after MOVE: {src_uids}"
+            assert len(dst_uids) == 1, f"message not in dest after MOVE: {dst_uids}"
+        finally:
+            # Best-effort cleanup of both fixture mailboxes.
+            for name in (src, dst):
+                try:
+                    connector.delete_mailbox(
+                        account=test_account, name=name, delete_messages=True
+                    )
+                except Exception:
+                    pass
+
     def test_update_mailbox_renames_in_place(
         self,
         connector: AppleMailConnector,
