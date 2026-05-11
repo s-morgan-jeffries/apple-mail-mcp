@@ -17,10 +17,21 @@ if ! command -v gh &> /dev/null; then
     exit 0
 fi
 
+# Resolve the SHA that was just pushed so the run lookup below can be
+# scoped to it. Without this, `gh run list --limit 1` would return the
+# most recent run repo-wide — potentially an unrelated run on another
+# branch — and the hook would misreport its status as the result of
+# this push. (#179)
+PUSHED_SHA=$(git rev-parse HEAD 2>/dev/null)
+if [ -z "$PUSHED_SHA" ]; then
+    echo "Could not resolve pushed commit SHA; skipping CI watch." >&2
+    exit 0
+fi
+
 echo "Git push detected. Waiting for CI to start..." >&2
 sleep 10
 
-RUN_ID=$(gh run list --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)
+RUN_ID=$(gh run list --commit "$PUSHED_SHA" --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)
 
 if [ -n "$RUN_ID" ]; then
     echo "Watching CI run #$RUN_ID..." >&2
@@ -35,7 +46,7 @@ if [ -n "$RUN_ID" ]; then
     fi
     echo "CI passed." >&2
 else
-    echo "No CI run found. Check manually." >&2
+    echo "No CI run found for $PUSHED_SHA (workflows may not fire on branch pushes; check after opening the PR)." >&2
 fi
 
 exit 0
