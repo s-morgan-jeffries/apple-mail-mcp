@@ -2017,6 +2017,89 @@ class AppleMailConnector:
             read=cast(bool, read_status),
         )
 
+    def _imap_set_flagged_status(
+        self,
+        *,
+        account: str,
+        message_ids: list[str],
+        source_mailbox: str,
+        flagged: bool,
+    ) -> int:
+        """IMAP path for the flag-only branch of update_message (#152).
+
+        Resolves config and Keychain credentials, then delegates to
+        ImapConnector.set_flagged_status (\\Flagged STORE — base IMAP,
+        no capability check). Propagates all fallback-triggering
+        exceptions unchanged.
+        """
+        host, port, email = self._resolve_imap_config(account)
+        password = get_imap_password(account, email)
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
+        return imap.set_flagged_status(
+            message_ids=message_ids,
+            source_mailbox=source_mailbox,
+            flagged=flagged,
+        )
+
+    def _try_imap_flag_only(
+        self,
+        message_ids: list[str],
+        *,
+        account: str,
+        source_mailbox: str,
+        flagged: bool,
+    ) -> int | None:
+        """Attempt IMAP fast path for flag-only patch. Returns count
+        on success, or None to fall through to AppleScript."""
+        if self._imap_breaker_open(account):
+            return None
+        try:
+            result = self._imap_set_flagged_status(
+                account=account,
+                message_ids=message_ids,
+                source_mailbox=source_mailbox,
+                flagged=flagged,
+            )
+            self._imap_clear_breaker(account)
+            return result
+        except _IMAP_FALLBACK_EXCS as exc:
+            self._log_imap_fallback(account, exc)
+            return None
+
+    def _maybe_imap_flag_only(
+        self,
+        message_ids: list[str],
+        *,
+        read_status: bool | None,
+        flagged: bool | None,
+        flag_color: str | None,
+        destination_mailbox: str | None,
+        source_mailbox: str | None,
+        account: str | None,
+    ) -> int | None:
+        """Branch out to the IMAP fast path (#152) when this
+        update_message call is a flag-only patch (flagged set, no
+        flag_color, no other fields) with account + source_mailbox.
+
+        flag_color requires Mail.app's $MailFlagBit* keywords which
+        IMAP can't set; combined patches need multiple actions in one
+        AppleScript pass. Both fall through to AppleScript.
+        """
+        flag_only = (
+            flagged is not None
+            and flag_color is None
+            and read_status is None
+            and destination_mailbox is None
+        )
+        if not flag_only or source_mailbox is None or account is None:
+            return None
+        return self._try_imap_flag_only(
+            message_ids,
+            account=account,
+            source_mailbox=source_mailbox,
+            flagged=cast(bool, flagged),
+        )
+
     def _get_thread_applescript(self, message_id: str) -> list[dict[str, Any]]:
         """AppleScript path for get_thread (the universal baseline).
 
@@ -2531,6 +2614,18 @@ class AppleMailConnector:
             return imap_count
 
         imap_count = self._maybe_imap_read_only(
+            message_ids,
+            read_status=read_status,
+            flagged=flagged,
+            flag_color=flag_color,
+            destination_mailbox=destination_mailbox,
+            source_mailbox=source_mailbox,
+            account=account,
+        )
+        if imap_count is not None:
+            return imap_count
+
+        imap_count = self._maybe_imap_flag_only(
             message_ids,
             read_status=read_status,
             flagged=flagged,

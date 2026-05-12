@@ -892,6 +892,105 @@ class TestDraftsLifecycleIntegration:
             except Exception:
                 pass
 
+    def test_update_message_flagged_status_via_imap_round_trip(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+    ) -> None:
+        """#152: flag-only update_message (flagged, no flag_color/read/move)
+        with account+source_mailbox → IMAP STORE \\Flagged → verify via
+        direct IMAP that the flag was set, then flip to unflagged and
+        verify it was cleared."""
+        import uuid as _uuid
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+
+        from imapclient import IMAPClient
+
+        from apple_mail_mcp.keychain import get_imap_password
+
+        suffix = _uuid.uuid4().hex[:8]
+        src = f"ZZZ-AMM-FLAG-SRC-{suffix}"
+        msg_id_local = f"{_uuid.uuid4().hex}@apple-mail-mcp-test.invalid"
+        bracketed = f"<{msg_id_local}>"
+
+        host, port, email = connector._resolve_imap_config(test_account)
+        pw = get_imap_password(test_account, email)
+
+        assert connector.create_mailbox(account=test_account, name=src)
+
+        try:
+            now = format_datetime(datetime.now(tz=timezone.utc))
+            raw = (
+                f"From: sender@apple-mail-mcp-test.invalid\r\n"
+                f"To: rcpt@apple-mail-mcp-test.invalid\r\n"
+                f"Subject: AMM #152 IMAP flag round-trip test\r\n"
+                f"Date: {now}\r\n"
+                f"Message-ID: {bracketed}\r\n"
+                f"\r\n"
+                f"body\r\n"
+            ).encode()
+
+            append_client = IMAPClient(host, port=port, ssl=True, timeout=30)
+            append_client.login(email, pw)
+            try:
+                # Explicitly NO flags at start.
+                append_client.append(src, raw, flags=[])
+            finally:
+                append_client.logout()
+
+            # Set the flag via IMAP fast path.
+            marked = connector.update_message(
+                [msg_id_local],
+                flagged=True,
+                account=test_account,
+                source_mailbox=src,
+            )
+            assert marked == 1
+
+            # Verify \Flagged is now present.
+            verify = IMAPClient(host, port=port, ssl=True, timeout=30)
+            verify.login(email, pw)
+            try:
+                verify.select_folder(src, readonly=True)
+                uids = verify.search(["HEADER", "Message-ID", bracketed])
+                assert len(uids) == 1
+                flags_after_set = verify.get_flags(uids)
+                assert b"\\Flagged" in flags_after_set[uids[0]], (
+                    f"\\Flagged not set after flagged=True: {flags_after_set}"
+                )
+            finally:
+                verify.logout()
+
+            # Clear the flag.
+            unmarked = connector.update_message(
+                [msg_id_local],
+                flagged=False,
+                account=test_account,
+                source_mailbox=src,
+            )
+            assert unmarked == 1
+
+            # Verify \Flagged is now absent.
+            verify = IMAPClient(host, port=port, ssl=True, timeout=30)
+            verify.login(email, pw)
+            try:
+                verify.select_folder(src, readonly=True)
+                uids = verify.search(["HEADER", "Message-ID", bracketed])
+                flags_after_clear = verify.get_flags(uids)
+                assert b"\\Flagged" not in flags_after_clear[uids[0]], (
+                    f"\\Flagged not cleared after flagged=False: {flags_after_clear}"
+                )
+            finally:
+                verify.logout()
+        finally:
+            try:
+                connector.delete_mailbox(
+                    account=test_account, name=src, delete_messages=True
+                )
+            except Exception:
+                pass
+
     def test_update_mailbox_renames_in_place(
         self,
         connector: AppleMailConnector,

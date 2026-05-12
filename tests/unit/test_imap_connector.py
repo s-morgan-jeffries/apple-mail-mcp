@@ -1818,6 +1818,132 @@ class TestImapSetReadStatus:
         client.capabilities.assert_not_called()
 
 
+class TestImapSetFlaggedStatus:
+    """Issue #152: server-side flag/unflag via UID STORE +/-FLAGS
+    (\\Flagged). Like \\Seen in #151, \\Flagged is base IMAP (RFC 3501) —
+    universal across servers, no capability check needed.
+
+    Mail.app's flag-color attributes (the $MailFlagBit* user keywords)
+    are Mail.app-specific and out of scope for IMAP. This IMAP path
+    only handles the no-color case; flag_color goes via AppleScript."""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_set_flagged_status_true_adds_flagged_flag(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.side_effect = [[101], [102]]
+
+        marked = ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
+            ["a@example.com", "b@example.com"],
+            source_mailbox="INBOX",
+            flagged=True,
+        )
+
+        assert marked == 2
+        client.select_folder.assert_called_once_with("INBOX", readonly=False)
+        client.add_flags.assert_called_once_with(
+            [101, 102], [b"\\Flagged"], silent=True
+        )
+        client.remove_flags.assert_not_called()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_set_flagged_status_false_removes_flagged_flag(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.side_effect = [[201], [202]]
+
+        marked = ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
+            ["a@x", "b@x"],
+            source_mailbox="INBOX",
+            flagged=False,
+        )
+
+        assert marked == 2
+        client.remove_flags.assert_called_once_with(
+            [201, 202], [b"\\Flagged"], silent=True
+        )
+        client.add_flags.assert_not_called()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_set_flagged_status_returns_zero_when_no_uids_resolve(
+        self, mock_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.return_value = []
+
+        marked = ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
+            ["missing@x"],
+            source_mailbox="INBOX",
+            flagged=True,
+        )
+
+        assert marked == 0
+        client.add_flags.assert_not_called()
+        client.remove_flags.assert_not_called()
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_set_flagged_status_strips_and_re_adds_brackets_for_search(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Mix of bracketless and bracketed Message-IDs as input."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.side_effect = [[1], [2]]
+
+        ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
+            ["bare@example.com", "<wrapped@example.com>"],
+            source_mailbox="INBOX",
+            flagged=True,
+        )
+        searches = [c[0][0] for c in client.search.call_args_list]
+        assert searches == [
+            ["HEADER", "Message-ID", "<bare@example.com>"],
+            ["HEADER", "Message-ID", "<wrapped@example.com>"],
+        ]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_set_flagged_status_skips_message_ids_that_dont_resolve(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """Best-effort partial-success: 3 ids in, 2 resolve → STORE on
+        the 2; return 2."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.side_effect = [[10], [], [11]]
+
+        marked = ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
+            ["a@x", "b@x", "c@x"],
+            source_mailbox="INBOX",
+            flagged=True,
+        )
+        assert marked == 2
+        client.add_flags.assert_called_once_with(
+            [10, 11], [b"\\Flagged"], silent=True
+        )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_set_flagged_status_no_capability_check_required(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """\\Flagged is RFC 3501 base IMAP — universal. Don't gate
+        behind a capability check (regression guard)."""
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.search.return_value = [1]
+
+        ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
+            ["a@x"],
+            source_mailbox="INBOX",
+            flagged=True,
+        )
+        client.capabilities.assert_not_called()
+
+
 class TestFindThreadMembersGmail:
     """Tier 1 (Gmail X-GM-THRID) dispatch in find_thread_members.
 

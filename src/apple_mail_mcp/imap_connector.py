@@ -1121,6 +1121,65 @@ class ImapConnector:
                 client.remove_flags(uids, [b"\\Seen"], silent=True)
             return len(uids)
 
+    def set_flagged_status(
+        self,
+        message_ids: list[str],
+        source_mailbox: str,
+        flagged: bool,
+    ) -> int:
+        """Set or clear the IMAP \\Flagged flag via UID STORE. Issue #152.
+
+        Like \\Seen in #151, \\Flagged is RFC 3501 base IMAP — no
+        capability negotiation needed, works against every server.
+        Idempotent at the server level (re-setting an already-set flag
+        is a no-op), matching the AppleScript path's behavior.
+
+        Note that Mail.app's flag-color attributes (\\$MailFlagBit*
+        user keywords) are Mail.app-specific and not in scope here.
+        Callers who want a specific color must use the AppleScript
+        path via ``update_message(flag_color=...)``. The bare
+        \\Flagged set by this method renders as the default (red) flag
+        in Mail.app — identical to today's ``update_message(flagged=True)``
+        AppleScript path which sets ``flag index = 0`` and produces
+        the same bare \\Flagged on the server (verified empirically
+        against Gmail/Mail.app, 2026-05-12).
+
+        Args:
+            message_ids: RFC 5322 Message-IDs, with or without
+                surrounding angle brackets.
+            source_mailbox: Mailbox the messages live in.
+            flagged: True to set \\Flagged, False to clear it.
+
+        Returns:
+            Count of resolved + updated messages. Message-IDs that
+            don't resolve to a UID are silently skipped (matches
+            AppleScript).
+
+        Raises:
+            IMAPClientError: SELECT / SEARCH / STORE failed at the
+                protocol level.
+        """
+        bracketed_ids = [
+            mid if mid.startswith("<") and mid.endswith(">") else f"<{mid}>"
+            for mid in message_ids
+        ]
+
+        with self._session() as client:
+            client.select_folder(source_mailbox, readonly=False)
+
+            uids: list[int] = []
+            for bracketed in bracketed_ids:
+                found = client.search(["HEADER", "Message-ID", bracketed])
+                uids.extend(found)
+            if not uids:
+                return 0
+
+            if flagged:
+                client.add_flags(uids, [b"\\Flagged"], silent=True)
+            else:
+                client.remove_flags(uids, [b"\\Flagged"], silent=True)
+            return len(uids)
+
     @staticmethod
     def _has_capability(client: IMAPClient, name: bytes) -> bool:
         """True if ``name`` (e.g. ``b"X-GM-EXT-1"``) is in the post-login

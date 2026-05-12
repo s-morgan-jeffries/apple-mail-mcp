@@ -316,8 +316,9 @@ Patch one or more messages: change read state, flag color, and/or move to anothe
 
 - **Move-only patches (#149):** When `destination_mailbox` is the only field set and `source_mailbox` is provided, the move runs server-side via IMAP `UID MOVE`. On a 47k-message Gmail INBOX this drops the move from ~57s to <1s. Falls back to AppleScript when the server lacks `MOVE` / `UIDPLUS`.
 - **Read-status-only patches (#151):** When `read_status` is the only field set and `account` + `source_mailbox` are provided, the read/unread mutation runs server-side via IMAP `UID STORE +/-FLAGS (\Seen)`. `\Seen` is base IMAP (RFC 3501), universal across all servers — no capability check needed.
+- **Flag-only patches (#152):** When `flagged` is the only field set (no `flag_color`) and `account` + `source_mailbox` are provided, the flag/unflag runs server-side via IMAP `UID STORE +/-FLAGS (\Flagged)`. Same base-IMAP universality as `\Seen`. Bare `\Flagged` renders identically in Mail.app to the existing AppleScript default flag (verified empirically, no UI divergence).
 
-Combined patches (move + read, read + flag, etc.) currently run via AppleScript regardless. Both fast paths require Keychain credentials per the IMAP setup flow (`apple-mail-mcp setup-imap --account <name>`); they fall back to AppleScript transparently when IMAP isn't configured.
+Combined patches (move + read, read + flag, etc.) and any patch with `flag_color` set currently run via AppleScript regardless — Mail.app's color attributes (`$MailFlagBit*` user keywords) are out of IMAP scope. All fast paths require Keychain credentials per the IMAP setup flow (`apple-mail-mcp setup-imap --account <name>`); they fall back to AppleScript transparently when IMAP isn't configured.
 
 **Returns:**
 
