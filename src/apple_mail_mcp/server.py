@@ -2146,6 +2146,141 @@ def _build_draft_send_summary(
     return verb + "\n\n" + "\n".join(lines)
 
 
+def _resolve_create_draft_seed(
+    reply_to: str | None,
+    forward_of: str | None,
+) -> tuple[str, str | None]:
+    """Resolve (seed_kind, seed_id) from create_draft's reply_to/forward_of
+    params. Param-shape validation (reply_to AND forward_of both set) is
+    caller's responsibility; this helper assumes valid input. (#191)
+    """
+    if reply_to:
+        return "reply", reply_to
+    if forward_of:
+        return "forward", forward_of
+    return "new", None
+
+
+def _maybe_apply_template(
+    template_name: str | None,
+    template_vars: dict[str, str] | None,
+    seed_id: str | None,
+    subject: str | None,
+    body: str,
+) -> tuple[str | None, str]:
+    """If template_name is set, load it and merge into (subject, body).
+    Caller-supplied values override the rendered output. Pass-through
+    when template_name is None. Raises MailTemplateError on bad
+    templates — caller wraps in try/except + _template_error_response. (#191)
+    """
+    if not template_name:
+        return subject, body
+    template = _get_template_store().get(template_name)
+    auto_vars = mail.auto_template_vars(seed_id)
+    merged_vars: dict[str, str] = {**auto_vars, **(template_vars or {})}
+    rendered = template.render(merged_vars)
+    if subject is None:
+        subject = rendered["subject"]
+    if not body:
+        body = rendered["body"] or ""
+    return subject, body
+
+
+def _validate_fresh_seed_fields(
+    seed_kind: str,
+    to: list[str] | None,
+    subject: str | None,
+) -> dict[str, Any] | None:
+    """For seed_kind=='new', require both `to` and `subject` (post-template
+    rendering). Returns a validation_error dict if missing, None otherwise. (#191)
+    """
+    if seed_kind != "new":
+        return None
+    if not to:
+        return {
+            "success": False,
+            "error": "'to' is required when not replying or forwarding",
+            "error_type": "validation_error",
+        }
+    if not subject:
+        return {
+            "success": False,
+            "error": "'subject' is required when not replying or forwarding",
+            "error_type": "validation_error",
+        }
+    return None
+
+
+async def _run_send_now_gates(
+    operation: str,
+    ctx: Context | None,
+    recipients: list[str],
+    rate_params: dict[str, Any],
+    summary: str,
+    elicit_extra: dict[str, Any],
+    *,
+    validate_recipient_shape: bool = False,
+    validate_args: tuple[Any, ...] = (),
+) -> dict[str, Any] | None:
+    """Run the standard send_now gate chain (#191):
+
+    1. ``check_test_mode_safety(operation, recipients=recipients)``
+    2. ``check_rate_limit(operation, rate_params)``
+    3. If ``validate_recipient_shape``: ``validate_send_operation(*validate_args)``
+    4. ``_elicit_confirmation(ctx, summary, operation, elicit_extra)``
+
+    Returns the first failure response, or ``None`` if all pass.
+
+    The ``validate_recipient_shape`` flag exists so ``update_draft``
+    (#192) can adopt this helper — its send path inherits recipients
+    from existing draft state and doesn't need the shape check.
+    """
+    safety_err = check_test_mode_safety(operation, recipients=recipients)
+    if safety_err:
+        return safety_err
+    rate_err = check_rate_limit(operation, rate_params)
+    if rate_err:
+        return rate_err
+    if validate_recipient_shape:
+        is_valid, error_msg = validate_send_operation(*validate_args)
+        if not is_valid:
+            return {
+                "success": False,
+                "error": error_msg,
+                "error_type": "validation_error",
+            }
+    cancel_err = await _elicit_confirmation(
+        ctx, summary, operation, elicit_extra,
+    )
+    if cancel_err:
+        return cancel_err
+    return None
+
+
+def _persist_create_draft_seed(
+    draft_id: str,
+    seed_kind: str,
+    seed_id: str | None,
+    reply_all: bool,
+    send_now: bool,
+) -> None:
+    """Persist seed metadata for reply/forward drafts so update_draft can
+    rebuild without an O(N) header lookup. No-op for `send_now=True`,
+    failed creates (empty draft_id), or seed kinds without an anchor
+    message. (#191)
+    """
+    if send_now or not draft_id or seed_kind not in ("reply", "forward") or not seed_id:
+        return
+    _get_draft_state_store().set_seed(
+        draft_id,
+        SeedRecord(
+            seed_kind=cast(Any, seed_kind),
+            seed_id=seed_id,
+            reply_all=reply_all,
+        ),
+    )
+
+
 @mcp.tool()
 async def create_draft(
     reply_to: str | None = None,
@@ -2218,90 +2353,51 @@ async def create_draft(
                 "error_type": "validation_error",
             }
 
-        # Resolve seed.
-        if reply_to:
-            seed_kind = "reply"
-            seed_id: str | None = reply_to
-        elif forward_of:
-            seed_kind = "forward"
-            seed_id = forward_of
-        else:
-            seed_kind = "new"
-            seed_id = None
+        seed_kind, seed_id = _resolve_create_draft_seed(reply_to, forward_of)
 
         # ----------------------------------------------------------------
-        # Template resolution
+        # Template resolution (#191: pulled out to _maybe_apply_template).
         # ----------------------------------------------------------------
-        if template_name:
-            try:
-                template = _get_template_store().get(template_name)
-                auto_vars = mail.auto_template_vars(seed_id)
-                merged_vars: dict[str, str] = {**auto_vars, **(template_vars or {})}
-                rendered = template.render(merged_vars)
-                # User-supplied subject/body override the rendered output.
-                if subject is None:
-                    subject = rendered["subject"]
-                if not body:
-                    body = rendered["body"] or ""
-            except MailTemplateError as e:
-                return _template_error_response(e)
+        try:
+            subject, body = _maybe_apply_template(
+                template_name, template_vars, seed_id, subject, body,
+            )
+        except MailTemplateError as e:
+            return _template_error_response(e)
 
         # Fresh-seed required-field validation (after template rendering
         # so a template can supply subject/body).
-        if seed_kind == "new":
-            if not to:
-                return {
-                    "success": False,
-                    "error": "'to' is required when not replying or forwarding",
-                    "error_type": "validation_error",
-                }
-            if not subject:
-                return {
-                    "success": False,
-                    "error": "'subject' is required when not replying or forwarding",
-                    "error_type": "validation_error",
-                }
+        fresh_err = _validate_fresh_seed_fields(seed_kind, to, subject)
+        if fresh_err:
+            return fresh_err
 
         # ----------------------------------------------------------------
-        # Send-only checks (drafts are local — no rate limit / safety)
+        # Send-only checks (drafts are local — no rate limit / safety).
+        # #191: gate chain pulled out to _run_send_now_gates.
         # ----------------------------------------------------------------
         if send_now:
             all_recipients = (to or []) + (cc or []) + (bcc or [])
-            # #175: always call the gate when send_now=True — even with an
-            # empty recipients list — so the implicit-reply path doesn't
-            # silently bypass the reserved-domain check. The gate itself
-            # rejects empty recipients in test mode.
-            safety_err = check_test_mode_safety(
-                "create_draft", recipients=all_recipients
+            summary = _build_draft_send_summary(
+                seed_kind, to, cc, bcc, subject, body,
             )
-            if safety_err:
-                return safety_err
-            rate_err = check_rate_limit(
-                "create_draft", {"subject": subject, "to": to}
-            )
-            if rate_err:
-                return rate_err
-            if to is not None or cc is not None or bcc is not None:
+            gate_err = await _run_send_now_gates(
+                operation="create_draft",
+                ctx=ctx,
+                recipients=all_recipients,
+                rate_params={"subject": subject, "to": to},
+                summary=summary,
+                elicit_extra={
+                    "subject": subject, "to": to, "seed_kind": seed_kind,
+                },
                 # Only validate recipient shape when caller supplied any —
                 # for reply with no overrides, recipients come from Mail.
-                is_valid, error_msg = validate_send_operation(
-                    to or [], cc, bcc
-                )
-                if not is_valid:
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "error_type": "validation_error",
-                    }
-            summary = _build_draft_send_summary(
-                seed_kind, to, cc, bcc, subject, body
+                validate_recipient_shape=(
+                    to is not None or cc is not None or bcc is not None
+                ),
+                validate_args=(to or [], cc, bcc),
             )
-            cancel_err = await _elicit_confirmation(
-                ctx, summary, "create_draft",
-                {"subject": subject, "to": to, "seed_kind": seed_kind},
-            )
-            if cancel_err:
-                return cancel_err
+            if gate_err:
+                return gate_err
 
         # ----------------------------------------------------------------
         # Connector call
@@ -2326,17 +2422,9 @@ async def create_draft(
         )
         draft_id = result.get("draft_id", "")
 
-        # Persist seed metadata for reply/forward drafts so update_draft
-        # can rebuild without an O(N) header lookup.
-        if not send_now and draft_id and seed_kind in ("reply", "forward") and seed_id:
-            _get_draft_state_store().set_seed(
-                draft_id,
-                SeedRecord(
-                    seed_kind=cast(Any, seed_kind),
-                    seed_id=seed_id,
-                    reply_all=reply_all,
-                ),
-            )
+        _persist_create_draft_seed(
+            draft_id, seed_kind, seed_id, reply_all, send_now,
+        )
 
         operation_logger.log_operation(
             "create_draft",

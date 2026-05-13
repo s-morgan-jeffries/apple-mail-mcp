@@ -22,17 +22,16 @@ This mechanism replaced an earlier silent-pass bug (#174): the script ran `radon
 
 The functions below sit above CC 10 intentionally. When touching them, prefer adding one more gate over restructuring. If a change would push any of them above 20, extract a helper first.
 
-> **Allowlisted above-threshold functions:** Five functions currently exceed CC 20. They're pinned in the allowlist at their current ceiling pending dedicated refactor PRs:
+> **Allowlisted above-threshold functions:** Four functions currently exceed CC 20. They're pinned in the allowlist at their current ceiling pending dedicated refactor PRs:
 >
-> - [`server.py::create_draft`](../../src/apple_mail_mcp/server.py) (CC 36) — see follow-up issue.
-> - [`server.py::update_draft`](../../src/apple_mail_mcp/server.py) (CC 34) — see follow-up issue.
-> - [`mail_connector.py::AppleMailConnector.create_draft`](../../src/apple_mail_mcp/mail_connector.py) (CC 25) — see follow-up issue.
-> - [`imap_connector.py::ImapConnector._thread_via_xgm_per_mailbox`](../../src/apple_mail_mcp/imap_connector.py) (CC 21) — see follow-up issue.
-> - [`imap_connector.py::ImapConnector._thread_via_imap_thread`](../../src/apple_mail_mcp/imap_connector.py) (CC 21) — see follow-up issue.
+> - [`server.py::update_draft`](../../src/apple_mail_mcp/server.py) (CC 34) — see #192.
+> - [`mail_connector.py::AppleMailConnector.create_draft`](../../src/apple_mail_mcp/mail_connector.py) (CC 25) — see #193.
+> - [`imap_connector.py::ImapConnector._thread_via_xgm_per_mailbox`](../../src/apple_mail_mcp/imap_connector.py) (CC 21) — see #194.
+> - [`imap_connector.py::ImapConnector._thread_via_imap_thread`](../../src/apple_mail_mcp/imap_connector.py) (CC 21) — see #195.
 
 | File | Function | CC | Why it's complex |
 |---|---|---|---|
-| [`server.py`](../../src/apple_mail_mcp/server.py) | `create_draft` | 36 | Unified compose / reply / reply_all / forward authoring loop with `send_now` opt-in; subsumes the four removed v0.6 send tools. Each `seed_kind` adds branches; `send_now=True` re-enters the safety + rate-limit gate chain previously in `send_email`. **Allowlisted at 36 — refactor candidate.** |
+| [`server.py`](../../src/apple_mail_mcp/server.py) | `create_draft` | 19 | Unified compose / reply / reply_all / forward authoring loop with `send_now` opt-in; subsumes the four removed v0.6 send tools. Dropped from CC 36 → 19 in #191 by extracting `_resolve_create_draft_seed`, `_maybe_apply_template`, `_validate_fresh_seed_fields`, `_run_send_now_gates`, and `_persist_create_draft_seed`. |
 | [`server.py`](../../src/apple_mail_mcp/server.py) | `update_draft` | 34 | Same gate stack as `create_draft` plus the existing-draft lookup and patch-semantic body/recipient updates. **Allowlisted at 34 — refactor candidate.** |
 | [`mail_connector.py`](../../src/apple_mail_mcp/mail_connector.py) | `AppleMailConnector.create_draft` | 25 | Per-`seed_kind` AppleScript dispatch (compose vs reply/reply_all/forward), template rendering branch, recipient list builders for to/cc/bcc, then save-vs-send tail. **Allowlisted at 25 — refactor candidate.** |
 | [`imap_connector.py`](../../src/apple_mail_mcp/imap_connector.py) | `_thread_via_xgm_per_mailbox` | 21 | Tier 1.5 (#125): anchor lookup with INBOX→Sent fallback, THRID FETCH, then per-folder iteration with \\Noselect / select-failure / fetch-failure handling. **Allowlisted at 21 — refactor candidate.** |

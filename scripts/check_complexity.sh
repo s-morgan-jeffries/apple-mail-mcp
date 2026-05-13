@@ -50,7 +50,6 @@ THRESHOLD = $THRESHOLD
 # a one-way ratchet. NEVER raise without updating COMPLEXITY.md and
 # justifying the structural reason in the PR.
 ALLOWLIST = {
-    ('server.py', 'create_draft'): 36,
     ('server.py', 'update_draft'): 34,
     ('mail_connector.py', 'AppleMailConnector.create_draft'): 25,
     ('imap_connector.py', 'ImapConnector._thread_via_xgm_per_mailbox'): 21,
