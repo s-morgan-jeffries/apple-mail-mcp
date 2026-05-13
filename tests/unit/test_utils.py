@@ -9,6 +9,7 @@ from apple_mail_mcp.utils import (
     applescript_account_clause,
     escape_applescript_string,
     format_applescript_list,
+    get_flag_index,
     is_account_uuid,
     is_gmail_system_label,
     normalize_subject,
@@ -405,3 +406,35 @@ class TestIsGmailSystemLabel:
     ) -> None:
         # Path traversal/spoof attempt: only the exact prefix counts.
         assert is_gmail_system_label("Archive/[Gmail]/Drafts") is False
+
+
+class TestGetFlagIndex:
+    """Issue #185: lock in the empirically-verified color → flag index
+    mapping. Originally the codebase had orange↔red and blue↔green swapped
+    relative to what Mail.app actually rendered (verified Gmail/Mail.app
+    2026-05-12). No tests existed on get_flag_index before this fix —
+    that is how the bug went undetected."""
+
+    @pytest.mark.parametrize("color,expected_index", [
+        ("none", -1),
+        ("red", 0),
+        ("orange", 1),
+        ("yellow", 2),
+        ("green", 3),
+        ("blue", 4),
+        ("purple", 5),
+        ("gray", 6),
+    ])
+    def test_returns_correct_index_for_each_color(
+        self, color: str, expected_index: int
+    ) -> None:
+        assert get_flag_index(color) == expected_index
+
+    def test_raises_on_unknown_color(self) -> None:
+        with pytest.raises(ValueError, match="Invalid flag color"):
+            get_flag_index("magenta")
+
+    def test_case_insensitive(self) -> None:
+        assert get_flag_index("RED") == 0
+        assert get_flag_index("Red") == 0
+        assert get_flag_index("oRaNgE") == 1

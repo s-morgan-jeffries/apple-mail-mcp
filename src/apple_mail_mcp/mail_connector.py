@@ -2546,8 +2546,9 @@ class AppleMailConnector:
             message_ids: List of message ids to update.
             read_status: When set, mark as read (True) / unread (False).
             flagged: When set, set flag presence. ``True`` without
-                ``flag_color`` defaults to orange. ``False`` clears the
-                flag.
+                ``flag_color`` defaults to red (Mail.app's default flag
+                color, matching the IMAP fast path's bare ``\\Flagged``
+                rendering). ``False`` clears the flag.
             flag_color: Color name (orange, red, yellow, blue, green,
                 purple, gray, none). Implies ``flagged=True`` unless
                 "none". Validated.
@@ -2658,8 +2659,11 @@ class AppleMailConnector:
             flagged_status = "true" if flag_color != "none" else "false"
             actions.append(f"set flagged status of msg to {flagged_status}")
         elif flagged is True:
-            # No color → default orange (matches existing flag_message default).
-            actions.append(f"set flag index of msg to {get_flag_index('orange')}")
+            # No color → default red. flag index 0 (red) sets bare \\Flagged
+            # on the IMAP server with no $MailFlagBit* keyword — same state
+            # the #152 IMAP fast path produces, ensuring path-independent
+            # rendering in Mail.app.
+            actions.append(f"set flag index of msg to {get_flag_index('red')}")
             actions.append("set flagged status of msg to true")
 
         # Move (always last — IMAP STORE requires source folder).

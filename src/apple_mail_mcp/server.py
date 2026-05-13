@@ -1028,7 +1028,7 @@ def update_message(
         message_ids: List of message IDs to update.
         read_status: True to mark as read, False to mark as unread,
             None to leave unchanged.
-        flagged: True to flag (default orange if no `flag_color` set),
+        flagged: True to flag (default red if no `flag_color` set),
             False to clear the flag, None to leave unchanged.
         flag_color: Color name (orange, red, yellow, blue, green,
             purple, gray, none). Implies `flagged=True` unless "none".

@@ -301,7 +301,7 @@ Patch one or more messages: change read state, flag color, and/or move to anothe
 |-----------|------|----------|---------|-------------|
 | `message_ids` | list[string] | Yes | - | Up to 100 message IDs to update |
 | `read_status` | boolean \| null | No | null | `True` marks read, `False` marks unread, `null` leaves unchanged |
-| `flagged` | boolean \| null | No | null | `True` flags (orange if no `flag_color` given), `False` clears, `null` leaves unchanged |
+| `flagged` | boolean \| null | No | null | `True` flags (red if no `flag_color` given — Mail.app's default flag color), `False` clears, `null` leaves unchanged |
 | `flag_color` | string \| null | No | null | One of `orange`, `red`, `yellow`, `blue`, `green`, `purple`, `gray`, `none`. `"none"` clears the flag. Implies `flagged=True` for non-`none` values. |
 | `destination_mailbox` | string \| null | No | null | Target mailbox name to move to. Requires `account`. |
 | `account` | string \| null | No | null | Account name (required when `destination_mailbox` is set; also unlocks the IMAP narrow-path optimization) |

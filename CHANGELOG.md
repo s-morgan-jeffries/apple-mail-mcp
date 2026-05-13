@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**Flag color labels in `update_message(flag_color=...)` (#185):** The map from color name to AppleScript flag index in [`utils.py:get_flag_index`](src/apple_mail_mcp/utils.py) had two pairs of swapped labels. Empirical testing (Gmail/Mail.app, 2026-05-12) confirmed that callers passing certain colors got a different color in Mail.app's UI than they asked for:
+
+- `flag_color="orange"` previously rendered as **red**; now renders as **orange**.
+- `flag_color="red"` previously rendered as **orange**; now renders as **red**.
+- `flag_color="blue"` previously rendered as **green**; now renders as **blue**.
+- `flag_color="green"` previously rendered as **blue**; now renders as **green**.
+- `yellow`, `purple`, `gray`, `none` were correctly labeled and unchanged.
+
+The AppleScript-path default for `update_message(flagged=True)` (no `flag_color`) was also adjusted from `get_flag_index('orange')` to `get_flag_index('red')` so the no-color rendering remains red (matching #152's IMAP fast path which sets bare `\Flagged`). Net behavior: `update_message(flagged=True)` still produces a red flag, regardless of which path runs.
+
+Callers who were relying on the buggy mapping should update their calls to use the color name they actually want.
+
 ### Performance
 
 **IMAP fast path for flag-only `update_message` (#152):** When `update_message` is called with only `flagged` set (no `flag_color`, `read_status`, or `destination_mailbox`) plus `account` + `source_mailbox`, the flag/unflag mutation now runs server-side via IMAP `UID STORE +/-FLAGS (\Flagged)` — single round-trip after Message-ID resolution. `\Flagged` is base IMAP (RFC 3501), universal across all servers; no capability check, no fallback variants. Verified empirically (Gmail/Mail.app, 2026-05-12) that bare `\Flagged` produces identical visual state to today's AppleScript path's `set flag index = 0` — no UI difference. Color-specifying calls (`flag_color="red"` etc.) still route through AppleScript since Mail.app's color encoding (`$MailFlagBit*` user keywords) is out of IMAP scope. **This closes the IMAP-fast-paths-for-mutations arc** (#149 move, #150 delete, #151 read, #152 flag) — every single-field mutation on `update_message` and `delete_messages` now has an IMAP path on the common path.

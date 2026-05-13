@@ -316,17 +316,21 @@ def get_flag_index(color: str) -> int:
 
     Example:
         >>> get_flag_index("red")
-        1
+        0
         >>> get_flag_index("none")
         -1
     """
+    # Mapping verified empirically against Mail.app's rendering
+    # (Gmail/Mail.app, 2026-05-12 — see #185). The codebase previously
+    # had orange↔red and blue↔green swapped, so callers asking for
+    # "orange" got red, "red" got orange, etc.
     color_map = {
         "none": -1,
-        "orange": 0,
-        "red": 1,
+        "red": 0,
+        "orange": 1,
         "yellow": 2,
-        "blue": 3,
-        "green": 4,
+        "green": 3,
+        "blue": 4,
         "purple": 5,
         "gray": 6,
     }
