@@ -2257,7 +2257,7 @@ async def _run_send_now_gates(
     return None
 
 
-def _persist_create_draft_seed(
+def _persist_draft_seed(
     draft_id: str,
     seed_kind: str,
     seed_id: str | None,
@@ -2265,9 +2265,10 @@ def _persist_create_draft_seed(
     send_now: bool,
 ) -> None:
     """Persist seed metadata for reply/forward drafts so update_draft can
-    rebuild without an O(N) header lookup. No-op for `send_now=True`,
-    failed creates (empty draft_id), or seed kinds without an anchor
-    message. (#191)
+    rebuild without an O(N) header lookup. Called by both create_draft
+    (under the new draft id) and update_draft (under the new draft id
+    after delete-and-recreate). No-op for `send_now=True`, failed creates
+    (empty draft_id), or seed kinds without an anchor message. (#191/#192)
     """
     if send_now or not draft_id or seed_kind not in ("reply", "forward") or not seed_id:
         return
@@ -2278,6 +2279,59 @@ def _persist_create_draft_seed(
             seed_id=seed_id,
             reply_all=reply_all,
         ),
+    )
+
+
+def _resolve_update_subject_body(
+    subject: str | None,
+    body: str | None,
+    template_name: str | None,
+    template_vars: dict[str, str] | None,
+    seed_id: str | None,
+    state: dict[str, Any],
+) -> tuple[str | None, str]:
+    """Three-tier resolution for update_draft's subject + body:
+    caller-supplied > template-rendered > existing draft state.
+
+    Differs from create_draft's `_maybe_apply_template`: update treats
+    `body=""` as a deliberate clear (preserved through the chain), while
+    create treats `not body` as "fall through to template". Raises
+    MailTemplateError on bad templates — caller wraps in try/except +
+    `_template_error_response`. (#192)
+    """
+    merged_subject = subject
+    merged_body = body
+    if template_name:
+        template = _get_template_store().get(template_name)
+        auto_vars = mail.auto_template_vars(seed_id)
+        merged_vars: dict[str, str] = {**auto_vars, **(template_vars or {})}
+        rendered = template.render(merged_vars)
+        if merged_subject is None:
+            merged_subject = rendered["subject"]
+        if merged_body is None:
+            merged_body = rendered["body"] or ""
+    final_subject = (
+        merged_subject if merged_subject is not None else state.get("subject")
+    )
+    final_body = (
+        merged_body if merged_body is not None else state.get("body", "")
+    )
+    return final_subject, final_body
+
+
+def _merge_draft_recipients(
+    to: list[str] | None,
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    state: dict[str, Any],
+) -> tuple[list[str], list[str], list[str]]:
+    """Merge caller-supplied recipient lists with existing draft state.
+    None = keep existing state value; [] = clear; list = replace. (#192)
+    """
+    return (
+        to if to is not None else state.get("to", []),
+        cc if cc is not None else state.get("cc", []),
+        bcc if bcc is not None else state.get("bcc", []),
     )
 
 
@@ -2422,7 +2476,7 @@ async def create_draft(
         )
         draft_id = result.get("draft_id", "")
 
-        _persist_create_draft_seed(
+        _persist_draft_seed(
             draft_id, seed_kind, seed_id, reply_all, send_now,
         )
 
@@ -2512,9 +2566,6 @@ async def update_draft(
                 "error_type": "validation_error",
             }
 
-        # ----------------------------------------------------------------
-        # Read existing state and resolve seed
-        # ----------------------------------------------------------------
         try:
             state = mail.get_draft_state(draft_id)
         except MailDraftError as e:
@@ -2525,83 +2576,45 @@ async def update_draft(
             draft_id, state, store
         )
 
-        # ----------------------------------------------------------------
-        # Template resolution (overrides nothing the user explicitly set)
-        # ----------------------------------------------------------------
-        merged_subject = subject
-        merged_body = body
-        if template_name:
-            try:
-                template = _get_template_store().get(template_name)
-                auto_vars = mail.auto_template_vars(seed_id)
-                merged_vars: dict[str, str] = {
-                    **auto_vars, **(template_vars or {})
-                }
-                rendered = template.render(merged_vars)
-                if merged_subject is None:
-                    merged_subject = rendered["subject"]
-                if merged_body is None:
-                    merged_body = rendered["body"] or ""
-            except MailTemplateError as e:
-                return _template_error_response(e)
+        try:
+            final_subject, final_body = _resolve_update_subject_body(
+                subject, body, template_name, template_vars, seed_id, state,
+            )
+        except MailTemplateError as e:
+            return _template_error_response(e)
 
-        # ----------------------------------------------------------------
-        # Field merge: caller's non-None > existing state
-        # ----------------------------------------------------------------
-        final_to = to if to is not None else state.get("to", [])
-        final_cc = cc if cc is not None else state.get("cc", [])
-        final_bcc = bcc if bcc is not None else state.get("bcc", [])
-        final_subject = (
-            merged_subject if merged_subject is not None else state.get("subject")
-        )
-        final_body = (
-            merged_body if merged_body is not None else state.get("body", "")
+        final_to, final_cc, final_bcc = _merge_draft_recipients(
+            to, cc, bcc, state,
         )
 
-        # ----------------------------------------------------------------
-        # Attachment handling: preserve via extraction when None, replace
-        # otherwise. tempdir (if any) is cleaned up in the finally block.
-        # ----------------------------------------------------------------
+        # tempdir (if any) is cleaned up in the finally block.
         final_attachments, tempdir = _resolve_draft_attachments(
             draft_id, attachment_paths, state.get("attachment_names", []) or []
         )
 
-        # ----------------------------------------------------------------
-        # Send-only checks
-        # ----------------------------------------------------------------
         if send_now:
             all_recipients = (
                 (final_to or []) + (final_cc or []) + (final_bcc or [])
             )
-            # #175: always call the gate when send_now=True — same reasoning
-            # as create_draft. Empty-recipients reject in test mode lives
-            # inside check_test_mode_safety.
-            safety_err = check_test_mode_safety(
-                "update_draft", recipients=all_recipients
-            )
-            if safety_err:
-                return safety_err
-            rate_err = check_rate_limit(
-                "update_draft",
-                {"draft_id": draft_id, "subject": final_subject},
-            )
-            if rate_err:
-                return rate_err
             summary = _build_draft_send_summary(
                 seed_kind, final_to, final_cc, final_bcc, final_subject,
                 final_body or "",
             )
-            cancel_err = await _elicit_confirmation(
-                ctx, summary, "update_draft",
-                {"draft_id": draft_id, "send_now": True},
+            # validate_recipient_shape stays False — recipients came from
+            # existing draft state, not fresh caller input. (#175 + #192)
+            gate_err = await _run_send_now_gates(
+                operation="update_draft",
+                ctx=ctx,
+                recipients=all_recipients,
+                rate_params={"draft_id": draft_id, "subject": final_subject},
+                summary=summary,
+                elicit_extra={"draft_id": draft_id, "send_now": True},
             )
-            if cancel_err:
-                return cancel_err
+            if gate_err:
+                return gate_err
 
-        # ----------------------------------------------------------------
         # Delete + recreate. Clear stale state first so a connector failure
         # doesn't leave orphan entries.
-        # ----------------------------------------------------------------
         try:
             mail.delete_draft(draft_id)
         except MailDraftNotFoundError:
@@ -2625,21 +2638,9 @@ async def update_draft(
         )
         new_draft_id = result.get("draft_id", "")
 
-        # Re-persist seed state for reply/forward drafts under the NEW id.
-        if (
-            not send_now
-            and new_draft_id
-            and seed_kind in ("reply", "forward")
-            and seed_id
-        ):
-            store.set_seed(
-                new_draft_id,
-                SeedRecord(
-                    seed_kind=cast(Any, seed_kind),
-                    seed_id=seed_id,
-                    reply_all=reply_all,
-                ),
-            )
+        _persist_draft_seed(
+            new_draft_id, seed_kind, seed_id, reply_all, send_now,
+        )
 
         operation_logger.log_operation(
             "update_draft",
