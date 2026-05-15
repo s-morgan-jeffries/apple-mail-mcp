@@ -86,11 +86,12 @@ class TestAccountValidation:
         mock_connector: MagicMock,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        # Strip out email_addresses for one account to simulate a misconfigured
-        # Mail.app entry.
-        accs = _make_accounts()
-        accs[0]["email_addresses"] = []
-        mock_connector.list_accounts.return_value = accs
+        # Simulate a Mail.app account with neither user_name nor
+        # email_addresses populated — _resolve_imap_config returns "" for
+        # the email field after the #201 fallback chain exhausts.
+        mock_connector._resolve_imap_config.return_value = (
+            "imap.mail.me.com", 993, "",
+        )
 
         rc = run_setup_imap(
             account_name="iCloud",
@@ -100,7 +101,7 @@ class TestAccountValidation:
         )
         assert rc == 1
         captured = capsys.readouterr()
-        assert "no email addresses" in captured.err
+        assert "no IMAP login username" in captured.err
         assert "--email" in captured.err
 
     def test_cli_email_override_used_when_provided(
@@ -167,9 +168,9 @@ class TestSetupHappyPath:
             imap_factory=imap_factory,
         )
         assert rc == 0
+        # No --email override → Keychain key + IMAP LOGIN both use the
+        # email returned by _resolve_imap_config (post-#201 = user_name).
         assert set_calls == [("iCloud", "alice@icloud.com", "appspecificpw")]
-        # Verification used the resolved (Mail.app's) email, not necessarily
-        # the same as the Keychain key — important for iCloud.
         assert captured_imap_args == [
             ("imap.mail.me.com", 993, "alice@icloud.com", "appspecificpw"),
         ]
@@ -178,24 +179,30 @@ class TestSetupHappyPath:
         assert "Setup complete." in out
         assert "OK (connected to imap.mail.me.com:993)" in out
 
-    def test_setup_uses_resolved_email_for_imap_login(
+    def test_cli_email_override_wins_for_keychain_and_login(
         self,
         mock_connector: MagicMock,
         mock_imap_client: MagicMock,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """For iCloud, --email may be the Apple ID alias but IMAP needs
-        @icloud.com. The CLI must use _resolve_imap_config's email for LOGIN."""
+        """When --email is supplied, it overrides _resolve_imap_config's
+        result for BOTH the keychain key AND the IMAP LOGIN. Pre-#201 the
+        login silently switched back to the resolver's value, which is
+        what caused the custom-domain Apple ID failures: the user passed
+        the right Apple ID but the resolver swapped in an SMTP-only From
+        alias the IMAP server rejected. (#201)
+        """
         from apple_mail_mcp import cli as cli_mod
 
+        set_calls: list[tuple[str, str, str]] = []
         monkeypatch.setattr(
-            cli_mod, "set_imap_password", lambda a, e, p: None,
+            cli_mod, "set_imap_password",
+            lambda a, e, p: set_calls.append((a, e, p)),
         )
 
-        # User supplied an Apple-ID-style email; Mail.app resolves the IMAP
-        # username to the actual @icloud.com address.
+        # Resolver returns one value; user explicitly passes another.
         mock_connector._resolve_imap_config.return_value = (
-            "imap.mail.me.com", 993, "alice@icloud.com",
+            "imap.mail.me.com", 993, "from-alias@example.com",
         )
 
         captured: list[tuple[str, int, str, str]] = []
@@ -206,16 +213,20 @@ class TestSetupHappyPath:
 
         rc = run_setup_imap(
             account_name="iCloud",
-            cli_email="alice@gmail.com",  # user's Apple ID is a Gmail
+            cli_email="apple-id@example.com",
             uninstall=False,
             connector_factory=lambda: mock_connector,
             getpass_fn=lambda prompt: "pw",
             imap_factory=factory,
         )
         assert rc == 0
-        # IMAP LOGIN uses the Mail.app-resolved email, not the CLI override.
+        # Keychain key uses the CLI override.
+        assert set_calls == [
+            ("iCloud", "apple-id@example.com", "pw"),
+        ]
+        # IMAP LOGIN uses the same CLI override — not the resolver's value.
         assert captured == [
-            ("imap.mail.me.com", 993, "alice@icloud.com", "pw"),
+            ("imap.mail.me.com", 993, "apple-id@example.com", "pw"),
         ]
 
 

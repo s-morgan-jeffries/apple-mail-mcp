@@ -862,33 +862,34 @@ class TestAppleMailConnector:
     # --- _resolve_imap_config --------------------------------------------
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_resolve_imap_config_prefers_first_email_address(
+    def test_resolve_imap_config_prefers_user_name_for_login(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Primary path: first email_addresses entry wins over user_name.
-
-        iCloud's IMAP server rejects the Apple-ID user_name as LOGIN
-        but accepts the aliases in email_addresses.
+        """Primary path: user_name (Mail.app's IMAP LOGIN credential) wins
+        over email_addresses[0] (the SMTP From list). They overlap for
+        most accounts but diverge for iCloud accounts on a custom-domain
+        Apple ID — there email_addresses[0] is an SMTP-only From alias
+        the IMAP server rejects with AUTHENTICATIONFAILED. (#201)
         """
         mock_run.return_value = (
             '{"host":"imap.mail.me.com",'
             '"port":993,'
-            '"user_name":"apple.id@gmail.com",'
-            '"email_addresses":["user@icloud.com","user@me.com"]}'
+            '"user_name":"apple-id@example.com",'
+            '"email_addresses":["from-alias@example.com","apple-id@example.com"]}'
         )
         result = connector._resolve_imap_config("iCloud")
-        assert result == ("imap.mail.me.com", 993, "user@icloud.com")
+        assert result == ("imap.mail.me.com", 993, "apple-id@example.com")
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_resolve_imap_config_falls_back_to_user_name_when_emails_empty(
+    def test_resolve_imap_config_falls_back_to_email_addresses_when_user_name_empty(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Fallback path: empty email_addresses → use user_name."""
+        """Fallback path: empty user_name → use email_addresses[0]. (#201)"""
         mock_run.return_value = (
             '{"host":"imap.gmail.com",'
             '"port":993,'
-            '"user_name":"me@gmail.com",'
-            '"email_addresses":[]}'
+            '"user_name":"",'
+            '"email_addresses":["me@gmail.com"]}'
         )
         result = connector._resolve_imap_config("Gmail")
         assert result == ("imap.gmail.com", 993, "me@gmail.com")

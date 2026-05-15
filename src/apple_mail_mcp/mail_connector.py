@@ -968,17 +968,21 @@ class AppleMailConnector:
             account: Mail.app account name (e.g. "iCloud", "Gmail").
 
         Returns:
-            Tuple of (host, port, email). `email` is the first entry of
-            Mail.app's `email addresses` list if non-empty, else falls back
-            to the `user name` property.
+            Tuple of (host, port, email). `email` is Mail.app's `user name`
+            property if non-empty, else falls back to the first entry of
+            `email addresses`.
 
-            For iCloud specifically, `user name` is the Apple ID login
-            identifier — which may be any email (e.g. a Gmail address) —
-            while the IMAP server only accepts @icloud.com / @me.com aliases
-            as LOGIN username. `email addresses` reliably contains the
-            alias iCloud's IMAP server expects. For Gmail / Yahoo / generic
-            IMAP accounts, the first email address typically equals
-            `user name`, so the behavior is equivalent there.
+            `user name` is the credential Mail.app itself sends as the IMAP
+            LOGIN — it's the source of truth. `email addresses` is the SMTP
+            From list, which usually overlaps with `user name` for Gmail /
+            Yahoo / @icloud.com-primary accounts but diverges for iCloud
+            accounts whose Apple ID is on a custom domain (Apple's "Custom
+            Email Domain" setup): there `email_addresses[0]` is an SMTP-
+            only From alias that the IMAP server rejects with
+            AUTHENTICATIONFAILED, while `user name` (the Apple ID itself)
+            is what the server actually accepts. Preferring `user name`
+            matches Mail.app's own behavior in every configuration we've
+            seen. (#201)
 
         Raises:
             MailAccountNotFoundError: If the account doesn't exist.
@@ -996,7 +1000,8 @@ class AppleMailConnector:
         raw = self._run_applescript(script)
         parsed = cast(dict[str, Any], parse_applescript_json(raw))
         email_addresses = cast(list[str], parsed.get("email_addresses") or [])
-        email = email_addresses[0] if email_addresses else cast(str, parsed["user_name"])
+        user_name = cast(str, parsed.get("user_name") or "")
+        email = user_name or (email_addresses[0] if email_addresses else "")
         return (
             cast(str, parsed["host"]),
             cast(int, parsed["port"]),

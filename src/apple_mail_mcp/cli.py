@@ -36,26 +36,10 @@ def _print_available_accounts(accounts: list[dict[str, object]]) -> None:
         print(f"  - {name}", file=sys.stderr)
 
 
-def _resolve_account(
+def _account_exists(
     accounts: list[dict[str, object]], requested_name: str
-) -> dict[str, object] | None:
-    for acc in accounts:
-        if acc.get("name") == requested_name:
-            return acc
-    return None
-
-
-def _resolve_email(
-    account: dict[str, object], cli_email: str | None
-) -> str | None:
-    if cli_email:
-        return cli_email
-    emails = account.get("email_addresses") or []
-    if isinstance(emails, list) and emails:
-        first = emails[0]
-        if isinstance(first, str) and first:
-            return first
-    return None
+) -> bool:
+    return any(acc.get("name") == requested_name for acc in accounts)
 
 
 def run_setup_imap(
@@ -77,9 +61,8 @@ def run_setup_imap(
     """
     mail = (connector_factory or AppleMailConnector)()
     accounts = mail.list_accounts()
-    matched = _resolve_account(accounts, account_name)
 
-    if matched is None:
+    if not _account_exists(accounts, account_name):
         print(
             f"ERROR: No Mail.app account named {account_name!r}. "
             "Available accounts:",
@@ -88,11 +71,29 @@ def run_setup_imap(
         _print_available_accounts(accounts)
         return 1
 
-    email = _resolve_email(matched, cli_email)
+    # Resolve IMAP config upfront. The connector calls _resolve_imap_config
+    # at every runtime IMAP request to pick the keychain key — so we use
+    # the same email here as the keychain key, otherwise setup writes one
+    # entry and runtime looks for another. (#201)
+    try:
+        host, port, resolved_email = mail._resolve_imap_config(account_name)
+    except MailAccountNotFoundError:
+        print(
+            f"ERROR: Mail.app stopped recognizing {account_name!r} "
+            "between the account list and the IMAP config lookup.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # `--email` is the escape hatch for the rare case where Mail.app's
+    # `user name` is empty or wrong; default to the resolved value so
+    # setup, uninstall, and runtime all share one keychain key.
+    email = cli_email or resolved_email
     if not email:
         print(
-            f"ERROR: Account {account_name!r} has no email addresses in "
-            "Mail.app. Pass --email <email> to set one explicitly.",
+            f"ERROR: Account {account_name!r} has no IMAP login username "
+            "in Mail.app (neither `user name` nor `email addresses`). "
+            "Pass --email <email> to set one explicitly.",
             file=sys.stderr,
         )
         return 1
@@ -136,24 +137,8 @@ def run_setup_imap(
         f"Stored in Keychain as 'apple-mail-mcp.imap.{account_name}'."
     )
 
-    # Verification: derive host/port from Mail.app and try a real LOGIN.
-    try:
-        host, port, resolved_email = mail._resolve_imap_config(account_name)
-    except MailAccountNotFoundError:
-        # Shouldn't happen — we just listed it — but surface clearly.
-        print(
-            f"ERROR: Mail.app stopped recognizing {account_name!r} "
-            "between the account list and the IMAP config lookup.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Use the email Mail.app actually expects for IMAP LOGIN, which may
-    # differ from `--email` for iCloud (Apple ID alias vs. @icloud.com).
-    verify_email = resolved_email or email
-
     print(f"Testing IMAP connection to {host}:{port}...")
-    imap = (imap_factory or ImapConnector)(host, port, verify_email, password)
+    imap = (imap_factory or ImapConnector)(host, port, email, password)
     try:
         # Use a cheap read-only call; search_messages with limit=1 is enough
         # to exercise login + folder select without paging much data.
