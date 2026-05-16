@@ -1672,6 +1672,34 @@ class TestImapDeleteMessages:
         client.move.assert_not_called()
 
     @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_delete_resolves_trash_before_selecting_source(
+        self, mock_cls: MagicMock
+    ) -> None:
+        """All LIST traffic must run before SELECT. Some servers
+        (Exchange Online, older Dovecot) implicitly CLOSE the selected
+        mailbox when LIST runs while SELECTED, which would make the
+        subsequent SEARCH fail with "No mailbox selected" and silently
+        kick the operation onto the slower AppleScript fallback. (#199)
+        """
+        client = MagicMock()
+        mock_cls.return_value = client
+        client.capabilities.return_value = {b"MOVE"}
+        client.list_folders.return_value = self._trash_listing()
+        client.search.return_value = [1]
+
+        ImapConnector("h", 993, "u@e.com", "pw").delete_messages(
+            ["a@x"], source_mailbox="INBOX",
+        )
+
+        call_names = [c[0] for c in client.method_calls]
+        list_idx = call_names.index("list_folders")
+        select_idx = call_names.index("select_folder")
+        assert list_idx < select_idx, (
+            f"list_folders (call #{list_idx}) must run before "
+            f"select_folder (call #{select_idx}) — see #199"
+        )
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
     def test_delete_strips_and_re_adds_brackets_for_search(
         self, mock_cls: MagicMock
     ) -> None:

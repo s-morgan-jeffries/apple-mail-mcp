@@ -1053,8 +1053,12 @@ class ImapConnector:
         ]
 
         with self._session() as client:
-            client.select_folder(source_mailbox, readonly=False)
-
+            # #199 / #198: do all LIST traffic in AUTHENTICATED state.
+            # Some servers (Exchange Online, older Dovecot) issue an
+            # implicit CLOSE when LIST runs while a mailbox is SELECTED,
+            # causing the subsequent SEARCH to fail with "No mailbox
+            # selected". Resolve capabilities + Trash before SELECT so
+            # all SELECT-state work happens in one uninterrupted window.
             has_move = self._has_capability(client, b"MOVE")
             has_uidplus = self._has_capability(client, b"UIDPLUS")
             if not has_move and not has_uidplus:
@@ -1074,6 +1078,8 @@ class ImapConnector:
                     f"{list(self._CONVENTIONAL_TRASH_NAMES)} were "
                     f"present in the folder listing"
                 )
+
+            client.select_folder(source_mailbox, readonly=False)
 
             uids: list[int] = []
             for bracketed in bracketed_ids:
