@@ -1272,6 +1272,36 @@ class ImapConnector:
                 return candidate
         return None
 
+    @staticmethod
+    def _merge_envelope_fetch_into(
+        fetched: dict[int, dict[bytes, Any]],
+        collected: dict[str, dict[str, Any]],
+    ) -> None:
+        """Merge a ``client.fetch([ENVELOPE, FLAGS])`` response into the
+        cross-mailbox ``collected`` dict keyed by stripped
+        rfc_message_id. Skips entries with no envelope or no
+        message_id; first occurrence per id wins (dedup across
+        mailboxes).
+
+        Shared between Tier 1.5 (``_thread_via_xgm_per_mailbox``) and
+        Tier 2 (``_thread_via_imap_thread``) — both run the identical
+        per-mailbox loop after FETCH. (#194 / #195)
+        """
+        for fetch_entry in fetched.values():
+            envelope = fetch_entry.get(b"ENVELOPE")
+            if envelope is None:
+                continue
+            raw_msgid = getattr(envelope, "message_id", None)
+            if not raw_msgid:
+                continue
+            clean_msgid = _strip_brackets(_decode(raw_msgid))
+            if clean_msgid in collected:
+                continue
+            fetch_flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
+            collected[clean_msgid] = _envelope_to_dict(
+                envelope, fetch_flags
+            )
+
     def _thread_via_xgm_thrid(
         self,
         client: IMAPClient,
@@ -1417,20 +1447,7 @@ class ImapConnector:
                 fetched = client.fetch(uids, [b"ENVELOPE", b"FLAGS"])
             except IMAPClientError:
                 continue
-            for fetch_entry in fetched.values():
-                envelope = fetch_entry.get(b"ENVELOPE")
-                if envelope is None:
-                    continue
-                raw_msgid = getattr(envelope, "message_id", None)
-                if not raw_msgid:
-                    continue
-                clean_msgid = _strip_brackets(_decode(raw_msgid))
-                if clean_msgid in collected:
-                    continue
-                fetch_flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
-                collected[clean_msgid] = _envelope_to_dict(
-                    envelope, fetch_flags
-                )
+            self._merge_envelope_fetch_into(fetched, collected)
 
         return sorted(
             collected.values(),
@@ -1550,20 +1567,7 @@ class ImapConnector:
                 )
             except IMAPClientError:
                 continue
-            for fetch_entry in fetched.values():
-                envelope = fetch_entry.get(b"ENVELOPE")
-                if envelope is None:
-                    continue
-                raw_msgid = getattr(envelope, "message_id", None)
-                if not raw_msgid:
-                    continue
-                clean_msgid = _strip_brackets(_decode(raw_msgid))
-                if clean_msgid in collected:
-                    continue
-                fetch_flags = tuple(fetch_entry.get(b"FLAGS", ()) or ())
-                collected[clean_msgid] = _envelope_to_dict(
-                    envelope, fetch_flags
-                )
+            self._merge_envelope_fetch_into(fetched, collected)
 
         if not collected:
             # No mailbox in the account had any matching message — Tier 2

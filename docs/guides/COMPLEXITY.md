@@ -22,19 +22,17 @@ This mechanism replaced an earlier silent-pass bug (#174): the script ran `radon
 
 The functions below sit above CC 10 intentionally. When touching them, prefer adding one more gate over restructuring. If a change would push any of them above 20, extract a helper first.
 
-> **Allowlisted above-threshold functions:** Three functions currently exceed CC 20. They're pinned in the allowlist at their current ceiling pending dedicated refactor PRs:
+> **Allowlisted above-threshold functions:** One function currently exceeds CC 20. It's pinned in the allowlist at its current ceiling pending a dedicated refactor PR:
 >
 > - [`mail_connector.py::AppleMailConnector.create_draft`](../../src/apple_mail_mcp/mail_connector.py) (CC 25) — see #193.
-> - [`imap_connector.py::ImapConnector._thread_via_xgm_per_mailbox`](../../src/apple_mail_mcp/imap_connector.py) (CC 21) — see #194.
-> - [`imap_connector.py::ImapConnector._thread_via_imap_thread`](../../src/apple_mail_mcp/imap_connector.py) (CC 21) — see #195.
 
 | File | Function | CC | Why it's complex |
 |---|---|---|---|
 | [`server.py`](../../src/apple_mail_mcp/server.py) | `create_draft` | 19 | Unified compose / reply / reply_all / forward authoring loop with `send_now` opt-in; subsumes the four removed v0.6 send tools. Dropped from CC 36 → 19 in #191 by extracting `_resolve_create_draft_seed`, `_maybe_apply_template`, `_validate_fresh_seed_fields`, `_run_send_now_gates`, and `_persist_create_draft_seed`. |
 | [`server.py`](../../src/apple_mail_mcp/server.py) | `update_draft` | 18 | Same gate stack as `create_draft` plus the existing-draft lookup, three-tier subject/body resolution (caller > template > state), and delete-and-recreate semantics. Dropped from CC 34 → 18 in #192 by reusing `_run_send_now_gates` and `_persist_draft_seed` (both extracted in #191) plus adding `_resolve_update_subject_body` and `_merge_draft_recipients`. |
 | [`mail_connector.py`](../../src/apple_mail_mcp/mail_connector.py) | `AppleMailConnector.create_draft` | 25 | Per-`seed_kind` AppleScript dispatch (compose vs reply/reply_all/forward), template rendering branch, recipient list builders for to/cc/bcc, then save-vs-send tail. **Allowlisted at 25 — refactor candidate.** |
-| [`imap_connector.py`](../../src/apple_mail_mcp/imap_connector.py) | `_thread_via_xgm_per_mailbox` | 21 | Tier 1.5 (#125): anchor lookup with INBOX→Sent fallback, THRID FETCH, then per-folder iteration with \\Noselect / select-failure / fetch-failure handling. **Allowlisted at 21 — refactor candidate.** |
-| [`imap_connector.py`](../../src/apple_mail_mcp/imap_connector.py) | `_thread_via_imap_thread` | 21 | Tier 2 (#123): per-mailbox SELECT + narrow-search + THREAD + cluster-walk + FETCH, with rejection branches at each step. **Allowlisted at 21 — refactor candidate.** |
+| [`imap_connector.py`](../../src/apple_mail_mcp/imap_connector.py) | `_thread_via_xgm_per_mailbox` | 16 | Tier 1.5 (#125): anchor lookup with INBOX→Sent fallback, THRID FETCH, then per-folder iteration with \\Noselect / select-failure / fetch-failure handling. Dropped from 21 → 16 in #194/#195 by extracting the shared `_merge_envelope_fetch_into` helper that Tier 1.5 and Tier 2 both used inline. |
+| [`imap_connector.py`](../../src/apple_mail_mcp/imap_connector.py) | `_thread_via_imap_thread` | 16 | Tier 2 (#123): per-mailbox SELECT + narrow-search + THREAD + cluster-walk + FETCH, with rejection branches at each step. Dropped from 21 → 16 in #194/#195 by extracting the shared `_merge_envelope_fetch_into` helper. |
 | [`mail_connector.py`](../../src/apple_mail_mcp/mail_connector.py) | `AppleMailConnector.update_message` | 17 | Patch semantics: each optional field (`read_status`, `flag_color`, `destination_mailbox`, `flagged`, `source_mailbox`) adds a branch; mutation-order rules add a few more. Dropped from 21 → 17 in #174 by extracting `_try_imap_fast_paths` and `_build_flag_actions`. |
 | [`mail_connector.py`](../../src/apple_mail_mcp/mail_connector.py) | `AppleMailConnector._search_messages_applescript` | 18 | Each optional filter (`sender_contains`, `subject_contains`, `body_contains`, `text_contains`, date range, `read_status`, `is_flagged`, `has_attachment`) generates an AppleScript IF clause. |
 | [`mail_connector.py`](../../src/apple_mail_mcp/mail_connector.py) | `AppleMailConnector.update_mailbox` | 18 | Two delivery paths (rename via AppleScript, move via IMAP) plus the Gmail-system-label refusal pre-flight (#164). |
@@ -55,7 +53,7 @@ The functions below sit above CC 10 intentionally. When touching them, prefer ad
 | [`mail_connector.py`](../../src/apple_mail_mcp/mail_connector.py) | `_collect_thread_applescript` | 11 | AppleScript-side BFS fallback when IMAP thread tiers don't apply. |
 | [`imap_connector.py`](../../src/apple_mail_mcp/imap_connector.py) | `ImapConnector.get_message` | 11 | `headers_only` vs full-body fetch, search-by-bracketed-msgid path, error mapping. |
 
-Accepted because: each is a sequence of orthogonal gates or optional-parameter branches, not tangled logic. They read top-to-bottom and each branch has a clear exit. The five Allowlisted entries are documented exceptions pending refactor — see follow-up issues.
+Accepted because: each is a sequence of orthogonal gates or optional-parameter branches, not tangled logic. They read top-to-bottom and each branch has a clear exit. The one remaining allowlisted entry is a documented exception pending refactor — see #193.
 
 ## Adding a new documented exception
 

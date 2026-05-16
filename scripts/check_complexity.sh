@@ -51,8 +51,6 @@ THRESHOLD = $THRESHOLD
 # justifying the structural reason in the PR.
 ALLOWLIST = {
     ('mail_connector.py', 'AppleMailConnector.create_draft'): 25,
-    ('imap_connector.py', 'ImapConnector._thread_via_xgm_per_mailbox'): 21,
-    ('imap_connector.py', 'ImapConnector._thread_via_imap_thread'): 21,
 }
 
 data = json.load(sys.stdin)
