@@ -3441,6 +3441,96 @@ class AppleMailConnector:
             )
         return resolved
 
+    @staticmethod
+    def _validate_create_draft_args(
+        seed: str,
+        seed_id: str | None,
+        to: list[str] | None,
+        subject: str | None,
+    ) -> None:
+        """Validate the per-seed argument requirements of create_draft.
+        Raises ValueError with a specific message on the first violation.
+        (#193)
+        """
+        if seed not in ("new", "reply", "forward"):
+            raise ValueError(
+                f"seed must be 'new', 'reply', or 'forward'; got {seed!r}"
+            )
+        if seed in ("reply", "forward"):
+            if not seed_id:
+                raise ValueError(f"seed_id is required for seed={seed!r}")
+        else:  # seed == "new"
+            if not to:
+                raise ValueError("'to' is required when seed='new'")
+            if not subject:
+                raise ValueError("'subject' is required when seed='new'")
+
+    @staticmethod
+    def _build_attachment_block(
+        attachment_paths: list[Path] | None,
+    ) -> str:
+        """AppleScript fragment that attaches files to ``theMessage``.
+        Returns ``""`` when ``attachment_paths`` is None or empty.
+        Raises ``FileNotFoundError`` on the first non-existent path. (#193)
+        """
+        if not attachment_paths:
+            return ""
+        for p in attachment_paths:
+            if not Path(p).is_file():
+                raise FileNotFoundError(f"attachment not found: {p}")
+        paths_safe = ", ".join(
+            f'"{escape_applescript_string(str(Path(p).resolve()))}"'
+            for p in attachment_paths
+        )
+        return f"""
+            repeat with apath in {{{paths_safe}}}
+                tell theMessage to make new attachment with properties {{file name:(POSIX file apath)}} at after last paragraph
+            end repeat
+        """
+
+    @staticmethod
+    def _build_creation_block(
+        seed: str,
+        seed_id_safe: str | None,
+        reply_all: bool,
+        subject_safe: str | None,
+        body_safe: str,
+    ) -> str:
+        """Per-seed AppleScript fragment that produces ``theMessage``.
+
+        The reply/forward branches share the cross-account ``whose id
+        is "{seed_id_safe}"`` lookup pattern, differing only in the
+        Mail.app verb (``reply`` / ``reply to all`` / ``forward``).
+        ``seed_id_safe`` is expected to be Mail's internal id —
+        callers route RFC 5322 ids through
+        ``_maybe_resolve_rfc_seed_id`` first (#205). (#193)
+        """
+        if seed == "new":
+            return (
+                f'set theMessage to make new outgoing message with properties '
+                f'{{subject:"{subject_safe}", content:"{body_safe}", visible:false}}'
+            )
+        if seed == "reply":
+            verb = "reply to all" if reply_all else "reply"
+        else:  # forward
+            verb = "forward"
+        return f"""
+            set origMsg to missing value
+            repeat with acc in accounts
+                try
+                    repeat with mb in mailboxes of acc
+                        try
+                            set origMsg to first message of mb whose id is "{seed_id_safe}"
+                            exit repeat
+                        end try
+                    end repeat
+                end try
+                if origMsg is not missing value then exit repeat
+            end repeat
+            if origMsg is missing value then error "SEED_NOT_FOUND"
+            set theMessage to {verb} origMsg opening window false
+        """
+
     def create_draft(
         self,
         *,
@@ -3493,16 +3583,7 @@ class AppleMailConnector:
             MailMessageNotFoundError: ``seed_id`` not found in any mailbox.
             MailAppleScriptError: AppleScript failure.
         """
-        if seed not in ("new", "reply", "forward"):
-            raise ValueError(f"seed must be 'new', 'reply', or 'forward'; got {seed!r}")
-        if seed in ("reply", "forward"):
-            if not seed_id:
-                raise ValueError(f"seed_id is required for seed={seed!r}")
-        else:  # seed == "new"
-            if not to:
-                raise ValueError("'to' is required when seed='new'")
-            if not subject:
-                raise ValueError("'subject' is required when seed='new'")
+        self._validate_create_draft_args(seed, seed_id, to, subject)
 
         # If the caller handed us an RFC 5322 Message-ID (the form read
         # tools emit on the IMAP path per #148), resolve to Mail's
@@ -3553,22 +3634,7 @@ class AppleMailConnector:
         cc_block = _recipient_block("cc", cc)
         bcc_block = _recipient_block("bcc", bcc)
 
-        # Attachment block.
-        attachment_block = ""
-        if attachment_paths:
-            for p in attachment_paths:
-                pp = Path(p)
-                if not pp.is_file():
-                    raise FileNotFoundError(f"attachment not found: {pp}")
-            paths_safe = ", ".join(
-                f'"{escape_applescript_string(str(Path(p).resolve()))}"'
-                for p in attachment_paths
-            )
-            attachment_block = f"""
-                repeat with apath in {{{paths_safe}}}
-                    tell theMessage to make new attachment with properties {{file name:(POSIX file apath)}} at after last paragraph
-                end repeat
-            """
+        attachment_block = self._build_attachment_block(attachment_paths)
 
         # Subject override (reply/forward only — for new, subject is set
         # via `make new outgoing message ... properties`).
@@ -3593,49 +3659,9 @@ class AppleMailConnector:
         else:
             body_block = ""
 
-        # Seed-specific creation block.
-        if seed == "new":
-            creation_block = (
-                f'set theMessage to make new outgoing message with properties '
-                f'{{subject:"{subject_safe}", content:"{body_safe}", visible:false}}'
-            )
-        elif seed == "reply":
-            verb = "reply to all" if reply_all else "reply"
-            # Look up seed across all accounts/mailboxes; reuse the existing
-            # message-id lookup pattern.
-            creation_block = f"""
-                set origMsg to missing value
-                repeat with acc in accounts
-                    try
-                        repeat with mb in mailboxes of acc
-                            try
-                                set origMsg to first message of mb whose id is "{seed_id_safe}"
-                                exit repeat
-                            end try
-                        end repeat
-                    end try
-                    if origMsg is not missing value then exit repeat
-                end repeat
-                if origMsg is missing value then error "SEED_NOT_FOUND"
-                set theMessage to {verb} origMsg opening window false
-            """
-        else:  # forward
-            creation_block = f"""
-                set origMsg to missing value
-                repeat with acc in accounts
-                    try
-                        repeat with mb in mailboxes of acc
-                            try
-                                set origMsg to first message of mb whose id is "{seed_id_safe}"
-                                exit repeat
-                            end try
-                        end repeat
-                    end try
-                    if origMsg is not missing value then exit repeat
-                end repeat
-                if origMsg is missing value then error "SEED_NOT_FOUND"
-                set theMessage to forward origMsg opening window false
-            """
+        creation_block = self._build_creation_block(
+            seed, seed_id_safe, reply_all, subject_safe, body_safe,
+        )
 
         # Terminal block: save (with id-bridging diff) or send.
         if send_now:

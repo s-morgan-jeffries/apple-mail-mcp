@@ -49,9 +49,7 @@ THRESHOLD = $THRESHOLD
 # Lowering an entry (after a successful refactor) is encouraged — it's
 # a one-way ratchet. NEVER raise without updating COMPLEXITY.md and
 # justifying the structural reason in the PR.
-ALLOWLIST = {
-    ('mail_connector.py', 'AppleMailConnector.create_draft'): 25,
-}
+ALLOWLIST: dict[tuple[str, str], int] = {}
 
 data = json.load(sys.stdin)
 new_violations = []
