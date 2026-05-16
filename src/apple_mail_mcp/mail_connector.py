@@ -3247,14 +3247,18 @@ class AppleMailConnector:
         """Resolve an RFC 5322 Message-ID header to Mail's internal id.
 
         Used by ``update_draft`` to recover a reply seed from a saved
-        draft's ``In-Reply-To`` header (which carries the original
-        message's RFC 5322 Message-ID, including the angle brackets).
+        draft's ``In-Reply-To`` header, and by ``create_draft`` to accept
+        the bracketless RFC ids that read tools emit on the IMAP path
+        (#148 / #205).
 
         Args:
-            rfc5322_message_id: e.g. ``<calendar-abc123@google.com>``.
-                Angle brackets are accepted; AppleScript's ``message id``
-                property stores the value verbatim as it appears on the
-                wire.
+            rfc5322_message_id: e.g. ``<calendar-abc123@google.com>`` or
+                ``calendar-abc123@google.com``. Angle brackets are added
+                if missing — AppleScript's ``message id`` property stores
+                the value verbatim as it appears on the wire (bracketed
+                per RFC 5322), so the lookup needs the wrapped form. Read
+                tools strip the brackets before emission, so callers
+                forwarding read-tool ids can hand us either form.
 
         Returns:
             Mail's internal numeric id (as a string) of the first
@@ -3263,7 +3267,10 @@ class AppleMailConnector:
         """
         if not rfc5322_message_id:
             return None
-        safe = escape_applescript_string(sanitize_input(rfc5322_message_id))
+        normalized = rfc5322_message_id
+        if not (normalized.startswith("<") and normalized.endswith(">")):
+            normalized = f"<{normalized}>"
+        safe = escape_applescript_string(sanitize_input(normalized))
 
         script = f"""
         tell application "Mail"
@@ -3409,6 +3416,31 @@ class AppleMailConnector:
         data.pop("found", None)
         return cast(dict[str, Any], data)
 
+    def _maybe_resolve_rfc_seed_id(
+        self, seed: str, seed_id: str | None
+    ) -> str | None:
+        """Translate an RFC 5322 Message-ID seed into Mail's internal id.
+
+        Read tools (#148) emit the bracketless RFC id as ``id`` on the
+        IMAP path; passing that value to ``create_draft(reply_to=...)``
+        used to fail because the AppleScript ``whose id is`` clause
+        matches Mail's internal numeric id only. Mail's internal id is a
+        stringified long integer with no ``@``, so ``'@' in seed_id`` is
+        an unambiguous discriminator. (#205)
+
+        Returns ``seed_id`` unchanged for the ``new`` seed, for empty
+        seeds, or for non-RFC ids. Raises ``MailMessageNotFoundError``
+        when an RFC id is passed but doesn't match any message.
+        """
+        if seed not in ("reply", "forward") or not seed_id or "@" not in seed_id:
+            return seed_id
+        resolved = self.find_message_by_message_id(seed_id)
+        if resolved is None:
+            raise MailMessageNotFoundError(
+                f"no message with message-id {seed_id!r}"
+            )
+        return resolved
+
     def create_draft(
         self,
         *,
@@ -3428,8 +3460,12 @@ class AppleMailConnector:
 
         Args:
             seed: ``"new"``, ``"reply"``, or ``"forward"``.
-            seed_id: Mail's internal id of the message to reply/forward.
-                Required when ``seed != "new"``.
+            seed_id: Identifier of the message to reply/forward. Accepts
+                either Mail's internal numeric id OR an RFC 5322
+                Message-ID (with or without angle brackets). The latter
+                is what read tools (``search_messages`` / ``get_messages``)
+                emit as ``id`` on the IMAP path (#148), so callers can
+                forward those ids verbatim. Required when ``seed != "new"``.
             to/cc/bcc: Recipient lists. For reply/forward, ``None`` keeps
                 Mail's auto-derived recipients; an empty list explicitly
                 clears that group; a populated list replaces.
@@ -3467,6 +3503,11 @@ class AppleMailConnector:
                 raise ValueError("'to' is required when seed='new'")
             if not subject:
                 raise ValueError("'subject' is required when seed='new'")
+
+        # If the caller handed us an RFC 5322 Message-ID (the form read
+        # tools emit on the IMAP path per #148), resolve to Mail's
+        # internal id before the `whose id is` lookup below. (#205)
+        seed_id = self._maybe_resolve_rfc_seed_id(seed, seed_id)
 
         # Escape user inputs.
         body_safe = escape_applescript_string(sanitize_input(body))

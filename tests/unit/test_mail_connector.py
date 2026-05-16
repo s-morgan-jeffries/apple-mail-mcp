@@ -4728,6 +4728,34 @@ class TestFindMessageByMessageId:
         script = mock_run.call_args[0][0]
         assert "whose message id is" in script
 
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_wraps_brackets_for_bracketless_input(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Read tools (#148) emit RFC ids without angle brackets, but
+        Mail.app stores `message id` with brackets per RFC 5322. The
+        resolver wraps the brackets so callers can pass either form. (#205)
+        """
+        mock_run.return_value = "NOT_FOUND"
+        connector.find_message_by_message_id("abc@example.com")
+        script = mock_run.call_args[0][0]
+        # The AppleScript must search for the bracketed form even though
+        # the caller passed the bracketless form.
+        assert 'whose message id is "<abc@example.com>"' in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_does_not_double_wrap_already_bracketed_input(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Existing callers (e.g. update_draft passing In-Reply-To)
+        already include brackets; the wrapping must be idempotent. (#205)
+        """
+        mock_run.return_value = "NOT_FOUND"
+        connector.find_message_by_message_id("<abc@example.com>")
+        script = mock_run.call_args[0][0]
+        assert 'whose message id is "<abc@example.com>"' in script
+        assert "<<" not in script
+
 
 class TestGetDraftState:
     """Tests for AppleMailConnector.get_draft_state."""
@@ -5179,6 +5207,99 @@ class TestCreateDraft:
             connector.create_draft(
                 seed="reply", seed_id="999999", body="x"
             )
+
+    # ------------------------------------------------------------------
+    # RFC 5322 Message-ID seed_id support (#205)
+    # ------------------------------------------------------------------
+
+    @patch.object(AppleMailConnector, "find_message_by_message_id")
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_reply_resolves_rfc_message_id_seed(
+        self,
+        mock_run: MagicMock,
+        mock_resolve: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """Read tools (#148) emit RFC ids on the IMAP path. create_draft
+        must resolve them to Mail's internal id before building the
+        `whose id is` AppleScript clause. (#205)
+        """
+        mock_resolve.return_value = "160989"
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="abc-123@example.com",  # RFC form (contains '@')
+            body="thanks",
+        )
+        mock_resolve.assert_called_once_with("abc-123@example.com")
+        script = mock_run.call_args[0][0]
+        # AppleScript looks up by Mail's internal id, not the RFC id.
+        assert 'whose id is "160989"' in script
+        assert "abc-123@example.com" not in script
+
+    @patch.object(AppleMailConnector, "find_message_by_message_id")
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_forward_resolves_rfc_message_id_seed(
+        self,
+        mock_run: MagicMock,
+        mock_resolve: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """Same RFC-id resolution applies to the forward branch. (#205)"""
+        mock_resolve.return_value = "160989"
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="forward",
+            seed_id="abc-123@example.com",
+            to=["x@example.com"],
+            body="fyi",
+        )
+        mock_resolve.assert_called_once_with("abc-123@example.com")
+        script = mock_run.call_args[0][0]
+        assert 'whose id is "160989"' in script
+
+    @patch.object(AppleMailConnector, "find_message_by_message_id")
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_internal_numeric_seed_id_skips_resolver(
+        self,
+        mock_run: MagicMock,
+        mock_resolve: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """Existing callers passing Mail's internal numeric id (no '@')
+        must keep working without a resolver round-trip. (#205)
+        """
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="reply",
+            seed_id="160989",  # internal id form, no '@'
+            body="thanks",
+        )
+        mock_resolve.assert_not_called()
+        script = mock_run.call_args[0][0]
+        assert 'whose id is "160989"' in script
+
+    @patch.object(AppleMailConnector, "find_message_by_message_id")
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_unresolvable_rfc_seed_raises_message_not_found(
+        self,
+        mock_run: MagicMock,
+        mock_resolve: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """When the RFC id doesn't match any message, surface the same
+        MailMessageNotFoundError the AppleScript SEED_NOT_FOUND path
+        produces — caller can't tell the difference. (#205)
+        """
+        mock_resolve.return_value = None
+        with pytest.raises(MailMessageNotFoundError):
+            connector.create_draft(
+                seed="reply",
+                seed_id="missing@example.com",
+                body="x",
+            )
+        # AppleScript should not run if we can't resolve the seed.
+        mock_run.assert_not_called()
 
 
 class TestExtractDraftAttachments:

@@ -2360,12 +2360,15 @@ async def create_draft(
     it for later or send it now.
 
     Args:
-        reply_to: Mail.app id of a message to reply to. Mutually exclusive
-            with ``forward_of``. When set, ``to``/``cc`` recipients and
-            ``subject`` are auto-derived from the original (override by
-            passing them explicitly).
-        forward_of: Mail.app id of a message to forward. Mutually exclusive
-            with ``reply_to``. ``to`` is required (recipient of the forward).
+        reply_to: Id of a message to reply to. Accepts either Mail.app's
+            internal numeric id or an RFC 5322 Message-ID — pass the ``id``
+            field from any ``search_messages`` / ``get_messages`` row
+            verbatim. Mutually exclusive with ``forward_of``. When set,
+            ``to``/``cc`` recipients and ``subject`` are auto-derived from
+            the original (override by passing them explicitly).
+        forward_of: Id of a message to forward. Accepts the same id forms
+            as ``reply_to``. Mutually exclusive with ``reply_to``. ``to``
+            is required (recipient of the forward).
         to/cc/bcc: Recipient lists. For reply/forward, ``None`` keeps the
             auto-derived recipients; ``[]`` explicitly clears that group;
             a populated list replaces.
