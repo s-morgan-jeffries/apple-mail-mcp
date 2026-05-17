@@ -833,8 +833,8 @@ Create a draft (fresh, reply, or forward). Optionally send immediately.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `reply_to` | string | No | None | Mail.app id of a message to reply to. Mutually exclusive with `forward_of`. When set, `to`/`cc` recipients and `subject` are auto-derived (override by passing them explicitly). |
-| `forward_of` | string | No | None | Mail.app id of a message to forward. Mutually exclusive with `reply_to`. `to` is required (recipient of the forward). |
+| `reply_to` | string | No | None | Id of a message to reply to. Accepts either Mail's internal numeric id or an RFC 5322 Message-ID — pass the `id` field from any `search_messages` / `get_messages` row verbatim (#205). Mutually exclusive with `forward_of`. When set, `to`/`cc` recipients and `subject` are auto-derived (override by passing them explicitly). |
+| `forward_of` | string | No | None | Id of a message to forward. Accepts the same id forms as `reply_to`. Mutually exclusive with `reply_to`. `to` is required (recipient of the forward). |
 | `to` | array[string] | When fresh | None | Recipient list. For reply/forward: `None` keeps auto-derived; `[]` clears; populated list replaces. |
 | `cc` | array[string] | No | None | CC recipients (same semantics as `to` for reply/forward). |
 | `bcc` | array[string] | No | None | BCC recipients. |
