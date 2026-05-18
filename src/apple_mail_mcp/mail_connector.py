@@ -99,7 +99,7 @@ _RULE_OPERATOR_MAP = {
 }
 
 
-def _wrap_as_json_script(body: str) -> str:
+def _wrap_as_json_script(body: str, *, timeout: int) -> str:
     """Wrap a tell-block body with ASObjC imports and an NSJSONSerialization return.
 
     The `body` must:
@@ -115,11 +115,23 @@ def _wrap_as_json_script(body: str) -> str:
 
     The wrapper:
       - Prepends `use framework "Foundation"` and `use scripting additions`.
+      - Wraps the body in `with timeout of {timeout} seconds ... end timeout`
+        so Mail's default 60 s AppleEvent timeout does not fire before the
+        connector's subprocess timeout — see issue #227. Without this,
+        per-message property fetches on Exchange/EWS mailboxes (server-
+        bound, not local) trip `AppleEvent timed out (-1712)` and leave the
+        scripting bridge in `Connection is invalid (-609)` for ~30 s.
       - After the tell block, serializes `resultData` via NSJSONSerialization
-        and returns the resulting NSString as text.
+        and returns the resulting NSString as text. The serializer runs in
+        the ASObjC bridge (no AppleEvent) so it is intentionally OUTSIDE the
+        timeout block — but `resultData` is still visible because AppleScript
+        `with timeout` is a control construct, not a scope.
 
     Args:
         body: AppleScript tell-block source setting `resultData`.
+        timeout: AppleEvent timeout in seconds for the wrapped tell block.
+            Callers should pass ``self.timeout`` so the in-script timeout
+            matches the subprocess-level kill timer.
 
     Returns:
         Full AppleScript source ready for osascript.
@@ -128,7 +140,9 @@ def _wrap_as_json_script(body: str) -> str:
         'use framework "Foundation"\n'
         "use scripting additions\n"
         "\n"
+        f"with timeout of {timeout} seconds\n"
         f"{body}\n"
+        "end timeout\n"
         "\n"
         "set jsonData to (current application's NSJSONSerialization's "
         "dataWithJSONObject:resultData options:0 |error|:(missing value))\n"
@@ -428,7 +442,7 @@ class AppleMailConnector:
         end tell
         """
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         result = self._run_applescript(script)
         accounts = cast(list[dict[str, Any]], parse_applescript_json(result))
         # Normalize empty-string full_name to None so callers don't have
@@ -503,7 +517,7 @@ class AppleMailConnector:
         end tell
         """
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
@@ -871,7 +885,7 @@ class AppleMailConnector:
             set resultData to {{|run_script_set|:(run script of r is not missing value), |play_sound_set|:(play sound of r is not missing value), |redirect_set|:((redirect message of r) is not ""), |forward_text_set|:((forward text of r) is not ""), |reply_text_set|:((reply text of r) is not ""), |highlight_text|:(highlight text using color of r), |color_message|:((color message of r) as text)}}
         end tell
         '''
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         raw = self._run_applescript(script)
         parsed = cast(dict[str, Any], parse_applescript_json(raw))
 
@@ -957,7 +971,7 @@ class AppleMailConnector:
         end tell
         '''
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
@@ -996,7 +1010,7 @@ class AppleMailConnector:
             set resultData to {{|host|:(server name of acctRef), |port|:(port of acctRef), |user_name|:(user name of acctRef), |email_addresses|:acctEmails}}
         end tell
         '''
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         raw = self._run_applescript(script)
         parsed = cast(dict[str, Any], parse_applescript_json(raw))
         email_addresses = cast(list[str], parsed.get("email_addresses") or [])
@@ -1361,7 +1375,7 @@ class AppleMailConnector:
         end tell
         '''
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
@@ -1516,7 +1530,7 @@ class AppleMailConnector:
         end tell
         '''
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         result = self._run_applescript(script)
         return cast(dict[str, Any], parse_applescript_json(result))
 
@@ -1723,7 +1737,7 @@ class AppleMailConnector:
         end tell
         '''
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
@@ -2258,7 +2272,7 @@ class AppleMailConnector:
         end tell
         '''
 
-        anchor_script = _wrap_as_json_script(anchor_body)
+        anchor_script = _wrap_as_json_script(anchor_body, timeout=self.timeout)
         anchor_raw = self._run_applescript(anchor_script)
         raw = cast(dict[str, Any], parse_applescript_json(anchor_raw))
 
@@ -2317,7 +2331,7 @@ class AppleMailConnector:
         end tell
         '''
 
-        candidates_script = _wrap_as_json_script(candidates_body)
+        candidates_script = _wrap_as_json_script(candidates_body, timeout=self.timeout)
         candidates_raw = self._run_applescript(candidates_script)
         candidates = cast(
             list[dict[str, Any]],
@@ -3186,7 +3200,7 @@ class AppleMailConnector:
         end tell
         """
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
@@ -3407,7 +3421,7 @@ class AppleMailConnector:
         end tell
         """
 
-        script = _wrap_as_json_script(tell_body)
+        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
         raw = self._run_applescript(script)
         data = parse_applescript_json(raw)
         if not isinstance(data, dict) or not data.get("found"):
