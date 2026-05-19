@@ -3253,12 +3253,15 @@ class AppleMailConnector:
 
         Args:
             rfc5322_message_id: e.g. ``<calendar-abc123@google.com>`` or
-                ``calendar-abc123@google.com``. Angle brackets are added
-                if missing — AppleScript's ``message id`` property stores
-                the value verbatim as it appears on the wire (bracketed
-                per RFC 5322), so the lookup needs the wrapped form. Read
-                tools strip the brackets before emission, so callers
-                forwarding read-tool ids can hand us either form.
+                ``calendar-abc123@google.com``. Brackets are stripped
+                from the input; the AppleScript ``whose`` clause then
+                queries for both the bare and bracketed forms in one
+                pass. Mail.app's ``message id`` property storage
+                normalization is not uniform — IMAP-backed accounts
+                (iCloud, Gmail) store the value bare, while other paths
+                may store with angle brackets per RFC 5322. Querying
+                both forms in a single clause is robust to either
+                convention and matches in one round-trip.
 
         Returns:
             Mail's internal numeric id (as a string) of the first
@@ -3267,10 +3270,12 @@ class AppleMailConnector:
         """
         if not rfc5322_message_id:
             return None
-        normalized = rfc5322_message_id
-        if not (normalized.startswith("<") and normalized.endswith(">")):
-            normalized = f"<{normalized}>"
-        safe = escape_applescript_string(sanitize_input(normalized))
+        bare = rfc5322_message_id
+        if bare.startswith("<") and bare.endswith(">"):
+            bare = bare[1:-1]
+        bracketed = f"<{bare}>"
+        safe_bare = escape_applescript_string(sanitize_input(bare))
+        safe_bracketed = escape_applescript_string(sanitize_input(bracketed))
 
         script = f"""
         tell application "Mail"
@@ -3279,7 +3284,7 @@ class AppleMailConnector:
                 try
                     repeat with mb in mailboxes of acc
                         try
-                            set m to first message of mb whose message id is "{safe}"
+                            set m to first message of mb whose (message id is "{safe_bare}" or message id is "{safe_bracketed}")
                             set foundId to (id of m as text)
                             exit repeat
                         end try

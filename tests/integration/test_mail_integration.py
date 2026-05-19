@@ -1414,3 +1414,112 @@ class TestTemplateIntegration:
         assert rendered["subject"] == f"Re: {original_subject}"
         assert recipient_name in rendered["body"]
         assert today in rendered["body"]
+
+
+class TestFindMessageByMessageIdIntegration:
+    """Real-Mail.app round-trip for ``find_message_by_message_id``.
+
+    Unit tests mock ``_run_applescript`` and so cannot catch mismatches
+    between the form the AppleScript ``whose`` clause sends and the form
+    Mail.app's ``message id`` property actually stores. This integration
+    test asserts the round-trip works against real storage, with a
+    message picked from the test account's INBOX at runtime so the test
+    survives any specific Message-ID being deleted.
+    """
+
+    def test_find_by_bare_rfc_id_from_search_messages(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """``search_messages`` on the IMAP path emits the bare RFC
+        Message-ID in the ``id`` field (per #148). Passing that value
+        back through ``find_message_by_message_id`` must resolve to
+        Mail's internal id — the contract ``create_draft(reply_to=...)``
+        and ``create_draft(forward_of=...)`` rely on for #205.
+        """
+        rows = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not rows:
+            pytest.skip(f"{test_account} INBOX has no messages to test against")
+
+        rfc_id = rows[0].get("rfc_message_id") or rows[0].get("id")
+        assert rfc_id, "search_messages row missing rfc_message_id/id"
+        # Search results from the IMAP path are bare per #148; this test
+        # is specifically about that form.
+        if rfc_id.startswith("<") and rfc_id.endswith(">"):
+            pytest.skip(
+                "search_messages returned a bracketed id — "
+                "test_account is not on the IMAP path"
+            )
+
+        internal_id = connector.find_message_by_message_id(rfc_id)
+        assert internal_id is not None, (
+            f"find_message_by_message_id returned None for {rfc_id!r} "
+            f"despite the message being present in {test_account}/INBOX"
+        )
+        assert "@" not in internal_id, (
+            "expected Mail's internal numeric id, got something RFC-shaped"
+        )
+
+    def test_find_by_bracketed_rfc_id_matches_bare(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """Both bracketed and bracketless forms of the same RFC id must
+        resolve to the same internal id, so callers (e.g. update_draft
+        passing In-Reply-To with brackets, create_draft passing a bare
+        seed_id from search_messages) can hand us either form.
+        """
+        rows = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not rows:
+            pytest.skip(f"{test_account} INBOX has no messages to test against")
+
+        rfc_id = rows[0].get("rfc_message_id") or rows[0].get("id")
+        assert rfc_id, "search_messages row missing rfc_message_id/id"
+        bare = rfc_id[1:-1] if rfc_id.startswith("<") and rfc_id.endswith(">") else rfc_id
+        bracketed = f"<{bare}>"
+
+        by_bare = connector.find_message_by_message_id(bare)
+        by_bracketed = connector.find_message_by_message_id(bracketed)
+
+        assert by_bare is not None, f"bare {bare!r} did not match"
+        assert by_bracketed is not None, f"bracketed {bracketed!r} did not match"
+        assert by_bare == by_bracketed, (
+            f"bare resolved to {by_bare!r}, bracketed to {by_bracketed!r} — "
+            "compound clause should yield the same internal id"
+        )
+
+    def test_create_draft_reply_round_trip_with_bare_rfc_id(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """End-to-end #205 contract: an id from search_messages round-trips
+        through create_draft(seed='reply') without MailMessageNotFoundError.
+        Cleans up the created draft.
+        """
+        rows = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=1
+        )
+        if not rows:
+            pytest.skip(f"{test_account} INBOX has no messages to test against")
+
+        rfc_id = rows[0].get("rfc_message_id") or rows[0].get("id")
+        assert rfc_id
+        if rfc_id.startswith("<") and rfc_id.endswith(">"):
+            rfc_id = rfc_id[1:-1]
+
+        result = connector.create_draft(
+            seed="reply",
+            seed_id=rfc_id,
+            body="Integration-test draft — safe to discard.",
+        )
+        draft_id = result.get("draft_id") if isinstance(result, dict) else None
+        assert draft_id, f"no draft_id in create_draft result: {result!r}"
+        try:
+            # Lightweight assertion — the draft exists; we don't introspect
+            # its In-Reply-To header here because update_draft / get_draft
+            # paths have their own coverage. We only assert the seed
+            # resolution worked.
+            pass
+        finally:
+            connector.delete_draft(draft_id)

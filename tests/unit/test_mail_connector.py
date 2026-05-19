@@ -4726,35 +4726,57 @@ class TestFindMessageByMessageId:
         mock_run.return_value = "NOT_FOUND"
         connector.find_message_by_message_id("<x@y>")
         script = mock_run.call_args[0][0]
-        assert "whose message id is" in script
+        # Compound clause queries both bare and bracketed forms (#205 follow-up).
+        assert "whose" in script
+        assert "message id is" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_wraps_brackets_for_bracketless_input(
+    def test_bracketless_input_queries_both_forms(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Read tools (#148) emit RFC ids without angle brackets, but
-        Mail.app stores `message id` with brackets per RFC 5322. The
-        resolver wraps the brackets so callers can pass either form. (#205)
+        """Mail.app's ``message id`` storage normalization varies by
+        account: IMAP-backed accounts (iCloud, Gmail) store the bare RFC
+        Message-ID; some other paths may store with angle brackets. The
+        resolver therefore queries both forms in a single ``whose``
+        clause so a caller doesn't need to know the storage convention.
         """
         mock_run.return_value = "NOT_FOUND"
         connector.find_message_by_message_id("abc@example.com")
         script = mock_run.call_args[0][0]
-        # The AppleScript must search for the bracketed form even though
-        # the caller passed the bracketless form.
-        assert 'whose message id is "<abc@example.com>"' in script
+        assert 'message id is "abc@example.com"' in script
+        assert 'message id is "<abc@example.com>"' in script
+        assert "whose" in script and " or " in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_does_not_double_wrap_already_bracketed_input(
+    def test_bracketed_input_queries_both_forms(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
         """Existing callers (e.g. update_draft passing In-Reply-To)
-        already include brackets; the wrapping must be idempotent. (#205)
+        already include brackets; strip them and query both forms so
+        we don't depend on Mail.app's storage convention.
         """
         mock_run.return_value = "NOT_FOUND"
         connector.find_message_by_message_id("<abc@example.com>")
         script = mock_run.call_args[0][0]
-        assert 'whose message id is "<abc@example.com>"' in script
-        assert "<<" not in script
+        assert 'message id is "abc@example.com"' in script
+        assert 'message id is "<abc@example.com>"' in script
+        assert "<<" not in script and ">>" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_returns_internal_id_for_bare_rfc_input(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Read tools (#148) emit bare RFC ids on the IMAP path. Round-trip
+        through ``create_draft(reply_to=...)`` requires this call to return
+        Mail's internal id when the input is bare. Unit test asserts API
+        surface; an integration test asserts the AppleScript actually
+        matches against Mail.app's storage.
+        """
+        mock_run.return_value = "54957"
+        result = connector.find_message_by_message_id(
+            "1779175169746.aa805a12-74b6-4330-93ff-72a175ed8679@example.com"
+        )
+        assert result == "54957"
 
 
 class TestGetDraftState:
