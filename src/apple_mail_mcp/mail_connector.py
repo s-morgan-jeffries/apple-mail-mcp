@@ -1074,6 +1074,51 @@ class AppleMailConnector:
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
+    def _get_imap_password_with_fallback(
+        self, account: str, email: str
+    ) -> str:
+        """Look up the IMAP Keychain password, retrying with the alternative
+        account-identifier form (name ↔ UUID) on a NotFound miss. (#243)
+
+        Keychain entries are written by ``setup-imap`` keyed on whatever
+        string the user typed — typically the Mail.app account NAME.
+        Callers (including the MCP layer) may legitimately pass either the
+        name or the UUID per the documented stability story on
+        ``search_messages.account``. This wrapper bridges the gap: try the
+        caller-supplied form first; on NotFound, resolve UUID↔name via
+        ``list_accounts()`` and retry. Other Keychain errors (AccessDenied,
+        generic Keychain errors) are NOT retried — they're explicit signals
+        from macOS and falling back would mask them.
+        """
+        try:
+            return get_imap_password(account, email)
+        except MailKeychainEntryNotFoundError:
+            alt = self._alternative_account_identifier(account)
+            if alt is None:
+                raise
+            return get_imap_password(alt, email)
+
+    def _alternative_account_identifier(self, account: str) -> str | None:
+        """Given a Mail.app account name OR UUID, return the other form.
+
+        Returns ``None`` if the input doesn't match any account or if the
+        account list can't be retrieved. Used by
+        ``_get_imap_password_with_fallback`` to bridge the
+        name-vs-UUID Keychain key mismatch.
+        """
+        try:
+            accounts = self.list_accounts()
+        except Exception:
+            return None
+        for acc in accounts:
+            name = acc.get("name")
+            uid = acc.get("id")
+            if name == account and uid:
+                return cast(str, uid)
+            if uid == account and name:
+                return cast(str, name)
+        return None
+
     def _resolve_imap_config(self, account: str) -> tuple[str, int, str]:
         """Query Mail.app for the IMAP connection details of an account.
 
@@ -1153,7 +1198,7 @@ class AppleMailConnector:
             MailAccountNotFoundError: Mail.app doesn't know this account.
         """
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.search_messages(
             mailbox=mailbox,
@@ -1566,7 +1611,7 @@ class AppleMailConnector:
         caller (get_message) catches and falls back.
         """
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.get_message(
             message_id,
@@ -1796,7 +1841,7 @@ class AppleMailConnector:
         caller (get_attachments) catches and falls back.
         """
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.get_attachments(message_id, mailbox=mailbox)
 
@@ -1898,7 +1943,7 @@ class AppleMailConnector:
         """
         account = cast(str, anchor["account"])
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.find_thread_members(
             anchor_rfc_message_id=cast(str, anchor["rfc_message_id"]),
@@ -1921,7 +1966,7 @@ class AppleMailConnector:
         and falls back via _IMAP_FALLBACK_EXCS.
         """
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.move_messages(
             message_ids=message_ids,
@@ -1977,7 +2022,7 @@ class AppleMailConnector:
         (_try_imap_delete) catches and falls back via _IMAP_FALLBACK_EXCS.
         """
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.delete_messages(
             message_ids=message_ids,
@@ -2029,7 +2074,7 @@ class AppleMailConnector:
         unchanged.
         """
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.set_read_status(
             message_ids=message_ids,
@@ -2153,7 +2198,7 @@ class AppleMailConnector:
         exceptions unchanged.
         """
         host, port, email = self._resolve_imap_config(account)
-        password = get_imap_password(account, email)
+        password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.set_flagged_status(
             message_ids=message_ids,
@@ -2997,7 +3042,7 @@ class AppleMailConnector:
 
         try:
             host, port, email = self._resolve_imap_config(account)
-            password = get_imap_password(account, email)
+            password = self._get_imap_password_with_fallback(account, email)
         except (
             MailKeychainEntryNotFoundError, MailKeychainAccessDeniedError
         ) as e:
@@ -3067,7 +3112,7 @@ class AppleMailConnector:
 
         try:
             host, port, email = self._resolve_imap_config(account)
-            password = get_imap_password(account, email)
+            password = self._get_imap_password_with_fallback(account, email)
         except (
             MailKeychainEntryNotFoundError, MailKeychainAccessDeniedError
         ) as e:

@@ -6202,3 +6202,158 @@ class TestReceivedWithinHours:
         fixed = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
         monkeypatch.setattr(mail_connector, "_now", lambda: fixed)
         assert mail_connector._now() == fixed
+
+
+# =============================================================================
+# IMAP Keychain dual-form lookup (#243)
+# =============================================================================
+
+
+class TestKeychainDualFormLookup:
+    """Keychain entries are written under whatever string the user typed at
+    setup-imap time (typically the account NAME). Callers may legitimately
+    pass either the name or the UUID (per the docstring's stability claim).
+    The wrapper retries with the alternative form on initial NotFound.
+    """
+
+    def test_primary_lookup_succeeds_no_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the caller-supplied form matches the Keychain entry, the
+        wrapper returns the password without touching list_accounts."""
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        list_accounts_called = []
+        monkeypatch.setattr(
+            mail_connector, "get_imap_password",
+            lambda acct, email: "PRIMARY-PW" if acct == "Gmail" else (_ for _ in ()).throw(AssertionError(f"unexpected {acct}")),
+        )
+        c = AppleMailConnector()
+        monkeypatch.setattr(
+            c, "list_accounts",
+            lambda: list_accounts_called.append(1) or [],
+        )
+        result = c._get_imap_password_with_fallback("Gmail", "alice@gmail.com")
+        assert result == "PRIMARY-PW"
+        assert list_accounts_called == [], (
+            "list_accounts must not be called on the happy path"
+        )
+
+    def test_uuid_lookup_falls_back_to_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Caller passed the UUID; Keychain entry was written under the
+        name. Wrapper resolves UUID → name and retries."""
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.exceptions import MailKeychainEntryNotFoundError
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        attempts: list[str] = []
+
+        def fake_get(acct: str, email: str) -> str:
+            attempts.append(acct)
+            if acct == "Gmail":
+                return "FALLBACK-PW"
+            raise MailKeychainEntryNotFoundError(f"no entry for {acct}")
+
+        monkeypatch.setattr(mail_connector, "get_imap_password", fake_get)
+        c = AppleMailConnector()
+        monkeypatch.setattr(
+            c, "list_accounts",
+            lambda: [{"name": "Gmail", "id": "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16"}],
+        )
+        result = c._get_imap_password_with_fallback(
+            "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16", "alice@gmail.com"
+        )
+        assert result == "FALLBACK-PW"
+        # Order: UUID first, then name
+        assert attempts == ["04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16", "Gmail"]
+
+    def test_name_lookup_falls_back_to_uuid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Inverse case: setup wrote the entry under UUID; caller used the name."""
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.exceptions import MailKeychainEntryNotFoundError
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        def fake_get(acct: str, email: str) -> str:
+            if acct == "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16":
+                return "UUID-PW"
+            raise MailKeychainEntryNotFoundError(f"no entry for {acct}")
+
+        monkeypatch.setattr(mail_connector, "get_imap_password", fake_get)
+        c = AppleMailConnector()
+        monkeypatch.setattr(
+            c, "list_accounts",
+            lambda: [{"name": "Gmail", "id": "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16"}],
+        )
+        assert c._get_imap_password_with_fallback(
+            "Gmail", "alice@gmail.com"
+        ) == "UUID-PW"
+
+    def test_both_forms_missing_raises_original(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.exceptions import MailKeychainEntryNotFoundError
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        def always_missing(acct: str, email: str) -> str:
+            raise MailKeychainEntryNotFoundError(f"no entry for {acct}")
+
+        monkeypatch.setattr(mail_connector, "get_imap_password", always_missing)
+        c = AppleMailConnector()
+        monkeypatch.setattr(
+            c, "list_accounts",
+            lambda: [{"name": "Gmail", "id": "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16"}],
+        )
+        with pytest.raises(MailKeychainEntryNotFoundError):
+            c._get_imap_password_with_fallback(
+                "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16", "alice@gmail.com"
+            )
+
+    def test_access_denied_does_not_fall_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AccessDenied is a deliberate user/system signal — falling back
+        would mask it. Only NotFound triggers the alternative-form retry."""
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.exceptions import MailKeychainAccessDeniedError
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        attempts: list[str] = []
+
+        def fake_get(acct: str, email: str) -> str:
+            attempts.append(acct)
+            raise MailKeychainAccessDeniedError(f"denied for {acct}")
+
+        monkeypatch.setattr(mail_connector, "get_imap_password", fake_get)
+        c = AppleMailConnector()
+        # list_accounts must not be consulted; assert via failure if called
+        monkeypatch.setattr(
+            c, "list_accounts",
+            lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
+        )
+        with pytest.raises(MailKeychainAccessDeniedError):
+            c._get_imap_password_with_fallback("Gmail", "alice@gmail.com")
+        assert attempts == ["Gmail"]
+
+    def test_no_alternative_in_account_list_raises_original(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If list_accounts can't find the input form (e.g. wrong account),
+        re-raise the original NotFound — don't try a guess."""
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.exceptions import MailKeychainEntryNotFoundError
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        def always_missing(acct: str, email: str) -> str:
+            raise MailKeychainEntryNotFoundError(f"no entry for {acct}")
+
+        monkeypatch.setattr(mail_connector, "get_imap_password", always_missing)
+        c = AppleMailConnector()
+        monkeypatch.setattr(c, "list_accounts", lambda: [])
+        with pytest.raises(MailKeychainEntryNotFoundError):
+            c._get_imap_password_with_fallback("Unknown", "alice@example.com")
