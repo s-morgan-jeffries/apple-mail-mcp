@@ -10,8 +10,17 @@ echo "Checking client-server parity..."
 # Extract public methods from connector (exclude __init__, _private)
 CONNECTOR_METHODS=$(grep -E '^\s+def [a-z]' "$CONNECTOR" | grep -v '^\s+def _' | sed 's/.*def \([a-z_]*\)(.*/\1/' | sort)
 
-# Extract @mcp.tool() decorated functions from server
-SERVER_TOOLS=$(grep -A1 '@mcp.tool' "$SERVER" | grep 'def ' | sed 's/.*def \([a-z_]*\)(.*/\1/' | sort)
+# Extract decorated tool functions from server. Matches both the bare
+# @mcp.tool() decorator (legacy) and the @_tool(...) helper that wraps it
+# (#217 — annotation-aware decorator that gates registration on
+# --read-only). Once a decorator line is seen, the next `def`/`async def`
+# line is the tool's function name. BSD-awk friendly.
+SERVER_TOOLS=$(awk '
+    /^@_tool\(/ || /^@mcp\.tool\(/ { in_dec=1; next }
+    in_dec && /^(async )?def / {
+        sub(/^(async )?def /, ""); sub(/\(.*$/, ""); print; in_dec=0
+    }
+' "$SERVER" | sort)
 
 echo ""
 echo "Connector public methods:"

@@ -7,6 +7,25 @@ Complete reference for all MCP tools provided by the Apple Mail MCP server.
 **Current Version:** v0.6.0
 **Total Tools:** 27
 
+## Tool annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint`)
+
+Every tool ships with the per-tool annotations the MCP 2025-03 spec defines so hosts that honor them can group / batch-approve permissions. Hosts that ignore the hints get the same behavior they always did — annotations are forward-compatible.
+
+| Hint | What it means | Defaults |
+|---|---|---|
+| `readOnlyHint` | `true` if the tool only reads state; `false` if it can mutate Mail.app, the filesystem, or remote IMAP state. | always set explicitly |
+| `destructiveHint` | `true` if the tool can remove or overwrite existing state (delete, move, rename, replace). `false` for purely additive tools (create / save-new). | always set explicitly |
+| `idempotentHint` | `true` if calling the tool a second time with the same arguments leaves end state unchanged. | always set explicitly |
+| `openWorldHint` | Out of scope for v0.9.0 — unset; defaults to `true` per the spec. | n/a |
+
+**Classification:**
+
+- **Read-only (9):** `list_accounts`, `list_mailboxes`, `list_rules`, `list_templates`, `search_messages`, `get_messages`, `get_thread`, `get_template`, `render_template`. All have `readOnlyHint=true`, `destructiveHint=false`, `idempotentHint=true`.
+- **Mutating destructive (9):** `update_message`, `update_mailbox`, `update_rule`, `update_draft`, `delete_draft`, `delete_mailbox`, `delete_messages`, `delete_rule`, `delete_template`. All have `destructiveHint=true`, `idempotentHint=true`.
+- **Mutating additive (5):** `create_mailbox`, `create_draft`, `create_rule`, `save_template`, `save_attachments`. All have `destructiveHint=false`. Idempotent except `create_draft` and `create_rule` (each call may create a new entity).
+
+**Host doesn't honor annotations?** Use the split-server config in the [README](../../README.md#optional-split-read--write-servers). Pass `--read-only` to one connector entry to expose only the 9 read tools; pair with a second non-read-only entry. Claude Desktop's per-server permission UI then naturally groups them. The two approaches compose: annotations describe the model, the split-server flag enforces it client-side.
+
 ## Phase 1 Tools (v0.1.0) - Core Foundation
 
 ### search_messages
