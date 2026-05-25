@@ -772,6 +772,7 @@ def search_messages(
     is_flagged: bool | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    received_within_hours: int | None = None,
     has_attachment: bool | None = None,
     limit: int = 50,
     source: list[str] | None = None,
@@ -815,6 +816,10 @@ def search_messages(
         is_flagged: Filter by flagged status (true=flagged, false=not flagged).
         date_from: Inclusive lower bound on date received. ISO 8601 YYYY-MM-DD.
         date_to: Inclusive upper bound on date received (full day included). ISO 8601 YYYY-MM-DD.
+        received_within_hours: Relative-time filter. When set, only return
+            messages received within the last N hours (hour precision).
+            Composes with ``date_from`` / ``date_to`` — the most restrictive
+            filter wins. Must be a positive int. Days = 24, weeks = 168, etc.
         has_attachment: Filter messages with (true) or without (false) attachments.
         limit: Maximum results to return (default: 50).
         source: Optional list of message ids (with optional ``"SELECTED"``
@@ -940,6 +945,7 @@ def search_messages(
             is_flagged=is_flagged,
             date_from=date_from,
             date_to=date_to,
+            received_within_hours=received_within_hours,
             has_attachment=has_attachment,
             limit=limit,
             include_attachments=include_attachments,

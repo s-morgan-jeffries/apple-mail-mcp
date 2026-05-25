@@ -645,6 +645,7 @@ class TestSearchMessages:
             is_flagged=None,
             date_from=None,
             date_to=None,
+            received_within_hours=None,
             has_attachment=None,
             limit=10,
             include_attachments=False,
@@ -706,6 +707,7 @@ class TestSearchMessages:
             is_flagged=True,
             date_from="2026-04-01",
             date_to="2026-04-15",
+            received_within_hours=None,
             has_attachment=True,
             limit=25,
             include_attachments=False,
@@ -751,6 +753,39 @@ class TestSearchMessages:
 
         assert result["success"] is False
         assert result["error_type"] == "unknown"
+
+    # ---- received_within_hours (#230) ----------------------------------
+
+    def test_received_within_hours_passed_to_connector(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.search_messages.return_value = []
+        result = search_messages("Gmail", received_within_hours=24)
+        assert result["success"] is True
+        kwargs = mock_mail.search_messages.call_args.kwargs
+        assert kwargs["received_within_hours"] == 24
+
+    def test_received_within_hours_zero_rejected(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        """Validation raised in connector; server surfaces validation_error."""
+        mock_mail.search_messages.side_effect = ValueError(
+            "received_within_hours must be > 0, got: 0"
+        )
+        result = search_messages("Gmail", received_within_hours=0)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "received_within_hours" in result["error"]
+
+    def test_received_within_hours_negative_rejected(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.search_messages.side_effect = ValueError(
+            "received_within_hours must be > 0, got: -5"
+        )
+        result = search_messages("Gmail", received_within_hours=-5)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
 
     # ---- source="selected" (folded-in get_selected_messages, #131) -------
 

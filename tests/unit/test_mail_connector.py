@@ -5952,3 +5952,253 @@ class TestDeleteMailbox:
         mock_cfg.assert_not_called()
         mock_pw.assert_not_called()
         mock_imap_cls.assert_not_called()
+
+
+# =============================================================================
+# received_within_hours (#230)
+# =============================================================================
+
+
+class TestReceivedWithinHours:
+    """Tests for the new `received_within_hours` parameter on search_messages.
+
+    Connector-tier coverage: AppleScript clause emission, IMAP-path
+    post-filter, validation, composition with date_from, and the _now()
+    monkeypatch hook used for deterministic time math.
+    """
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_applescript_emits_relative_hours_clause(
+        self, mock_run: MagicMock
+    ) -> None:
+        """AS path should embed `(current date) - (N * hours)` directly so
+        Mail.app does the hour-precise comparison server-side."""
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+        connector = AppleMailConnector()
+        mock_run.return_value = "[]"
+        connector._search_messages_applescript(
+            "Gmail", "INBOX", received_within_hours=6
+        )
+        script = mock_run.call_args[0][0]
+        assert (
+            "if (date received of msg) < ((current date) - (6 * hours)) "
+            "then set includeThis to false"
+        ) in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_applescript_rejects_zero_hours(
+        self, mock_run: MagicMock
+    ) -> None:
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+        connector = AppleMailConnector()
+        with pytest.raises(ValueError, match="received_within_hours"):
+            connector._search_messages_applescript(
+                "Gmail", "INBOX", received_within_hours=0
+            )
+        mock_run.assert_not_called()
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_applescript_rejects_negative_hours(
+        self, mock_run: MagicMock
+    ) -> None:
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+        connector = AppleMailConnector()
+        with pytest.raises(ValueError, match="received_within_hours"):
+            connector._search_messages_applescript(
+                "Gmail", "INBOX", received_within_hours=-5
+            )
+        mock_run.assert_not_called()
+
+    def test_search_messages_combines_received_within_hours_with_date_from(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """received_within_hours takes the more-restrictive cutoff vs date_from.
+
+        Cutoff is now - 48h = 2026-05-23. date_from is 2026-05-01 (less
+        restrictive). The AS path should see date_from=2026-05-23.
+        """
+        from datetime import datetime
+
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        monkeypatch.setattr(
+            mail_connector, "_now",
+            lambda: datetime(2026, 5, 25, 14, 30, 0).astimezone(),
+        )
+        connector = AppleMailConnector()
+        # Force AS path
+        monkeypatch.setattr(
+            connector, "_imap_breaker_open", lambda account: True
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_as(
+            account: str,
+            mailbox: str = "INBOX",
+            sender_contains: str | None = None,
+            subject_contains: str | None = None,
+            read_status: bool | None = None,
+            is_flagged: bool | None = None,
+            date_from: str | None = None,
+            *args: Any,
+            **kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["date_from"] = date_from
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(
+            connector, "_search_messages_applescript", fake_as
+        )
+        connector.search_messages(
+            "Gmail",
+            mailbox="INBOX",
+            date_from="2026-05-01",
+            received_within_hours=48,
+        )
+        assert captured["date_from"] == "2026-05-23"
+        # received_within_hours plumbed through (so AS embeds hour clause)
+        assert captured.get("received_within_hours") == 48
+
+    def test_search_messages_keeps_more_restrictive_date_from(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When date_from is more restrictive than the relative cutoff, it wins."""
+        from datetime import datetime
+
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        monkeypatch.setattr(
+            mail_connector, "_now",
+            lambda: datetime(2026, 5, 25, 14, 30, 0).astimezone(),
+        )
+        connector = AppleMailConnector()
+        monkeypatch.setattr(
+            connector, "_imap_breaker_open", lambda account: True
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_as(
+            account: str,
+            mailbox: str = "INBOX",
+            sender_contains: str | None = None,
+            subject_contains: str | None = None,
+            read_status: bool | None = None,
+            is_flagged: bool | None = None,
+            date_from: str | None = None,
+            *args: Any,
+            **kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["date_from"] = date_from
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(
+            connector, "_search_messages_applescript", fake_as
+        )
+        # received_within_hours=720 = 30 days, cutoff = 2026-04-25.
+        # date_from = 2026-05-25 is more restrictive.
+        connector.search_messages(
+            "Gmail",
+            mailbox="INBOX",
+            date_from="2026-05-25",
+            received_within_hours=720,
+        )
+        assert captured["date_from"] == "2026-05-25"
+
+    def test_search_messages_imap_path_post_filters_by_cutoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """IMAP path returns day-granular SINCE results; the cutoff_dt
+        post-filter trims to hour precision."""
+        from datetime import datetime, timedelta, timezone
+
+        from apple_mail_mcp import mail_connector
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        # Use a fixed UTC "now" for determinism. Cutoff = now - 6h.
+        now_utc = datetime(2026, 5, 25, 14, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(mail_connector, "_now", lambda: now_utc)
+
+        connector = AppleMailConnector()
+        # IMAP path: breaker closed and _imap_search returns 3 messages.
+        monkeypatch.setattr(
+            connector, "_imap_breaker_open", lambda account: False
+        )
+        msg_within = {
+            "id": "a",
+            "date_received": (now_utc - timedelta(hours=3)).isoformat(),
+        }
+        msg_outside = {
+            "id": "b",
+            "date_received": (now_utc - timedelta(hours=10)).isoformat(),
+        }
+        msg_unparseable = {"id": "c", "date_received": ""}
+
+        def fake_imap(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [msg_within, msg_outside, msg_unparseable]
+
+        monkeypatch.setattr(connector, "_imap_search", fake_imap)
+        monkeypatch.setattr(
+            connector, "_imap_clear_breaker", lambda account: None
+        )
+
+        result = connector.search_messages(
+            "Gmail",
+            mailbox="INBOX",
+            received_within_hours=6,
+        )
+
+        ids = [m["id"] for m in result]
+        # Within cutoff: kept. Outside: dropped. Unparseable: kept (defensive).
+        assert "a" in ids
+        assert "b" not in ids
+        assert "c" in ids
+
+    def test_search_messages_no_effect_when_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """received_within_hours=None preserves existing behavior."""
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        connector = AppleMailConnector()
+        monkeypatch.setattr(
+            connector, "_imap_breaker_open", lambda account: True
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_as(
+            account: str,
+            mailbox: str = "INBOX",
+            sender_contains: str | None = None,
+            subject_contains: str | None = None,
+            read_status: bool | None = None,
+            is_flagged: bool | None = None,
+            date_from: str | None = None,
+            *args: Any,
+            **kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["date_from"] = date_from
+            captured.update(kwargs)
+            return []
+
+        monkeypatch.setattr(
+            connector, "_search_messages_applescript", fake_as
+        )
+        connector.search_messages("Gmail", mailbox="INBOX", date_from="2026-05-01")
+        assert captured.get("received_within_hours") is None
+        assert captured["date_from"] == "2026-05-01"
+
+    def test_now_helper_is_monkeypatchable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The _now() module helper exists and can be monkeypatched in tests."""
+        from datetime import datetime, timezone
+
+        from apple_mail_mcp import mail_connector
+
+        fixed = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(mail_connector, "_now", lambda: fixed)
+        assert mail_connector._now() == fixed

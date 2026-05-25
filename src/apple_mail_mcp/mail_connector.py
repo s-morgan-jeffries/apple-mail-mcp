@@ -9,6 +9,7 @@ import time
 import warnings
 from collections.abc import Callable
 from datetime import date as _date
+from datetime import datetime as _datetime
 from datetime import timedelta as _timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -63,6 +64,104 @@ logger = logging.getLogger(__name__)
 # Strict ISO 8601 YYYY-MM-DD — search_messages's date_from/date_to filters
 # reject anything else to prevent AppleScript injection via the date clause.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _now() -> _datetime:
+    """Indirection for monkeypatching in tests (#230). Returns tz-aware
+    local time so comparison with IMAP envelope dates (also tz-aware) is
+    well-defined."""
+    return _datetime.now().astimezone()
+
+
+def _build_date_filter_clauses(
+    date_from: str | None,
+    date_to: str | None,
+    received_within_hours: int | None,
+) -> list[str]:
+    """Build the date-related AppleScript IF clauses for the search loop.
+
+    Extracted from `_search_messages_applescript` to keep that function
+    under the cyclomatic-complexity ceiling. All three date filters
+    compose by intersection (any matching clause skips the message).
+    """
+    clauses: list[str] = []
+
+    if date_from is not None:
+        if not _ISO_DATE_RE.match(date_from):
+            raise ValueError(
+                f"date_from must be ISO 8601 YYYY-MM-DD, got: {date_from!r}"
+            )
+        clauses.append(
+            f'if (date received of msg) < (date "{date_from}") '
+            f'then set includeThis to false'
+        )
+
+    if date_to is not None:
+        if not _ISO_DATE_RE.match(date_to):
+            raise ValueError(
+                f"date_to must be ISO 8601 YYYY-MM-DD, got: {date_to!r}"
+            )
+        # Upper bound is exclusive of the day AFTER date_to, so the full
+        # day of date_to is included.
+        next_day = (
+            _date.fromisoformat(date_to) + _timedelta(days=1)
+        ).isoformat()
+        clauses.append(
+            f'if (date received of msg) >= (date "{next_day}") '
+            f'then set includeThis to false'
+        )
+
+    if received_within_hours is not None:
+        if not isinstance(received_within_hours, int) or received_within_hours <= 0:
+            raise ValueError(
+                f"received_within_hours must be > 0, got: {received_within_hours!r}"
+            )
+        # Hour-precise filter: Mail.app computes the cutoff against its
+        # own wall clock at script-eval time. No Python timezone math
+        # needed on this path. (#230)
+        clauses.append(
+            f'if (date received of msg) < ((current date) - '
+            f'({received_within_hours} * hours)) '
+            f'then set includeThis to false'
+        )
+
+    return clauses
+
+
+def _filter_imap_results_to_cutoff(
+    messages: list[dict[str, Any]], cutoff_dt: _datetime
+) -> list[dict[str, Any]]:
+    """Trim IMAP search results to messages received at-or-after `cutoff_dt`.
+
+    The IMAP path's day-granular SINCE under-filters when the caller wants
+    hour precision (e.g., received_within_hours=6 just before midnight
+    includes everything since midnight on the previous day). This pass
+    enforces hour precision in Python using the ISO 8601 ``date_received``
+    that the IMAP connector emits.
+
+    Messages whose ``date_received`` is missing or unparseable are kept
+    defensively — better to over-return than to silently drop rows. The
+    AS path doesn't need this helper because its embedded
+    ``(current date) - (N * hours)`` clause is already hour-precise.
+    """
+    if cutoff_dt.tzinfo is None:
+        cutoff_dt = cutoff_dt.astimezone()
+    kept: list[dict[str, Any]] = []
+    for m in messages:
+        raw = m.get("date_received")
+        if not raw:
+            kept.append(m)
+            continue
+        try:
+            parsed = _datetime.fromisoformat(str(raw))
+        except (TypeError, ValueError):
+            kept.append(m)
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        if parsed >= cutoff_dt:
+            kept.append(m)
+    return kept
 
 # Threshold (seconds) above which the AppleScript search path emits an
 # INFO-level recommendation to enable IMAP delegation. Calibrated against
@@ -1081,6 +1180,7 @@ class AppleMailConnector:
         is_flagged: bool | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        received_within_hours: int | None = None,
         has_attachment: bool | None = None,
         limit: int | None = None,
         include_attachments: bool = False,
@@ -1114,6 +1214,24 @@ class AppleMailConnector:
         """
         body_search = bool(body_contains or text_contains)
 
+        # #230: received_within_hours is a hour-granular relative cutoff that
+        # composes with date_from. Validate up front (so both IMAP and AS
+        # paths see a consistent error), then desugar to date_from for the
+        # IMAP path's day-granular SINCE pre-filter and post-filter results
+        # to enforce hour precision. The AS path receives the raw param and
+        # embeds an (current date) - (N * hours) clause that Mail.app
+        # evaluates server-side — no post-filter needed there.
+        cutoff_dt: _datetime | None = None
+        if received_within_hours is not None:
+            if not isinstance(received_within_hours, int) or received_within_hours <= 0:
+                raise ValueError(
+                    f"received_within_hours must be > 0, got: {received_within_hours!r}"
+                )
+            cutoff_dt = _now() - _timedelta(hours=received_within_hours)
+            cutoff_date_iso = cutoff_dt.date().isoformat()
+            if date_from is None or cutoff_date_iso > date_from:
+                date_from = cutoff_date_iso
+
         if not self._imap_breaker_open(account):
             try:
                 result = self._imap_search(
@@ -1131,6 +1249,8 @@ class AppleMailConnector:
                     body_contains,
                     text_contains,
                 )
+                if cutoff_dt is not None:
+                    result = _filter_imap_results_to_cutoff(result, cutoff_dt)
                 self._imap_clear_breaker(account)
                 return result
             except _IMAP_FALLBACK_EXCS as exc:
@@ -1165,6 +1285,7 @@ class AppleMailConnector:
                 include_attachments,
                 body_contains,
                 text_contains,
+                received_within_hours=received_within_hours,
             )
         finally:
             elapsed = time.perf_counter() - start
@@ -1192,6 +1313,7 @@ class AppleMailConnector:
         include_attachments: bool = False,
         body_contains: str | None = None,
         text_contains: str | None = None,
+        received_within_hours: int | None = None,
     ) -> list[dict[str, Any]]:
         """AppleScript path for search_messages (the universal baseline).
 
@@ -1270,30 +1392,9 @@ class AppleMailConnector:
                 f'then set includeThis to false'
             )
 
-        if date_from is not None:
-            if not _ISO_DATE_RE.match(date_from):
-                raise ValueError(
-                    f"date_from must be ISO 8601 YYYY-MM-DD, got: {date_from!r}"
-                )
-            filter_checks.append(
-                f'if (date received of msg) < (date "{date_from}") '
-                f'then set includeThis to false'
-            )
-
-        if date_to is not None:
-            if not _ISO_DATE_RE.match(date_to):
-                raise ValueError(
-                    f"date_to must be ISO 8601 YYYY-MM-DD, got: {date_to!r}"
-                )
-            # Upper bound is exclusive of the day AFTER date_to, so the full
-            # day of date_to is included.
-            next_day = (
-                _date.fromisoformat(date_to) + _timedelta(days=1)
-            ).isoformat()
-            filter_checks.append(
-                f'if (date received of msg) >= (date "{next_day}") '
-                f'then set includeThis to false'
-            )
+        filter_checks.extend(
+            _build_date_filter_clauses(date_from, date_to, received_within_hours)
+        )
 
         if has_attachment is True:
             filter_checks.append(

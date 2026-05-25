@@ -44,6 +44,7 @@ Search for messages matching specified criteria.
 | `is_flagged` | boolean | No | None | Filter by flagged status (true=flagged, false=not flagged) |
 | `date_from` | string | No | None | Inclusive lower bound on `date_received`. ISO 8601 YYYY-MM-DD. |
 | `date_to` | string | No | None | Inclusive upper bound on `date_received` (full day included). ISO 8601 YYYY-MM-DD. |
+| `received_within_hours` | integer | No | None | Relative-time filter — only return messages received within the last N hours. Hour precision (Mail.app evaluates the cutoff server-side on the AppleScript path; IMAP path day-floors via SINCE and Python post-filters). Composes with `date_from` / `date_to` — most restrictive filter wins. Must be `> 0`. Days = 24, weeks = 168. |
 | `has_attachment` | boolean | No | None | Filter messages with (true) or without (false) attachments |
 | `limit` | integer | No | 50 | Maximum number of results to return |
 | `source` | list[string] \| null | No | null | Optional list of message ids (with optional `"SELECTED"` sentinel) to scope the search to. `null` (default) searches the account/mailbox normally. |
