@@ -614,8 +614,19 @@ def _bulk_repeat_block(
         account: Account name or UUID, or None.
         source_mailbox: Source mailbox name, or None.
         actions: One or more AppleScript statements to run inside the
-            loop AFTER `set msg to first message ... whose id is msgId`.
-            The counter increment is appended automatically.
+            loop once a message is matched (under `if matched then`).
+            Each id is matched in TWO sequential attempts — first by
+            Mail's internal numeric `id`, then (if that misses) by the
+            RFC 5322 `message id`. This lets callers pass either form:
+            read tools hand back the RFC Message-ID on the IMAP path,
+            which a numeric `id` never equals (the cause of silent
+            `updated:0` patches; #205-family). The two predicates are
+            kept in SEPARATE `whose` clauses on purpose — combining them
+            as `whose (id is X or message id is X)` makes Mail's query
+            compiler fail the whole filter when X is a non-numeric RFC
+            id (the `id is X` integer comparison poisons the `or`),
+            matching nothing. The counter increment is appended
+            automatically.
         counter_var: Name of the AppleScript counter variable (e.g.
             "updateCount", "moveCount") that gets incremented per success.
 
@@ -642,11 +653,22 @@ def _bulk_repeat_block(
         return (
             f'            set sourceMb to my resolveMailbox({account_clause}, "{mb_safe}")\n'
             f"            repeat with msgId in idList\n"
+            f"                set mid to (contents of msgId)\n"
+            f"                set matched to false\n"
             f"                try\n"
-            f"                    set msg to first message of sourceMb whose id is msgId\n"
+            f"                    set msg to first message of sourceMb whose id is mid\n"
+            f"                    set matched to true\n"
+            f"                end try\n"
+            f"                if not matched then\n"
+            f"                    try\n"
+            f"                        set msg to first message of sourceMb whose message id is mid\n"
+            f"                        set matched to true\n"
+            f"                    end try\n"
+            f"                end if\n"
+            f"                if matched then\n"
             f"{action_lines}\n"
             f"                    set {counter_var} to {counter_var} + 1\n"
-            f"                end try\n"
+            f"                end if\n"
             f"            end repeat"
         )
 
@@ -655,13 +677,24 @@ def _bulk_repeat_block(
     action_lines = "\n".join(action_indent + a for a in actions)
     return (
         f"            repeat with msgId in idList\n"
+        f"                set mid to (contents of msgId)\n"
         f"                repeat with acc in accounts\n"
         f"                    repeat with mb in mailboxes of acc\n"
+        f"                        set matched to false\n"
         f"                        try\n"
-        f"                            set msg to first message of mb whose id is msgId\n"
+        f"                            set msg to first message of mb whose id is mid\n"
+        f"                            set matched to true\n"
+        f"                        end try\n"
+        f"                        if not matched then\n"
+        f"                            try\n"
+        f"                                set msg to first message of mb whose message id is mid\n"
+        f"                                set matched to true\n"
+        f"                            end try\n"
+        f"                        end if\n"
+        f"                        if matched then\n"
         f"{action_lines}\n"
         f"                            set {counter_var} to {counter_var} + 1\n"
-        f"                        end try\n"
+        f"                        end if\n"
         f"                    end repeat\n"
         f"                end repeat\n"
         f"            end repeat"

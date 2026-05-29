@@ -4607,6 +4607,63 @@ class TestWhoseIdQuoting:
         )
 
 
+class TestUpdateMessageMatchesRfcMessageId:
+    """Bug A / #205-family: the AppleScript pass must match the RFC 5322
+    ``message id`` as well as Mail's internal numeric ``id``.
+
+    Read tools hand back the RFC 5322 Message-ID on the IMAP path. The
+    AppleScript fallback used to match only ``whose id is msgId`` (numeric
+    ``id``), which an RFC string never equals — so flag/read patches that
+    can't use the IMAP fast path (e.g. ``flag_color``, which IMAP can't
+    set) matched nothing and silently returned ``updated:0``. Matching
+    ``(id is msgId or message id is msgId)`` in the same pass fixes it
+    with no extra round-trip (no per-id all-mailbox scan).
+    """
+
+    RFC_ID = (
+        "LOVP265MB8807FC008C278E73EE7F2B678E382"
+        "@LOVP265MB8807.GBRP265.PROD.OUTLOOK.COM"
+    )
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    @patch.object(AppleMailConnector, "find_message_by_message_id")
+    def test_flag_color_matches_rfc_message_id_in_pass(
+        self,
+        mock_find: MagicMock,
+        mock_run: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        mock_run.return_value = "1"
+
+        result = connector.update_message([self.RFC_ID], flag_color="orange")
+
+        assert result == 1
+        # The pass must try the RFC message id (not only the numeric id),
+        # in the single existing AppleScript pass — no separate resolver
+        # round-trip.
+        script = mock_run.call_args[0][0]
+        assert "whose message id is mid" in script
+        assert f'"{self.RFC_ID}"' in script
+        mock_find.assert_not_called()
+        mock_run.assert_called_once()
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_numeric_id_still_matched(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        mock_run.return_value = "1"
+
+        connector.update_message(["12345"], flag_color="orange")
+
+        script = mock_run.call_args[0][0]
+        assert "whose id is mid" in script
+        assert '"12345"' in script
+
+
 class TestWrapAsJsonScript:
     def test_wrapper_contains_framework_directive(self) -> None:
         script = _wrap_as_json_script(
