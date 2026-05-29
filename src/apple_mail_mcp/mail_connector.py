@@ -40,6 +40,7 @@ from .utils import (
     escape_applescript_string,
     get_flag_index,
     parse_applescript_json,
+    sanitize_filename,
     sanitize_input,
     validate_email,
 )
@@ -126,6 +127,51 @@ def _build_date_filter_clauses(
         )
 
     return clauses
+
+
+def _compute_attachment_save_targets(
+    attachment_names: list[str],
+    save_directory: Path,
+    attachment_indices: list[int] | None,
+) -> list[tuple[int, Path]]:
+    """Map selected attachments to sanitized, contained target paths.
+
+    Returns ``(one_based_attachment_index, target_path)`` pairs in selection
+    order. The attachment name originates from the email and is fully
+    attacker-controlled (``name of att``), so it must never be concatenated
+    into a filesystem path unsanitized — a ``../`` or absolute name would let
+    the write escape ``save_directory`` (path traversal → arbitrary file
+    write). Each name is reduced to a safe basename via
+    :func:`sanitize_filename`; colliding basenames are de-duplicated with the
+    attachment index so two attachments can't silently overwrite each other.
+    Any target that would still escape ``save_directory`` after resolution is
+    dropped defensively.
+
+    ``save_directory`` must already be resolved by the caller.
+    """
+    if attachment_indices is not None:
+        wanted = [
+            (i, attachment_names[i])
+            for i in attachment_indices
+            if 0 <= i < len(attachment_names)
+        ]
+    else:
+        wanted = list(enumerate(attachment_names))
+
+    targets: list[tuple[int, Path]] = []
+    used: set[str] = set()
+    for idx, name in wanted:
+        safe = sanitize_filename(name)
+        if safe in used:
+            safe = f"{idx}_{safe}"
+        used.add(safe)
+        target = (save_directory / safe).resolve()
+        # sanitize_filename already strips separators and "..", so this can
+        # only fail if that contract is ever broken — keep it as a hard gate.
+        if target == save_directory or not target.is_relative_to(save_directory):
+            continue
+        targets.append((idx + 1, target))  # AppleScript indexing is 1-based
+    return targets
 
 
 def _filter_imap_results_to_cutoff(
@@ -2591,16 +2637,27 @@ class AppleMailConnector:
         except (RuntimeError, OSError) as e:
             raise ValueError(f"Invalid save directory: {e}") from e
 
-        message_id_safe = escape_applescript_string(sanitize_input(message_id))
-        dir_safe = escape_applescript_string(str(save_directory))
+        # Enumerate attachment names first so the (attacker-controlled)
+        # filename never reaches a filesystem path unsanitized. The leaf
+        # names are reduced to safe basenames and joined under the resolved
+        # save_directory on the Python side; the AppleScript then saves each
+        # selected attachment by index to a precomputed, contained POSIX
+        # path. (Concatenating `name of att` into the path inside AppleScript
+        # was a path-traversal → arbitrary-file-write vector.)
+        attachments = self._get_attachments_applescript(message_id)
+        targets = _compute_attachment_save_targets(
+            [str(a.get("name", "")) for a in attachments],
+            save_directory,
+            attachment_indices,
+        )
+        if not targets:
+            return 0
 
-        # Build index filter if specified
-        if attachment_indices is not None:
-            # Convert to 1-based indexing for AppleScript
-            indices_str = ", ".join(str(i + 1) for i in attachment_indices)
-            index_filter = f"items {{{indices_str}}} of"
-        else:
-            index_filter = ""
+        message_id_safe = escape_applescript_string(sanitize_input(message_id))
+        idx_list = ", ".join(str(idx) for idx, _ in targets)
+        path_list = ", ".join(
+            f'"{escape_applescript_string(str(path))}"' for _, path in targets
+        )
 
         script = f"""
         tell application "Mail"
@@ -2609,13 +2666,16 @@ class AppleMailConnector:
                 repeat with mb in mailboxes of acc
                     try
                         set msg to first message of mb whose id is "{message_id_safe}"
-                        set attList to {index_filter} mail attachments of msg
+                        set theAtts to mail attachments of msg
+                        set idxList to {{{idx_list}}}
+                        set pathList to {{{path_list}}}
                         set saveCount to 0
 
-                        repeat with att in attList
+                        repeat with k from 1 to count of idxList
+                            set ai to item k of idxList
+                            set tp to item k of pathList
                             try
-                                set attName to name of att
-                                save att in ("{dir_safe}/" & attName)
+                                save (item ai of theAtts) in (POSIX file tp)
                                 set saveCount to saveCount + 1
                             end try
                         end repeat

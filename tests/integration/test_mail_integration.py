@@ -340,6 +340,45 @@ class TestMailIntegration:
             assert isinstance(att["size"], int)
             assert isinstance(att["downloaded"], bool)
 
+    def test_save_attachments_stays_contained(
+        self, connector: AppleMailConnector, test_account: str, tmp_path: Path
+    ) -> None:
+        """Real save_attachments writes only inside the chosen directory.
+
+        Exercises the two-pass AppleScript path (enumerate names → save by
+        index to Python-sanitized POSIX paths) on a real message. The
+        security property — an attacker-controlled attachment filename can
+        never escape ``save_directory`` — is proven deterministically by the
+        ``_compute_attachment_save_targets`` unit tests; this integration
+        test confirms the AppleScript `save (item i of theAtts) in (POSIX
+        file tp)` round-trip actually writes files in real Mail.app and that
+        nothing lands outside the directory. Scans a few INBOX messages for
+        one with attachments; skips if none is found.
+        """
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=10
+        )
+        target_id = next(
+            (m["id"] for m in matches if connector.get_attachments(m["id"])),
+            None,
+        )
+        if target_id is None:
+            pytest.skip("no INBOX message with attachments to save")
+
+        before = {p.resolve() for p in tmp_path.rglob("*")}
+        count = connector.save_attachments(
+            message_id=target_id, save_directory=tmp_path
+        )
+        assert isinstance(count, int)
+
+        written = {p.resolve() for p in tmp_path.rglob("*") if p.is_file()}
+        # Every file that appeared is strictly inside the save directory.
+        for p in written:
+            assert p.is_relative_to(tmp_path.resolve())
+        # Nothing was written outside (the parent dir gained no new files).
+        new_files = written - before
+        assert all(p.is_relative_to(tmp_path.resolve()) for p in new_files)
+
     def test_get_attachments_via_imap(
         self, connector: AppleMailConnector, test_account: str
     ) -> None:

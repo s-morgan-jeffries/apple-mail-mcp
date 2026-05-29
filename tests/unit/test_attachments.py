@@ -107,7 +107,12 @@ class TestSaveAttachments:
         self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Path
     ) -> None:
         """Test saving a single attachment."""
-        mock_run.return_value = "1"
+        # First call enumerates names; second call performs the save.
+        mock_run.side_effect = [
+            '[{"name":"document.pdf","mime_type":"application/pdf",'
+            '"size":1,"downloaded":true}]',
+            "1",
+        ]
 
         result = connector.save_attachments(
             message_id="12345",
@@ -116,7 +121,7 @@ class TestSaveAttachments:
         )
 
         assert result == 1
-        call_args = mock_run.call_args[0][0]
+        call_args = mock_run.call_args_list[-1][0][0]
         assert str(tmp_path) in call_args
 
     @patch.object(AppleMailConnector, "_run_applescript")
@@ -124,7 +129,12 @@ class TestSaveAttachments:
         self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Path
     ) -> None:
         """Test saving all attachments from a message."""
-        mock_run.return_value = "3"
+        mock_run.side_effect = [
+            '[{"name":"a.pdf","mime_type":"application/pdf","size":1,"downloaded":true},'
+            '{"name":"b.pdf","mime_type":"application/pdf","size":2,"downloaded":true},'
+            '{"name":"c.pdf","mime_type":"application/pdf","size":3,"downloaded":true}]',
+            "3",
+        ]
 
         result = connector.save_attachments(
             message_id="12345",
@@ -196,3 +206,83 @@ class TestAttachmentSecurity:
         # Preserve safe names
         assert sanitize_filename("document.pdf") == "document.pdf"
         assert sanitize_filename("my-file_v2.txt") == "my-file_v2.txt"
+
+
+class TestSaveAttachmentsPathTraversal:
+    """save_attachments must not let an attacker-controlled attachment
+    filename (``name of att`` — set by whoever sent the email) escape the
+    chosen save directory. Path traversal here is an arbitrary file write."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    def test_compute_targets_sanitizes_traversal_name(self, tmp_path: Path) -> None:
+        from apple_mail_mcp.mail_connector import _compute_attachment_save_targets
+
+        names = ["../../../../tmp/evil.sh", "report.pdf"]
+        targets = _compute_attachment_save_targets(names, tmp_path.resolve(), None)
+
+        # Every target stays strictly within the save directory.
+        for _, p in targets:
+            assert p.resolve().is_relative_to(tmp_path.resolve())
+            assert p.resolve() != tmp_path.resolve()
+        # The traversal name is reduced to a safe basename.
+        assert targets[0][1].name == "evil.sh"
+        # AppleScript indices are 1-based and preserve order.
+        assert [i for i, _ in targets] == [1, 2]
+
+    def test_compute_targets_absolute_name_contained(self, tmp_path: Path) -> None:
+        from apple_mail_mcp.mail_connector import _compute_attachment_save_targets
+
+        targets = _compute_attachment_save_targets(
+            ["/etc/cron.d/evil"], tmp_path.resolve(), None
+        )
+        assert len(targets) == 1
+        assert targets[0][1].resolve().is_relative_to(tmp_path.resolve())
+        assert targets[0][1].name == "evil"
+
+    def test_compute_targets_dedupes_collisions(self, tmp_path: Path) -> None:
+        from apple_mail_mcp.mail_connector import _compute_attachment_save_targets
+
+        # Two names that sanitize to the same basename must not collapse to
+        # one path (which would silently overwrite/lose an attachment).
+        targets = _compute_attachment_save_targets(
+            ["a/report.pdf", "b/report.pdf"], tmp_path.resolve(), None
+        )
+        paths = {str(p) for _, p in targets}
+        assert len(paths) == 2
+
+    def test_compute_targets_respects_indices(self, tmp_path: Path) -> None:
+        from apple_mail_mcp.mail_connector import _compute_attachment_save_targets
+
+        targets = _compute_attachment_save_targets(
+            ["a.pdf", "b.pdf", "c.pdf"], tmp_path.resolve(), [0, 2]
+        )
+        assert [i for i, _ in targets] == [1, 3]
+        assert [p.name for _, p in targets] == ["a.pdf", "c.pdf"]
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_save_does_not_concatenate_raw_name(
+        self, mock_run: MagicMock, connector: AppleMailConnector, tmp_path: Path
+    ) -> None:
+        # First call enumerates attachments (returns a malicious name);
+        # the second call saves to the precomputed, sanitized paths.
+        mock_run.side_effect = [
+            '[{"name":"../../../../tmp/evil.sh","mime_type":"x",'
+            '"size":1,"downloaded":true}]',
+            "1",
+        ]
+        result = connector.save_attachments(message_id="123", save_directory=tmp_path)
+
+        assert result == 1
+        save_script = mock_run.call_args_list[-1][0][0]
+        # The vulnerable runtime path concatenation must be gone.
+        assert "& attName" not in save_script
+        assert "name of att" not in save_script
+        # Saves target a Python-sanitized POSIX path under the chosen dir.
+        assert "POSIX file" in save_script
+        assert str(tmp_path) in save_script
+        # No traversal sequence survives into the script.
+        assert "/tmp/evil.sh" not in save_script
+        assert ".." not in save_script
