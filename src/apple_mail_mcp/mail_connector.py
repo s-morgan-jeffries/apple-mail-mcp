@@ -74,17 +74,53 @@ def _now() -> _datetime:
     return _datetime.now().astimezone()
 
 
+def _construct_as_date_var(var: str, year: int, month: int, day: int) -> str:
+    """Emit AppleScript that constructs an AS date object at midnight (local
+    time) on the given (year, month, day).
+
+    Why this exists: AppleScript's `date "YYYY-MM-DD"` literal does NOT
+    parse ISO dates — `date "2026-05-28"` evaluates to year-12196, silently
+    breaking any filter that depends on it. The property-setter pattern
+    below is locale-independent and gives exactly midnight on the target
+    date.
+
+    The leading `set day of var to 1` is a defense against current-date
+    quirks: if `current date` is e.g. 2026-01-31 and we immediately
+    `set month of var to 2`, AppleScript would try to roll into Feb 31 and
+    misbehave. Resetting day to 1 first, then year/month/day in that
+    order, avoids all such edge cases. (#242)
+    """
+    indent = "\n            "
+    return indent.join([
+        f"set {var} to current date",
+        f"set day of {var} to 1",
+        f"set year of {var} to {year}",
+        f"set month of {var} to {month}",
+        f"set day of {var} to {day}",
+        f"set time of {var} to 0",
+    ])
+
+
 def _build_date_filter_clauses(
     date_from: str | None,
     date_to: str | None,
-    received_within_hours: int | None,
-) -> list[str]:
-    """Build the date-related AppleScript IF clauses for the search loop.
+) -> tuple[str, list[str]]:
+    """Build `(preamble, in_loop_clauses)` for the `date_from`/`date_to`
+    AppleScript filters.
 
-    Extracted from `_search_messages_applescript` to keep that function
-    under the cyclomatic-complexity ceiling. All three date filters
-    compose by intersection (any matching clause skips the message).
+    The preamble constructs AS date objects via property setters and
+    assigns them to `dateFromVar` / `dateToExclVar`. The loop clauses
+    reference those variables (cheap comparison per message, no per-iter
+    re-parsing of an ISO string).
+
+    Both filters compose by intersection (any matching clause skips the
+    message). Returns `("", [])` when neither bound is set.
+
+    Note: the `received_within_hours` filter is NOT handled here — it's a
+    short-circuit that lives outside the per-message filter block. See
+    `_build_received_within_hours_short_circuit`.
     """
+    preamble_parts: list[str] = []
     clauses: list[str] = []
 
     if date_from is not None:
@@ -92,9 +128,12 @@ def _build_date_filter_clauses(
             raise ValueError(
                 f"date_from must be ISO 8601 YYYY-MM-DD, got: {date_from!r}"
             )
+        d = _date.fromisoformat(date_from)
+        preamble_parts.append(
+            _construct_as_date_var("dateFromVar", d.year, d.month, d.day)
+        )
         clauses.append(
-            f'if (date received of msg) < (date "{date_from}") '
-            f'then set includeThis to false'
+            "if (date received of msg) < dateFromVar then set includeThis to false"
         )
 
     if date_to is not None:
@@ -104,29 +143,56 @@ def _build_date_filter_clauses(
             )
         # Upper bound is exclusive of the day AFTER date_to, so the full
         # day of date_to is included.
-        next_day = (
-            _date.fromisoformat(date_to) + _timedelta(days=1)
-        ).isoformat()
-        clauses.append(
-            f'if (date received of msg) >= (date "{next_day}") '
-            f'then set includeThis to false'
-        )
-
-    if received_within_hours is not None:
-        if not isinstance(received_within_hours, int) or received_within_hours <= 0:
-            raise ValueError(
-                f"received_within_hours must be > 0, got: {received_within_hours!r}"
+        excl = _date.fromisoformat(date_to) + _timedelta(days=1)
+        preamble_parts.append(
+            _construct_as_date_var(
+                "dateToExclVar", excl.year, excl.month, excl.day
             )
-        # Hour-precise filter: Mail.app computes the cutoff against its
-        # own wall clock at script-eval time. No Python timezone math
-        # needed on this path. (#230)
+        )
         clauses.append(
-            f'if (date received of msg) < ((current date) - '
-            f'({received_within_hours} * hours)) '
-            f'then set includeThis to false'
+            "if (date received of msg) >= dateToExclVar then set includeThis to false"
         )
 
-    return clauses
+    preamble = "\n            ".join(preamble_parts) if preamble_parts else ""
+    return preamble, clauses
+
+
+def _build_received_within_hours_short_circuit(
+    received_within_hours: int | None,
+) -> tuple[str, str]:
+    """Build the AS preamble + exit-clause for `received_within_hours`.
+
+    Returns ``(preamble, exit_clause)``:
+
+    - ``preamble`` is spliced ABOVE the search loop. It hoists the cutoff
+      out of the per-iteration cost: ``set cutoffDate to (current date) -
+      (N * hours)`` (computed once, not per message).
+    - ``exit_clause`` is spliced INTO the loop body, before the per-message
+      filter block. It uses ``exit repeat`` rather than the standard
+      ``set includeThis to false`` skip. That short-circuit is **only sound
+      under newest-first iteration** (#242): once a message has
+      `date received < cutoff`, every subsequent message in the loop is
+      also older than the cutoff, so we can bail out of the entire scan.
+      With the previous oldest-first iteration this `exit repeat` would
+      have terminated immediately on the first (oldest) message and
+      returned nothing.
+
+    Both strings are empty when ``received_within_hours`` is None — splicing
+    them in is a no-op at script generation.
+    """
+    if received_within_hours is None:
+        return "", ""
+    if not isinstance(received_within_hours, int) or received_within_hours <= 0:
+        raise ValueError(
+            f"received_within_hours must be > 0, got: {received_within_hours!r}"
+        )
+    preamble = (
+        f"set cutoffDate to (current date) - ({received_within_hours} * hours)"
+    )
+    exit_clause = (
+        "if (date received of msg) < cutoffDate then exit repeat"
+    )
+    return preamble, exit_clause
 
 
 def _compute_attachment_save_targets(
@@ -1508,8 +1574,22 @@ class AppleMailConnector:
                 f'then set includeThis to false'
             )
 
-        filter_checks.extend(
-            _build_date_filter_clauses(date_from, date_to, received_within_hours)
+        date_preamble, date_filter_clauses = _build_date_filter_clauses(
+            date_from, date_to
+        )
+        filter_checks.extend(date_filter_clauses)
+
+        # `received_within_hours` is handled OUTSIDE the per-message filter
+        # block (#242): a `set cutoffDate to ...` preamble is hoisted above
+        # the loop (computed once, not per message), and an `if ... then
+        # exit repeat` short-circuit is spliced into the loop body before
+        # the filter block. This is sound only because the loop iterates
+        # newest-first (see the `repeat with i from 1 to total` comment
+        # below) — once a message has date < cutoff, every subsequent
+        # iteration's message is also < cutoff, so we can bail out of the
+        # entire scan.
+        cutoff_preamble, cutoff_exit_clause = (
+            _build_received_within_hours_short_circuit(received_within_hours)
         )
 
         if has_attachment is True:
@@ -1552,9 +1632,12 @@ class AppleMailConnector:
         # Render filter checks each on their own line, indented for the loop.
         filter_block = "\n                ".join(filter_checks) if filter_checks else ""
 
-        # Per-match limit short-circuits the loop. With no limit, we collect
-        # everything (newest-first) — same observable behavior as before
-        # except for ordering (was oldest-first).
+        # Per-match limit short-circuits the loop once enough hits accrue.
+        # Iteration is newest-first (#242): Mail.app exposes `item 1 of
+        # msgs` as the newest message and `item total of msgs` as the
+        # oldest, so the `repeat with i from 1 to total` form below visits
+        # newest first and naturally bounds the scan to ~limit iterations
+        # for limit-bounded queries.
         effective_limit = str(limit) if limit else "999999999"
 
         if include_attachments:
@@ -1575,12 +1658,15 @@ class AppleMailConnector:
             set mailboxRef to mailbox "{mailbox_safe}" of accountRef
             set msgs to messages of mailboxRef
             set total to count of msgs
+            {date_preamble}
+            {cutoff_preamble}
 
             set resultData to {{}}
             set matchCount to 0
-            repeat with i from total to 1 by -1
+            repeat with i from 1 to total
                 if matchCount >= {effective_limit} then exit repeat
                 set msg to item i of msgs
+                {cutoff_exit_clause}
                 set includeThis to true
                 {filter_block}
                 if includeThis then{attachments_clause}

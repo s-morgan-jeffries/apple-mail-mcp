@@ -3125,10 +3125,11 @@ class TestAppleMailConnector:
 
         Per #32, filters are now applied as per-message IF expressions
         instead of a `whose` clause — `whose` is unusably slow against
-        large IMAP mailboxes (>120s timeout on 8000+ messages). The new
-        pattern iterates messages in reverse (newest-first) and checks
-        each filter against the message; the script short-circuits when
-        matchCount reaches the limit.
+        large IMAP mailboxes (>120s timeout on 8000+ messages). The
+        pattern iterates messages newest-first (Mail.app exposes
+        `item 1 of msgs` as the newest, per #242) and checks each filter
+        against the message; the script short-circuits when matchCount
+        reaches the limit.
         """
         mock_run.return_value = "[]"
 
@@ -3161,8 +3162,10 @@ class TestAppleMailConnector:
         # Limit is enforced by accumulating matches and exiting the repeat
         # when matchCount reaches the bound.
         assert "if matchCount >= 10 then exit repeat" in call_args
-        # Reverse iteration (newest first).
-        assert "repeat with i from total to 1 by -1" in call_args
+        # Newest-first iteration: item 1 of msgs is the newest (per #242).
+        assert "repeat with i from 1 to total" in call_args
+        # Guard against regression to the old reverse-index pattern.
+        assert "repeat with i from total to 1 by -1" not in call_args
         # No `whose` clause anywhere.
         assert "whose" not in call_args
 
@@ -3223,23 +3226,44 @@ class TestAppleMailConnector:
     def test_search_messages_date_range_filter(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """date_from/date_to are applied via inverted IF expressions inside the loop."""
+        """date_from/date_to are constructed as AppleScript date objects via
+        property setters in a preamble above the loop, then referenced as
+        variables in IF expressions inside the loop. (#242)
+
+        The `date "YYYY-MM-DD"` literal form does NOT work in AppleScript —
+        it parses 2026-05-28 as arithmetic and yields year-12196, silently
+        filtering out every real-world message. The construction pattern is
+        locale-independent and gives exactly midnight local time on the
+        target date.
+        """
         mock_run.return_value = "[]"
         connector._search_messages_applescript(
             "Gmail", "INBOX", date_from="2026-04-01", date_to="2026-04-15"
         )
         script = mock_run.call_args[0][0]
-        # The IF expressions are the inverse of the inclusion condition: skip if BEFORE
-        # date_from, skip if ON-OR-AFTER date_to+1.
+        # Preamble: construct dateFromVar via property setters.
+        assert "set dateFromVar to current date" in script
+        assert "set year of dateFromVar to 2026" in script
+        assert "set month of dateFromVar to 4" in script
+        assert "set day of dateFromVar to 1" in script
+        # Preamble: construct dateToExclVar at the day AFTER date_to (exclusive
+        # upper bound so the full date_to day is inclusive).
+        assert "set dateToExclVar to current date" in script
+        assert "set year of dateToExclVar to 2026" in script
+        assert "set month of dateToExclVar to 4" in script
+        assert "set day of dateToExclVar to 16" in script
+        # In-loop clauses reference the variables.
         assert (
-            'if (date received of msg) < (date "2026-04-01") then set includeThis to false'
+            "if (date received of msg) < dateFromVar then set includeThis to false"
             in script
         )
-        # date_to gets +1 day so the full day is inclusive
         assert (
-            'if (date received of msg) >= (date "2026-04-16") then set includeThis to false'
+            "if (date received of msg) >= dateToExclVar then set includeThis to false"
             in script
         )
+        # Guard against regression to the broken date literal form.
+        assert 'date "2026-04-01"' not in script
+        assert 'date "2026-04-16"' not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_search_messages_rejects_malformed_date_from(
@@ -5968,11 +5992,13 @@ class TestReceivedWithinHours:
     """
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_applescript_emits_relative_hours_clause(
+    def test_applescript_emits_relative_hours_short_circuit(
         self, mock_run: MagicMock
     ) -> None:
-        """AS path should embed `(current date) - (N * hours)` directly so
-        Mail.app does the hour-precise comparison server-side."""
+        """AS path hoists the cutoff out of the loop AND uses `exit repeat`
+        instead of a filter-skip. With newest-first iteration (#242), once a
+        message is older than the cutoff, every subsequent iteration would
+        also be older — so we exit the loop entirely instead of skipping."""
         from apple_mail_mcp.mail_connector import AppleMailConnector
         connector = AppleMailConnector()
         mock_run.return_value = "[]"
@@ -5980,10 +6006,18 @@ class TestReceivedWithinHours:
             "Gmail", "INBOX", received_within_hours=6
         )
         script = mock_run.call_args[0][0]
+        # Hoisted cutoff: computed once before the loop.
+        assert "set cutoffDate to (current date) - (6 * hours)" in script
+        # Short-circuit: exit the loop on the first message older than cutoff.
+        assert (
+            "if (date received of msg) < cutoffDate then exit repeat"
+        ) in script
+        # Guard: the old per-iteration inline form must NOT appear in the
+        # filter block — that pattern was the performance bug fixed by #242.
         assert (
             "if (date received of msg) < ((current date) - (6 * hours)) "
             "then set includeThis to false"
-        ) in script
+        ) not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_applescript_rejects_zero_hours(
