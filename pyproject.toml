@@ -59,9 +59,9 @@ dev = [
 apple-mail-mcp = "apple_mail_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/morgancoopercom/apple-mail-mcp"
-Repository = "https://github.com/morgancoopercom/apple-mail-mcp"
-Issues = "https://github.com/morgancoopercom/apple-mail-mcp/issues"
+Homepage = "https://github.com/s-morgan-jeffries/apple-mail-mcp"
+Repository = "https://github.com/s-morgan-jeffries/apple-mail-mcp"
+Issues = "https://github.com/s-morgan-jeffries/apple-mail-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/apple_mail_mcp"]

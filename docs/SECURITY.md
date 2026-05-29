@@ -486,6 +486,6 @@ Security fixes are released as soon as possible:
 
 If you have security questions or concerns:
 
-- **General**: [GitHub Discussions](https://github.com/morgancoopercom/apple-mail-mcp/discussions)
+- **General**: [GitHub Discussions](https://github.com/s-morgan-jeffries/apple-mail-mcp/discussions)
 - **Vulnerabilities**: security@[domain] (private)
-- **Best Practices**: [GitHub Issues](https://github.com/morgancoopercom/apple-mail-mcp/issues)
+- **Best Practices**: [GitHub Issues](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues)

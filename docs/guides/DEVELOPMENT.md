@@ -21,7 +21,7 @@ pip install apple-mail-mcp
 
 ```bash
 # Clone the repository
-git clone https://github.com/morgancoopercom/apple-mail-mcp.git
+git clone https://github.com/s-morgan-jeffries/apple-mail-mcp.git
 cd apple-mail-mcp
 
 # Create virtual environment
@@ -209,6 +209,6 @@ python -m apple_mail_mcp.server
 
 ## Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/morgancoopercom/apple-mail-mcp/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/morgancoopercom/apple-mail-mcp/discussions)
+- **Issues**: [GitHub Issues](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/s-morgan-jeffries/apple-mail-mcp/discussions)
 - **Documentation**: [Full Documentation](../README.md)
