@@ -335,7 +335,85 @@ _RULE_OPERATOR_MAP = {
 }
 
 
-def _wrap_as_json_script(body: str, *, timeout: int) -> str:
+# Shared AppleScript handlers for mailbox lookup (#247).
+#
+# Mail.app's `mailboxes of account` returns a FLAT list of every mailbox
+# belonging to the account — each one has a leaf `name` (no slash separators)
+# and a `container` reference (a mailbox, a container class, or
+# `missing value` at the top). Direct reference (`mailbox "X" of acctRef`)
+# only resolves canonical mailboxes like INBOX and Mail.app system names;
+# Gmail custom labels, nested folders, and most user-created hierarchies
+# return error -1728. The reliable resolution pattern is:
+#
+#   1. Iterate `mailboxes of acctRef` once.
+#   2. For each candidate, build its full slash-separated path via the
+#      container chain (`buildMailboxPath`).
+#   3. Match either by leaf `name` (single-component input) or by computed
+#      full path (slash-bearing input).
+#
+# The class check on `container` accepts both `mailbox` and `container`
+# (Gmail's [Gmail] folder is `container` class, not `mailbox`) and stops
+# at the account boundary so paths don't include the account name.
+#
+# Empirically verified against a real Gmail account: this handler resolves
+# Gmail's `Important` label (30k messages, previously unreachable via
+# direct reference) and the full path `[Gmail]/Important` to the same
+# mailbox.
+_MAILBOX_RESOLVER_HANDLERS = '''using terms from application "Mail"
+    on buildMailboxPath(mb)
+        set parts to {name of mb}
+        set current to mb
+        repeat
+            try
+                set parentRef to container of current
+                if parentRef is missing value then exit repeat
+                set parentClass to class of parentRef
+                if parentClass is not mailbox and parentClass is not container then exit repeat
+                set parts to {(name of parentRef)} & parts
+                set current to parentRef
+            on error
+                exit repeat
+            end try
+        end repeat
+        set tid to AppleScript's text item delimiters
+        set AppleScript's text item delimiters to "/"
+        set fullPath to parts as text
+        set AppleScript's text item delimiters to tid
+        return fullPath
+    end buildMailboxPath
+
+    on resolveMailbox(acctRef, targetPath)
+        if targetPath is "" then error "mailbox path is empty"
+        set hasSlash to (targetPath contains "/")
+        repeat with mb in (mailboxes of acctRef)
+            if hasSlash then
+                if my buildMailboxPath(mb) is targetPath then return mb
+            else
+                if (name of mb) is targetPath then return mb
+            end if
+        end repeat
+        error "mailbox not found: " & targetPath
+    end resolveMailbox
+
+    on collectMailboxesWithPaths(acctRef)
+        set results to {}
+        repeat with mb in (mailboxes of acctRef)
+            set mbName to name of mb
+            set mbPath to my buildMailboxPath(mb)
+            set mbUnread to unread count of mb
+            if mbUnread is missing value then set mbUnread to 0
+            set rec to {|name|:mbName, |path|:mbPath, |unread_count|:mbUnread}
+            set end of results to rec
+        end repeat
+        return results
+    end collectMailboxesWithPaths
+end using terms from
+'''
+
+
+def _wrap_as_json_script(
+    body: str, *, timeout: int, handlers: str = ""
+) -> str:
     """Wrap a tell-block body with ASObjC imports and an NSJSONSerialization return.
 
     The `body` must:
@@ -351,6 +429,10 @@ def _wrap_as_json_script(body: str, *, timeout: int) -> str:
 
     The wrapper:
       - Prepends `use framework "Foundation"` and `use scripting additions`.
+      - Optionally inserts top-level `handlers` (e.g. ``_MAILBOX_RESOLVER_HANDLERS``)
+        between the `use` statements and the `with timeout` block. Handlers
+        must be defined at script top level (outside any `tell` block) so
+        the body inside the tell can call them with ``my handlerName(...)``.
       - Wraps the body in `with timeout of {timeout} seconds ... end timeout`
         so Mail's default 60 s AppleEvent timeout does not fire before the
         connector's subprocess timeout — see issue #227. Without this,
@@ -368,14 +450,18 @@ def _wrap_as_json_script(body: str, *, timeout: int) -> str:
         timeout: AppleEvent timeout in seconds for the wrapped tell block.
             Callers should pass ``self.timeout`` so the in-script timeout
             matches the subprocess-level kill timer.
+        handlers: Optional AppleScript handler block to inject at script
+            top level (before `with timeout`). Empty string = no handlers.
 
     Returns:
         Full AppleScript source ready for osascript.
     """
+    handlers_block = f"{handlers}\n" if handlers else ""
     return (
         'use framework "Foundation"\n'
         "use scripting additions\n"
         "\n"
+        f"{handlers_block}"
         f"with timeout of {timeout} seconds\n"
         f"{body}\n"
         "end timeout\n"
@@ -433,7 +519,7 @@ def _bulk_repeat_block(
         account_clause = applescript_account_clause(account)
         mb_safe = escape_applescript_string(sanitize_input(source_mailbox))
         return (
-            f'            set sourceMb to mailbox "{mb_safe}" of {account_clause}\n'
+            f'            set sourceMb to my resolveMailbox({account_clause}, "{mb_safe}")\n'
             f"            repeat with msgId in idList\n"
             f"                try\n"
             f"                    set msg to first message of sourceMb whose id is msgId\n"
@@ -865,8 +951,8 @@ class AppleMailConnector:
             )
             lines.append("set should move message of newRule to true")
             lines.append(
-                f'set move message of newRule to mailbox "{mb_safe}" '
-                f"of {acct_clause}"
+                f"set move message of newRule to "
+                f'(my resolveMailbox({acct_clause}, "{mb_safe}"))'
             )
         if actions.get("copy_to"):
             mb_safe = escape_applescript_string(
@@ -877,8 +963,8 @@ class AppleMailConnector:
             )
             lines.append("set should copy message of newRule to true")
             lines.append(
-                f'set copy message of newRule to mailbox "{mb_safe}" '
-                f"of {acct_clause}"
+                f"set copy message of newRule to "
+                f'(my resolveMailbox({acct_clause}, "{mb_safe}"))'
             )
         if actions.get("mark_read"):
             lines.append("set mark read of newRule to true")
@@ -976,7 +1062,10 @@ class AppleMailConnector:
             f"set enabled of newRule to {enabled_str}\n"
             f"return (count of rules) as text"
         )
-        script = f'tell application "Mail"\n{body}\nend tell'
+        script = (
+            f'{_MAILBOX_RESOLVER_HANDLERS}'
+            f'tell application "Mail"\n{body}\nend tell'
+        )
         return int(self._run_applescript(script))
 
     def update_rule(
@@ -1090,6 +1179,7 @@ class AppleMailConnector:
             # Only the rule lookup, no actual updates — caller passed nothing.
             return
         script = (
+            f"{_MAILBOX_RESOLVER_HANDLERS}"
             'tell application "Mail"\n'
             + "\n".join(body_parts)
             + "\nend tell"
@@ -1183,10 +1273,21 @@ class AppleMailConnector:
         """List all mailboxes for an account.
 
         Args:
-            account: Account name.
+            account: Account name (or UUID).
 
         Returns:
-            List of dicts with keys: name, unread_count.
+            List of dicts with keys ``name`` (leaf), ``path`` (full
+            slash-separated path from account root — usable directly in
+            ``search_messages.mailbox`` / ``move_messages.destination_mailbox``
+            for nested addressing), and ``unread_count``.
+
+            Mail.app exposes mailboxes as a flat list with leaf names; the
+            ``path`` field is computed by walking each mailbox's container
+            chain (see ``_MAILBOX_RESOLVER_HANDLERS``). For top-level
+            mailboxes, ``name == path``. For nested mailboxes (Gmail labels
+            under ``[Gmail]``, user-created folder hierarchies, etc.) the
+            two differ — ``path`` is what ``resolveMailbox`` matches against
+            for unambiguous addressing.
 
         Raises:
             MailAccountNotFoundError: If account doesn't exist.
@@ -1196,18 +1297,15 @@ class AppleMailConnector:
         tell_body = f'''
         tell application "Mail"
             set accountRef to {account_clause}
-            set resultData to {{}}
-
-            repeat with mb in mailboxes of accountRef
-                set mbUnread to unread count of mb
-                if mbUnread is missing value then set mbUnread to 0
-                set mbRecord to {{|name|:(name of mb), |unread_count|:mbUnread}}
-                set end of resultData to mbRecord
-            end repeat
+            set resultData to my collectMailboxesWithPaths(accountRef)
         end tell
         '''
 
-        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
+        script = _wrap_as_json_script(
+            tell_body,
+            timeout=self.timeout,
+            handlers=_MAILBOX_RESOLVER_HANDLERS,
+        )
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
@@ -1655,7 +1753,7 @@ class AppleMailConnector:
         tell_body = f'''
         tell application "Mail"
             set accountRef to {account_clause}
-            set mailboxRef to mailbox "{mailbox_safe}" of accountRef
+            set mailboxRef to my resolveMailbox(accountRef, "{mailbox_safe}")
             set msgs to messages of mailboxRef
             set total to count of msgs
             {date_preamble}
@@ -1678,7 +1776,11 @@ class AppleMailConnector:
         end tell
         '''
 
-        script = _wrap_as_json_script(tell_body, timeout=self.timeout)
+        script = _wrap_as_json_script(
+            tell_body,
+            timeout=self.timeout,
+            handlers=_MAILBOX_RESOLVER_HANDLERS,
+        )
         result = self._run_applescript(script)
         return cast(list[dict[str, Any]], parse_applescript_json(result))
 
@@ -1902,7 +2004,7 @@ class AppleMailConnector:
             for mid in message_ids
         )
 
-        script = f"""
+        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
         tell application "Mail"
             set idList to {{{id_list}}}
             set updateCount to 0
@@ -2862,10 +2964,10 @@ class AppleMailConnector:
             counter_var="moveCount",
         )
 
-        script = f"""
+        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
         tell application "Mail"
             set accountRef to {account_clause}
-            set destMailbox to mailbox "{mailbox_safe}" of accountRef
+            set destMailbox to my resolveMailbox(accountRef, "{mailbox_safe}")
             set idList to {{{id_list}}}
             set moveCount to 0
 
@@ -2930,7 +3032,7 @@ class AppleMailConnector:
             counter_var="flagCount",
         )
 
-        script = f"""
+        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
         tell application "Mail"
             set idList to {{{id_list}}}
             set flagCount to 0
@@ -3075,10 +3177,10 @@ class AppleMailConnector:
             mb_safe = escape_applescript_string(sanitize_input(destination_mailbox))
             dest_setup = (
                 f'set accountRef to {account_clause}\n'
-                f'            set destMailbox to mailbox "{mb_safe}" of accountRef'
+                f'            set destMailbox to my resolveMailbox(accountRef, "{mb_safe}")'
             )
 
-        script = f"""
+        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
         tell application "Mail"
             {dest_setup}
             set idList to {{{id_list}}}
@@ -3171,11 +3273,11 @@ class AppleMailConnector:
             name_safe = escape_applescript_string(sanitize_input(name))
             new_name_safe = escape_applescript_string(sanitized_new_name)
 
-            script = f"""
+            script = f"""{_MAILBOX_RESOLVER_HANDLERS}
             tell application "Mail"
                 set accountRef to {account_clause}
                 try
-                    set mb to mailbox "{name_safe}" of accountRef
+                    set mb to my resolveMailbox(accountRef, "{name_safe}")
                 on error
                     error "MAILBOX_NOT_FOUND"
                 end try
@@ -3340,10 +3442,10 @@ class AppleMailConnector:
 
         if parent_mailbox:
             parent_safe = escape_applescript_string(sanitize_input(parent_mailbox))
-            script = f"""
+            script = f"""{_MAILBOX_RESOLVER_HANDLERS}
             tell application "Mail"
                 set accountRef to {account_clause}
-                set parentMailbox to mailbox "{parent_safe}" of accountRef
+                set parentMailbox to my resolveMailbox(accountRef, "{parent_safe}")
                 make new mailbox at parentMailbox with properties {{name:"{name_safe}"}}
                 return "success"
             end tell
@@ -3448,7 +3550,7 @@ class AppleMailConnector:
             counter_var="deleteCount",
         )
 
-        script = f"""
+        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
         tell application "Mail"
             set idList to {{{id_list}}}
             set deleteCount to 0

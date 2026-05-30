@@ -285,6 +285,8 @@ List all mailboxes (folders) for a specific account.
 
 **Returns:**
 
+Each mailbox includes both `name` (leaf only) and `path` (full slash-separated path from the account root). For top-level mailboxes `name == path`; for nested mailboxes (Gmail labels under `[Gmail]`, custom folder hierarchies, etc.) the two differ. The `path` field is what `search_messages.mailbox` and `move_messages.destination_mailbox` accept for unambiguous addressing of nested or custom-label mailboxes; the leaf `name` works whenever it's unique.
+
 ```json
 {
   "success": true,
@@ -292,14 +294,17 @@ List all mailboxes (folders) for a specific account.
   "mailboxes": [
     {
       "name": "INBOX",
+      "path": "INBOX",
       "unread_count": 5
     },
     {
-      "name": "Sent",
-      "unread_count": 0
+      "name": "Important",
+      "path": "[Gmail]/Important",
+      "unread_count": 267
     },
     {
       "name": "Archive",
+      "path": "Archive",
       "unread_count": 2
     }
   ]

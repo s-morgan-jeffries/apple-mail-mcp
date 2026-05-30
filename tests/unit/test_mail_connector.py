@@ -510,10 +510,16 @@ class TestAppleMailConnector:
         )
         script = mock_run.call_args[0][0]
         assert "set should move message of newRule to true" in script
+        # #247: mailbox lookup now uses the resolveMailbox handler (which
+        # iterates by name/path, robust against Gmail labels and nested
+        # paths). Old direct-reference form `mailbox "X" of account "Y"`
+        # silently failed for custom Gmail labels.
         assert (
-            'set move message of newRule to mailbox "Archive" of '
-            'account "Gmail"' in script
+            'set move message of newRule to '
+            '(my resolveMailbox(account "Gmail", "Archive"))' in script
         )
+        # Guard against regression to the broken direct-reference form.
+        assert 'mailbox "Archive" of account "Gmail"' not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_create_rule_mark_flagged_with_color_sets_flag_index(
@@ -833,11 +839,21 @@ class TestAppleMailConnector:
     def test_list_mailboxes_script_quotes_name_key(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """The AppleScript must use |name| so NSJSONSerialization preserves it."""
+        """The AppleScript must use |name| so NSJSONSerialization preserves it.
+
+        Post-#247: the record construction now lives in the
+        `collectMailboxesWithPaths` handler (which also emits the new
+        `path` field).
+        """
         mock_run.return_value = "[]"
         connector.list_mailboxes("Gmail")
         script = mock_run.call_args[0][0]
-        assert "|name|:(name of mb)" in script
+        # The handler emits records with |name|, |path|, and |unread_count|.
+        assert "|name|:mbName" in script
+        assert "|path|:mbPath" in script
+        assert "|unread_count|:mbUnread" in script
+        # Caller invokes the handler with the resolved account.
+        assert "my collectMailboxesWithPaths(accountRef)" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_list_mailboxes_with_name_uses_account_clause(
@@ -4322,12 +4338,12 @@ class TestBulkOpsSourceMailbox:
             ["abc", "def"], account="Gmail", source_mailbox="INBOX"
         )
         script = mock_run.call_args[0][0]
-        # Narrow scope: single mailbox of a specific account.
-        assert 'mailbox "INBOX" of' in script
-        assert 'account "Gmail"' in script
-        # Cross-scan loops MUST be gone.
+        # Narrow scope: resolveMailbox lookup against the specified account (#247).
+        assert (
+            'set sourceMb to my resolveMailbox(account "Gmail", "INBOX")' in script
+        )
+        # Cross-scan path's signature loop MUST be gone.
         assert "repeat with acc in accounts" not in script
-        assert "repeat with mb in mailboxes" not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_mark_as_read_no_params_keeps_cross_scan_path(
@@ -4370,11 +4386,14 @@ class TestBulkOpsSourceMailbox:
             source_mailbox="INBOX",
         )
         script = mock_run.call_args[0][0]
-        # Source narrowed to a single mailbox; destination unchanged.
-        assert 'mailbox "INBOX" of' in script
-        assert 'mailbox "Archive" of' in script  # destination still set
+        # Source + destination both go through resolveMailbox (#247).
+        assert (
+            'set sourceMb to my resolveMailbox(account "Gmail", "INBOX")' in script
+        )
+        assert (
+            'set destMailbox to my resolveMailbox(accountRef, "Archive")' in script
+        )
         assert "repeat with acc in accounts" not in script
-        assert "repeat with mb in mailboxes" not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_move_messages_narrow_path_gmail_branch(
@@ -4389,7 +4408,14 @@ class TestBulkOpsSourceMailbox:
             source_mailbox="INBOX",
         )
         script = mock_run.call_args[0][0]
-        assert 'mailbox "INBOX" of' in script
+        # Source lookup via resolveMailbox; nested path destination passed as-is.
+        assert (
+            'set sourceMb to my resolveMailbox(account "Gmail", "INBOX")' in script
+        )
+        assert (
+            'set destMailbox to my resolveMailbox(accountRef, "[Gmail]/All Mail")'
+            in script
+        )
         # Gmail-mode body: duplicate + delete instead of set mailbox
         assert "duplicate msg to destMailbox" in script
         assert "delete msg" in script
@@ -4418,7 +4444,9 @@ class TestBulkOpsSourceMailbox:
             ["abc"], "red", account="iCloud", source_mailbox="Archive"
         )
         script = mock_run.call_args[0][0]
-        assert 'mailbox "Archive" of' in script
+        assert (
+            'set sourceMb to my resolveMailbox(account "iCloud", "Archive")' in script
+        )
         assert "set flag index of msg to" in script
         assert "set flagged status of msg to" in script
         assert "repeat with acc in accounts" not in script
@@ -4444,7 +4472,9 @@ class TestBulkOpsSourceMailbox:
             ["abc"], account="iCloud", source_mailbox="Trash"
         )
         script = mock_run.call_args[0][0]
-        assert 'mailbox "Trash" of' in script
+        assert (
+            'set sourceMb to my resolveMailbox(account "iCloud", "Trash")' in script
+        )
         assert "delete msg" in script
         assert "repeat with acc in accounts" not in script
 
@@ -4468,7 +4498,9 @@ class TestBulkOpsSourceMailbox:
         # Script shape unchanged from the non-permanent path: `delete msg`
         # always moves to the account's Trash mailbox today.
         script = mock_run.call_args[0][0]
-        assert 'mailbox "Junk" of' in script
+        assert (
+            'set sourceMb to my resolveMailbox(account "iCloud", "Junk")' in script
+        )
         assert "delete msg" in script
         assert "repeat with acc in accounts" not in script
 
@@ -5532,20 +5564,23 @@ class TestUpdateMailbox:
         )
         script = mock_run.call_args[0][0]
         assert 'set name of mb to "New"' in script
-        assert 'mailbox "Old"' in script
+        # Mailbox lookup uses the resolveMailbox handler (#247).
+        assert 'set mb to my resolveMailbox(accountRef, "Old")' in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_script_handles_nested_path(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        """Slash-separated path passes through to Mail.app's
-        `mailbox "Parent/Child"` form."""
+        """Slash-separated path passes through to the resolveMailbox handler,
+        which walks the container chain to find the nested mailbox (#247)."""
         mock_run.return_value = "success"
         connector.update_mailbox(
             account="Gmail", name="Archive/2024", new_name="Archive2024"
         )
         script = mock_run.call_args[0][0]
-        assert 'mailbox "Archive/2024"' in script
+        assert (
+            'set mb to my resolveMailbox(accountRef, "Archive/2024")' in script
+        )
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_mailbox_not_found_raises(
@@ -6391,3 +6426,103 @@ class TestKeychainDualFormLookup:
         monkeypatch.setattr(c, "list_accounts", lambda: [])
         with pytest.raises(MailKeychainEntryNotFoundError):
             c._get_imap_password_with_fallback("Unknown", "alice@example.com")
+
+
+# =============================================================================
+# Mailbox resolver shape (#247)
+# =============================================================================
+
+
+class TestMailboxResolverShape:
+    """Tests for the shared AS mailbox resolver handlers (#247).
+
+    The resolver replaces direct-reference `mailbox "X" of accountRef`
+    with iterate-and-match logic that handles BOTH (a) Gmail-style custom
+    labels that fail direct reference with error -1728, and (b) nested
+    paths like `[Gmail]/All Mail` that aren't addressable via Mail.app's
+    direct-reference syntax in any form.
+
+    These tests assert on emitted-script shape (the handler block is
+    present and the call sites use `my resolveMailbox(...)` instead of
+    the broken direct-reference form). Behavior-level verification is
+    intentionally done out of band via live probes against a real
+    Gmail account — Mail.app's mailbox class hierarchy (mailbox vs
+    container) is too provider-specific to mock realistically.
+    """
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_search_messages_emits_resolver_handler_block(
+        self, mock_run: MagicMock
+    ) -> None:
+        connector = AppleMailConnector()
+        mock_run.return_value = "[]"
+        connector._search_messages_applescript("Gmail", "Important", limit=5)
+        script = mock_run.call_args[0][0]
+        # Handler declaration is present.
+        assert 'using terms from application "Mail"' in script
+        assert "on resolveMailbox(acctRef, targetPath)" in script
+        assert "on buildMailboxPath(mb)" in script
+        # Call site uses the handler, not the broken direct reference.
+        assert (
+            'set mailboxRef to my resolveMailbox(accountRef, "Important")'
+            in script
+        )
+        assert 'mailbox "Important" of accountRef' not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_mailboxes_uses_collect_handler(
+        self, mock_run: MagicMock
+    ) -> None:
+        connector = AppleMailConnector()
+        mock_run.return_value = "[]"
+        connector.list_mailboxes("Gmail")
+        script = mock_run.call_args[0][0]
+        # Handler declaration is present.
+        assert "on collectMailboxesWithPaths(acctRef)" in script
+        # Call site invokes the handler.
+        assert (
+            "set resultData to my collectMailboxesWithPaths(accountRef)"
+            in script
+        )
+        # Old flat enumeration pattern is gone.
+        assert "repeat with mb in mailboxes of accountRef" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_list_mailboxes_path_field_round_trips(
+        self, mock_run: MagicMock
+    ) -> None:
+        """When the AS handler returns records with name + path, the
+        connector returns them as dicts with both fields preserved."""
+        connector = AppleMailConnector()
+        # Simulate AS output for a nested Gmail label.
+        mock_run.return_value = (
+            '[{"name":"INBOX","path":"INBOX","unread_count":5},'
+            '{"name":"Important","path":"[Gmail]/Important","unread_count":0},'
+            '{"name":"Sent Mail","path":"[Gmail]/Sent Mail","unread_count":0}]'
+        )
+        result = connector.list_mailboxes("Gmail")
+        assert len(result) == 3
+        assert result[0] == {"name": "INBOX", "path": "INBOX", "unread_count": 5}
+        # Nested label: path differs from leaf name.
+        assert result[1]["name"] == "Important"
+        assert result[1]["path"] == "[Gmail]/Important"
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolver_handler_class_check_is_locale_independent(
+        self, mock_run: MagicMock
+    ) -> None:
+        """The buildMailboxPath handler compares parent class against the
+        AS class constants `mailbox` and `container` directly (not as
+        localized text). This is important because `class of X as text`
+        would return a localized string (e.g. 'Postfach' in German)
+        that would silently break path construction outside en-US locales.
+        """
+        connector = AppleMailConnector()
+        mock_run.return_value = "[]"
+        connector.list_mailboxes("Gmail")
+        script = mock_run.call_args[0][0]
+        # Comparison against class constants.
+        assert "is not mailbox" in script
+        assert "is not container" in script
+        # NOT a localized string comparison.
+        assert 'is not "mailbox"' not in script
