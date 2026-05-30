@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
-from apple_mail_mcp.mail_connector import AppleMailConnector
+from apple_mail_mcp.mail_connector import (
+    _MAILBOX_RESOLVER_HANDLERS,
+    AppleMailConnector,
+    _wrap_with_timeout,
+)
 
 # Skip all integration tests by default
 # Run with: pytest --run-integration
@@ -1562,3 +1566,42 @@ class TestFindMessageByMessageIdIntegration:
             pass
         finally:
             connector.delete_draft(draft_id)
+
+
+class TestTimeoutWrappingCompiles:
+    """#233 — the non-JSON mutation paths now prepend top-level handlers and
+    wrap the tell-block in `with timeout … end timeout`. AppleScript forbids
+    handler definitions inside a `with timeout` block, so this structure could
+    only be a compile error or valid — a failure mode that unit tests (which
+    mock subprocess.run) cannot catch. Run the real structure through
+    osascript to prove it compiles and executes.
+    """
+
+    def test_handler_prefixed_timeout_script_executes(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # Mirror the handler-prefixed shape used by mark_as_read / move_messages
+        # / create_rule etc.: handlers OUTSIDE the timeout block, a trivial
+        # tell-block INSIDE. A syntax error (handler inside `with timeout`)
+        # would surface here as a non-zero osascript exit.
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+            'tell application "Mail"\n'
+            "    return (count of accounts) as text\n"
+            "end tell",
+            timeout=connector.timeout,
+        )
+        result = connector._run_applescript(script)
+        assert result.isdigit()
+
+    def test_no_handler_timeout_script_executes(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # Mirror the no-handler shape (set_rule_enabled / save_attachments etc.).
+        script = _wrap_with_timeout(
+            'tell application "Mail"\n'
+            "    return (count of accounts) as text\n"
+            "end tell",
+            timeout=connector.timeout,
+        )
+        result = connector._run_applescript(script)
+        assert result.isdigit()

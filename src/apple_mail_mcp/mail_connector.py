@@ -411,6 +411,31 @@ end using terms from
 '''
 
 
+def _wrap_with_timeout(body: str, *, timeout: int) -> str:
+    """Wrap an AppleScript tell-block in `with timeout … end timeout`.
+
+    Threads the connector's configured timeout into the script so Mail's
+    default 60s AppleEvent timeout does not fire before the subprocess-level
+    kill timer — see issues #227 (JSON paths) and #233 (the non-JSON mutation
+    paths). Without this, server-bound operations on slow accounts (Exchange/
+    EWS) can trip `AppleEvent timed out (-1712)` and the user's
+    ``AppleMailConnector(timeout=N)`` knob silently doesn't apply.
+
+    The `body` must NOT contain top-level `use` statements or handler
+    definitions — AppleScript forbids both inside a `with timeout` block.
+    Keep handlers (e.g. ``_MAILBOX_RESOLVER_HANDLERS``) OUTSIDE this wrapper,
+    prepended to the wrapped result by the caller.
+
+    Args:
+        body: AppleScript source (typically a `tell application "Mail"` block).
+        timeout: AppleEvent timeout in seconds. Callers pass ``self.timeout``.
+
+    Returns:
+        The body wrapped in a `with timeout` block.
+    """
+    return f"with timeout of {timeout} seconds\n{body}\nend timeout\n"
+
+
 def _wrap_as_json_script(
     body: str, *, timeout: int, handlers: str = ""
 ) -> str:
@@ -462,9 +487,7 @@ def _wrap_as_json_script(
         "use scripting additions\n"
         "\n"
         f"{handlers_block}"
-        f"with timeout of {timeout} seconds\n"
-        f"{body}\n"
-        "end timeout\n"
+        f"{_wrap_with_timeout(body, timeout=timeout)}"
         "\n"
         "set jsonData to (current application's NSJSONSerialization's "
         "dataWithJSONObject:resultData options:0 |error|:(missing value))\n"
@@ -859,9 +882,10 @@ class AppleMailConnector:
                 f"rule_index must be 1-based and positive, got {rule_index}"
             )
         enabled_str = "true" if enabled else "false"
-        script = (
+        script = _wrap_with_timeout(
             f'tell application "Mail" to '
-            f"set enabled of rule {rule_index} to {enabled_str}"
+            f"set enabled of rule {rule_index} to {enabled_str}",
+            timeout=self.timeout,
         )
         self._run_applescript(script)
 
@@ -1062,9 +1086,9 @@ class AppleMailConnector:
             f"set enabled of newRule to {enabled_str}\n"
             f"return (count of rules) as text"
         )
-        script = (
-            f'{_MAILBOX_RESOLVER_HANDLERS}'
-            f'tell application "Mail"\n{body}\nend tell'
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}" + _wrap_with_timeout(
+            f'tell application "Mail"\n{body}\nend tell',
+            timeout=self.timeout,
         )
         return int(self._run_applescript(script))
 
@@ -1178,11 +1202,11 @@ class AppleMailConnector:
         if len(body_parts) == 1:
             # Only the rule lookup, no actual updates — caller passed nothing.
             return
-        script = (
-            f"{_MAILBOX_RESOLVER_HANDLERS}"
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}" + _wrap_with_timeout(
             'tell application "Mail"\n'
             + "\n".join(body_parts)
-            + "\nend tell"
+            + "\nend tell",
+            timeout=self.timeout,
         )
         self._run_applescript(script)
 
@@ -1260,12 +1284,13 @@ class AppleMailConnector:
             raise MailRuleNotFoundError(
                 f"rule_index must be 1-based and positive, got {rule_index}"
             )
-        script = (
+        script = _wrap_with_timeout(
             f'tell application "Mail"\n'
             f"    set deletedName to name of rule {rule_index}\n"
             f"    delete rule {rule_index}\n"
             f"    return deletedName\n"
-            f"end tell"
+            f"end tell",
+            timeout=self.timeout,
         )
         return self._run_applescript(script)
 
@@ -2004,16 +2029,17 @@ class AppleMailConnector:
             for mid in message_ids
         )
 
-        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
-        tell application "Mail"
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+            f"""tell application "Mail"
             set idList to {{{id_list}}}
             set updateCount to 0
 
 {repeat_block}
 
             return updateCount
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
@@ -2872,8 +2898,8 @@ class AppleMailConnector:
             f'"{escape_applescript_string(str(path))}"' for _, path in targets
         )
 
-        script = f"""
-        tell application "Mail"
+        script = _wrap_with_timeout(
+            f"""tell application "Mail"
             -- Search all accounts for message
             repeat with acc in accounts
                 repeat with mb in mailboxes of acc
@@ -2899,8 +2925,9 @@ class AppleMailConnector:
             end repeat
 
             error "Message not found"
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
@@ -2964,8 +2991,8 @@ class AppleMailConnector:
             counter_var="moveCount",
         )
 
-        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
-        tell application "Mail"
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+            f"""tell application "Mail"
             set accountRef to {account_clause}
             set destMailbox to my resolveMailbox(accountRef, "{mailbox_safe}")
             set idList to {{{id_list}}}
@@ -2974,8 +3001,9 @@ class AppleMailConnector:
 {repeat_block}
 
             return moveCount
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
@@ -3032,16 +3060,17 @@ class AppleMailConnector:
             counter_var="flagCount",
         )
 
-        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
-        tell application "Mail"
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+            f"""tell application "Mail"
             set idList to {{{id_list}}}
             set flagCount to 0
 
 {repeat_block}
 
             return flagCount
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
@@ -3180,8 +3209,8 @@ class AppleMailConnector:
                 f'            set destMailbox to my resolveMailbox(accountRef, "{mb_safe}")'
             )
 
-        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
-        tell application "Mail"
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+            f"""tell application "Mail"
             {dest_setup}
             set idList to {{{id_list}}}
             set updateCount to 0
@@ -3189,8 +3218,9 @@ class AppleMailConnector:
 {repeat_block}
 
             return updateCount
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
@@ -3273,8 +3303,8 @@ class AppleMailConnector:
             name_safe = escape_applescript_string(sanitize_input(name))
             new_name_safe = escape_applescript_string(sanitized_new_name)
 
-            script = f"""{_MAILBOX_RESOLVER_HANDLERS}
-            tell application "Mail"
+            script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+                f"""tell application "Mail"
                 set accountRef to {account_clause}
                 try
                     set mb to my resolveMailbox(accountRef, "{name_safe}")
@@ -3283,8 +3313,9 @@ class AppleMailConnector:
                 end try
                 set name of mb to "{new_name_safe}"
                 return "success"
-            end tell
-            """
+            end tell""",
+                timeout=self.timeout,
+            )
 
             try:
                 result = self._run_applescript(script)
@@ -3442,22 +3473,24 @@ class AppleMailConnector:
 
         if parent_mailbox:
             parent_safe = escape_applescript_string(sanitize_input(parent_mailbox))
-            script = f"""{_MAILBOX_RESOLVER_HANDLERS}
-            tell application "Mail"
+            script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+                f"""tell application "Mail"
                 set accountRef to {account_clause}
                 set parentMailbox to my resolveMailbox(accountRef, "{parent_safe}")
                 make new mailbox at parentMailbox with properties {{name:"{name_safe}"}}
                 return "success"
-            end tell
-            """
+            end tell""",
+                timeout=self.timeout,
+            )
         else:
-            script = f"""
-            tell application "Mail"
+            script = _wrap_with_timeout(
+                f"""tell application "Mail"
                 set accountRef to {account_clause}
                 make new mailbox at accountRef with properties {{name:"{name_safe}"}}
                 return "success"
-            end tell
-            """
+            end tell""",
+                timeout=self.timeout,
+            )
 
         result = self._run_applescript(script)
         return result == "success"
@@ -3550,16 +3583,17 @@ class AppleMailConnector:
             counter_var="deleteCount",
         )
 
-        script = f"""{_MAILBOX_RESOLVER_HANDLERS}
-        tell application "Mail"
+        script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
+            f"""tell application "Mail"
             set idList to {{{id_list}}}
             set deleteCount to 0
 
 {repeat_block}
 
             return deleteCount
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script)
         return int(result) if result.isdigit() else 0
@@ -3643,8 +3677,8 @@ class AppleMailConnector:
         """
         _validate_draft_id(draft_id)
 
-        script = f"""
-        tell application "Mail"
+        script = _wrap_with_timeout(
+            f"""tell application "Mail"
             set didDelete to false
             repeat with acc in accounts
                 try
@@ -3666,8 +3700,9 @@ class AppleMailConnector:
             else
                 return "NOT_FOUND"
             end if
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script).strip()
         if result == "OK":
@@ -3710,8 +3745,8 @@ class AppleMailConnector:
         safe_bare = escape_applescript_string(sanitize_input(bare))
         safe_bracketed = escape_applescript_string(sanitize_input(bracketed))
 
-        script = f"""
-        tell application "Mail"
+        script = _wrap_with_timeout(
+            f"""tell application "Mail"
             set foundId to ""
             repeat with acc in accounts
                 try
@@ -3730,8 +3765,9 @@ class AppleMailConnector:
             else
                 return foundId
             end if
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script).strip()
         if result == "NOT_FOUND" or not result:
@@ -4151,8 +4187,8 @@ class AppleMailConnector:
                 end repeat
             """
 
-        script = f"""
-        tell application "Mail"
+        script = _wrap_with_timeout(
+            f"""tell application "Mail"
             {snapshot_block}
 
             {creation_block}
@@ -4166,8 +4202,9 @@ class AppleMailConnector:
             {attachment_block}
 
             {terminal_block}
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         try:
             result = self._run_applescript(script).strip()
@@ -4238,8 +4275,8 @@ class AppleMailConnector:
             f'"{escape_applescript_string(str(p))}"' for p in target_paths
         )
 
-        script = f"""
-        tell application "Mail"
+        script = _wrap_with_timeout(
+            f"""tell application "Mail"
             set targetId to "{draft_id}"
             set foundDraft to missing value
             repeat with acc in accounts
@@ -4274,8 +4311,9 @@ class AppleMailConnector:
                 end try
             end repeat
             return saved as text
-        end tell
-        """
+        end tell""",
+            timeout=self.timeout,
+        )
 
         result = self._run_applescript(script).strip()
         if result == "ERR_NOT_FOUND":

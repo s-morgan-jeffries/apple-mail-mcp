@@ -3,6 +3,7 @@
 import logging
 import time
 import warnings
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,7 +22,11 @@ from apple_mail_mcp.exceptions import (
     MailMailboxNotFoundError,
     MailMessageNotFoundError,
 )
-from apple_mail_mcp.mail_connector import AppleMailConnector, _wrap_as_json_script
+from apple_mail_mcp.mail_connector import (
+    AppleMailConnector,
+    _wrap_as_json_script,
+    _wrap_with_timeout,
+)
 
 
 class TestAppleMailConnector:
@@ -4667,6 +4672,192 @@ class TestConnectorThreadsTimeoutIntoScripts:
         )
         script = mock_run.call_args.kwargs.get("input") or mock_run.call_args.args[0]
         assert "with timeout of 300 seconds" in script
+
+
+class TestWrapWithTimeoutHelper:
+    """Issue #233 — _wrap_with_timeout is the single source of truth for the
+    `with timeout … end timeout` clause shared by JSON and non-JSON paths."""
+
+    def test_wraps_body_in_timeout_block(self) -> None:
+        body = 'tell application "Mail"\n    return 1\nend tell'
+        wrapped = _wrap_with_timeout(body, timeout=90)
+        assert wrapped == (
+            "with timeout of 90 seconds\n"
+            'tell application "Mail"\n    return 1\nend tell\n'
+            "end timeout\n"
+        )
+
+    def test_json_wrapper_reuses_helper_format(self) -> None:
+        # The JSON wrapper must embed the exact clause the helper produces,
+        # so the two never drift apart.
+        body = 'tell application "Mail"\n    set resultData to {}\nend tell'
+        json_script = _wrap_as_json_script(body, timeout=120)
+        assert _wrap_with_timeout(body, timeout=120) in json_script
+
+
+class TestNonJsonPathsThreadTimeout:
+    """Issue #233 — mutation paths that build AppleScript directly (not via
+    _wrap_as_json_script) must also honor AppleMailConnector(timeout=N) by
+    emitting a `with timeout` clause, so Mail's 60s AppleEvent default does
+    not fire before the connector's subprocess timeout."""
+
+    @staticmethod
+    def _script_from(mock_run: MagicMock) -> str:
+        return mock_run.call_args.kwargs.get("input") or mock_run.call_args.args[0]
+
+    @patch("subprocess.run")
+    def test_set_rule_enabled(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=111)
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        connector.set_rule_enabled(1, True)
+        assert "with timeout of 111 seconds" in self._script_from(mock_run)
+
+    @patch("subprocess.run")
+    def test_delete_rule(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=112)
+        mock_run.return_value = MagicMock(returncode=0, stdout="Junk", stderr="")
+        connector.delete_rule(1)
+        assert "with timeout of 112 seconds" in self._script_from(mock_run)
+
+    @patch("subprocess.run")
+    def test_mark_as_read(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=113)
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.mark_as_read(["123"])
+        script = self._script_from(mock_run)
+        assert "with timeout of 113 seconds" in script
+        # Handlers must stay OUTSIDE the timeout block (AppleScript forbids
+        # handler definitions inside `with timeout`).
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch("subprocess.run")
+    def test_move_messages(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=114)
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.move_messages(["123"], "Archive", "TestAcct")
+        script = self._script_from(mock_run)
+        assert "with timeout of 114 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch("subprocess.run")
+    def test_flag_message(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=115)
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.flag_message(["123"], "red")
+        script = self._script_from(mock_run)
+        assert "with timeout of 115 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch("subprocess.run")
+    def test_update_message(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=116)
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.update_message(["123"], read_status=True)
+        script = self._script_from(mock_run)
+        assert "with timeout of 116 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch("subprocess.run")
+    def test_update_mailbox_rename(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=117)
+        mock_run.return_value = MagicMock(returncode=0, stdout="success", stderr="")
+        connector.update_mailbox("TestAcct", "Old", new_name="New")
+        script = self._script_from(mock_run)
+        assert "with timeout of 117 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch("subprocess.run")
+    def test_create_mailbox_with_parent(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=118)
+        mock_run.return_value = MagicMock(returncode=0, stdout="success", stderr="")
+        connector.create_mailbox("TestAcct", "Child", parent_mailbox="Parent")
+        script = self._script_from(mock_run)
+        assert "with timeout of 118 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch("subprocess.run")
+    def test_create_mailbox_without_parent(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=119)
+        mock_run.return_value = MagicMock(returncode=0, stdout="success", stderr="")
+        connector.create_mailbox("TestAcct", "TopLevel")
+        assert "with timeout of 119 seconds" in self._script_from(mock_run)
+
+    @patch("subprocess.run")
+    def test_delete_messages(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=120)
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.delete_messages(["123"])
+        script = self._script_from(mock_run)
+        assert "with timeout of 120 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch("subprocess.run")
+    def test_delete_draft(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=121)
+        mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+        connector.delete_draft("draft123")
+        assert "with timeout of 121 seconds" in self._script_from(mock_run)
+
+    @patch("subprocess.run")
+    def test_find_message_by_message_id(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=122)
+        mock_run.return_value = MagicMock(returncode=0, stdout="42", stderr="")
+        connector.find_message_by_message_id("<abc@example.com>")
+        assert "with timeout of 122 seconds" in self._script_from(mock_run)
+
+    @patch("subprocess.run")
+    def test_extract_draft_attachments(
+        self, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        connector = AppleMailConnector(timeout=123)
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.extract_draft_attachments("draft123", ["file.pdf"], tmp_path)
+        assert "with timeout of 123 seconds" in self._script_from(mock_run)
+
+    @patch("subprocess.run")
+    def test_create_rule(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=124)
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.create_rule(
+            name="X",
+            conditions=[{"field": "from", "operator": "contains", "value": "@x.com"}],
+            actions={"mark_read": True},
+        )
+        script = self._script_from(mock_run)
+        assert "with timeout of 124 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch.object(AppleMailConnector, "_check_supported_actions")
+    @patch("subprocess.run")
+    def test_update_rule(
+        self, mock_run: MagicMock, mock_check: MagicMock
+    ) -> None:
+        connector = AppleMailConnector(timeout=125)
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        connector.update_rule(rule_index=1, name="Renamed")
+        script = self._script_from(mock_run)
+        assert "with timeout of 125 seconds" in script
+        assert script.index("on resolveMailbox") < script.index("with timeout")
+
+    @patch.object(AppleMailConnector, "_get_attachments_applescript")
+    @patch("subprocess.run")
+    def test_save_attachments(
+        self, mock_run: MagicMock, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        connector = AppleMailConnector(timeout=126)
+        mock_get.return_value = [{"name": "a.pdf"}]
+        mock_run.return_value = MagicMock(returncode=0, stdout="1", stderr="")
+        connector.save_attachments("123", tmp_path)
+        assert "with timeout of 126 seconds" in self._script_from(mock_run)
+
+    @patch("subprocess.run")
+    def test_create_draft(self, mock_run: MagicMock) -> None:
+        connector = AppleMailConnector(timeout=127)
+        mock_run.return_value = MagicMock(returncode=0, stdout="draft123", stderr="")
+        connector.create_draft(
+            seed="new", to=["x@example.com"], subject="Hi", body="x"
+        )
+        assert "with timeout of 127 seconds" in self._script_from(mock_run)
 
 
 class TestAutoTemplateVars:
