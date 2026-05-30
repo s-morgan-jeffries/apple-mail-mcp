@@ -484,6 +484,49 @@ def _bodystructure_extract_attachments(
     return out
 
 
+def _disposition_marks_attachment(elem: Any) -> bool:
+    """True if a BODYSTRUCTURE element is a disposition tuple that marks an
+    attachment — ``attachment``, or ``inline`` carrying a ``filename`` param.
+
+    Disposition tuples look like ``(b"attachment", (b"filename", b"x.pdf"))``;
+    the params are a flat ``(key, value, key, value, ...)`` tuple.
+    """
+    if not (isinstance(elem, tuple) and elem and isinstance(elem[0], bytes)):
+        return False
+    disp = elem[0].lower()
+    if disp == b"attachment":
+        return True
+    if disp != b"inline":
+        return False
+    params = elem[1] if len(elem) > 1 else ()
+    if not isinstance(params, tuple):
+        return False
+    return any(
+        isinstance(params[i], bytes) and params[i].lower() == b"filename"
+        for i in range(0, len(params) - 1, 2)
+    )
+
+
+def _leaf_has_attachment(structure: tuple[Any, ...]) -> bool:
+    """True if a leaf BODYSTRUCTURE part is an attachment.
+
+    A ``message/rfc822`` (forwarded email) part counts, matching
+    ``_bodystructure_extract_attachments`` — otherwise the has_attachment
+    search filter and the attachment list disagree (a forwarded-only message
+    would be filtered out yet report an attachment). Otherwise, any element
+    that is an attachment/inline-filename disposition tuple qualifies.
+    """
+    type_ = structure[0] if isinstance(structure[0], bytes) else b""
+    subtype = (
+        structure[1]
+        if len(structure) > 1 and isinstance(structure[1], bytes)
+        else b""
+    )
+    if type_.lower() == b"message" and subtype.lower() == b"rfc822":
+        return True
+    return any(_disposition_marks_attachment(elem) for elem in structure)
+
+
 def _bodystructure_has_attachment(structure: Any) -> bool:
     """Walk an IMAPClient-parsed BODYSTRUCTURE tree and detect attachments.
 
@@ -492,7 +535,8 @@ def _bodystructure_has_attachment(structure: Any) -> bool:
     tuple) or a leaf (starts with bytes like ``b"text"``, ``b"application"``).
 
     A message "has an attachment" if any leaf carries a disposition of
-    ``attachment`` or ``inline`` with a ``filename`` parameter.
+    ``attachment`` or ``inline`` with a ``filename`` parameter (see
+    ``_leaf_has_attachment``).
     """
     if not isinstance(structure, tuple) or not structure:
         return False
@@ -504,44 +548,12 @@ def _bodystructure_has_attachment(structure: Any) -> bool:
         )
     # Defensive: children nested as direct tuple elements.
     if isinstance(structure[0], tuple):
-        for child in structure:
-            if isinstance(child, tuple) and _bodystructure_has_attachment(child):
-                return True
-        return False
+        return any(
+            isinstance(child, tuple) and _bodystructure_has_attachment(child)
+            for child in structure
+        )
 
-    # Leaf. A message/rfc822 part (forwarded email) counts as an attachment,
-    # matching _bodystructure_extract_attachments — otherwise the
-    # has_attachment search filter and the attachment list disagree (a
-    # forwarded-only message would be filtered out yet report an attachment).
-    type_ = structure[0] if isinstance(structure[0], bytes) else b""
-    subtype = (
-        structure[1]
-        if len(structure) > 1 and isinstance(structure[1], bytes)
-        else b""
-    )
-    if type_.lower() == b"message" and subtype.lower() == b"rfc822":
-        return True
-
-    # Scan for a disposition tuple whose first element is
-    # b"attachment" or b"inline".
-    for elem in structure:
-        if (
-            isinstance(elem, tuple)
-            and elem
-            and isinstance(elem[0], bytes)
-        ):
-            disp = elem[0].lower()
-            if disp == b"attachment":
-                return True
-            if disp == b"inline":
-                params = elem[1] if len(elem) > 1 else ()
-                if isinstance(params, tuple):
-                    # Params are a flat tuple (key, value, key, value, ...).
-                    for i in range(0, len(params) - 1, 2):
-                        key = params[i]
-                        if isinstance(key, bytes) and key.lower() == b"filename":
-                            return True
-    return False
+    return _leaf_has_attachment(structure)
 
 
 def _envelope_to_dict(
