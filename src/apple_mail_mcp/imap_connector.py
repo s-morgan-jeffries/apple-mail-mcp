@@ -414,7 +414,15 @@ def _bodystructure_extract_attachments(
         if not isinstance(s, tuple) or not s:
             return
 
-        # Multipart: first element is a child part (also a tuple).
+        # Multipart: IMAPClient groups the child parts in a LIST at
+        # position 0 — ``([child1, child2, ...], subtype, params, ...)``.
+        # (Real iCloud/Gmail BODYSTRUCTUREs take this shape; missing it
+        # silently dropped attachments on every multipart message.)
+        if isinstance(s[0], list):
+            for child in s[0]:
+                _walk(child)
+            return
+        # Defensive: some inputs nest children as direct tuple elements.
         if isinstance(s[0], tuple):
             for child in s:
                 if isinstance(child, tuple):
@@ -489,7 +497,12 @@ def _bodystructure_has_attachment(structure: Any) -> bool:
     if not isinstance(structure, tuple) or not structure:
         return False
 
-    # Multipart — first element is a nested tuple (sub-part).
+    # Multipart — children grouped in a list at position 0 (IMAPClient).
+    if isinstance(structure[0], list):
+        return any(
+            _bodystructure_has_attachment(child) for child in structure[0]
+        )
+    # Defensive: children nested as direct tuple elements.
     if isinstance(structure[0], tuple):
         for child in structure:
             if isinstance(child, tuple) and _bodystructure_has_attachment(child):
