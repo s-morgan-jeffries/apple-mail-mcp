@@ -4029,7 +4029,7 @@ class AppleMailConnector:
         """
         sender = self._resolve_account_to_sender(from_account)
         host, port, email = self._resolve_imap_config(from_account)
-        password = get_imap_password(from_account, email)
+        password = self._get_imap_password_with_fallback(from_account, email)
         message_id, raw = build_draft_mime(
             sender=sender,
             to=to,

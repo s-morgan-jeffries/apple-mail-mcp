@@ -5,16 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-
-**Compose drafts (`create_draft seed="new"`) created via IMAP APPEND to avoid Mail.app's cite-blockquote wrapper (#245):** Mail.app wraps any AppleScript-set message `content` in an `Apple-Mail-URLShareWrapper` `<blockquote type="cite">` when it serializes the draft to HTML. On macOS and most receiving clients the neutralizing inline styles hide it, but iOS Mail renders the entire body as a quote (blue text + left bar). This is an unfixed Mail.app regression since Mail 16.0 / macOS Ventura (Apple Feedback FB11734014); it cannot be worked around through AppleScript — Mail's `content` (rich text) is the only writable body, `html content` is a deprecated no-op, and `source` is read-only (verified against `Mail.sdef`).
-
-The fix bypasses Mail's scripting entirely for save-as-draft compose: `create_draft(seed="new", send_now=False, from_account=...)` now builds a clean RFC 822 message (`draft_builder.build_draft_mime`) and APPENDs it to the account's `\Drafts` SPECIAL-USE folder with the `\Draft` flag (`ImapConnector.append_draft`). The stored draft is plain `text/plain` and renders normally on iOS (verified on-device). Header inputs are sanitized against NUL / CR / LF injection. The path reuses the existing Keychain + IMAP-pool plumbing and degrades gracefully: when IMAP isn't configured (no Keychain opt-in) or the account is unknown, it falls back to the AppleScript path via the standard `_IMAP_FALLBACK_EXCS` circuit breaker, so there is no regression for users without IMAP set up.
-
-**Scope / limitations:** This PR covers `seed="new"` save-as-draft only. `reply` / `forward` seeds and `send_now=True` continue to use the AppleScript path for now (the latter cannot be done over IMAP APPEND, which only creates drafts); routing replies through IMAP and a clean SMTP send path are follow-ups. Reported and diagnosed by [@fmasi](https://github.com/fmasi) (#245).
-
 ## [0.8.2] - 2026-05-20
 
 Patch release. Three substantive bug fixes — one security regression in our own gate chain, one regression introduced at v0.8.1, and one long-latent AppleEvent timeout bug surfaced by use on slow Exchange/EWS accounts. Two of the three are contributor-authored: [@fmasi](https://github.com/fmasi) reported and fixed the v0.8.1 regression they noticed within hours of release; [@allenpan05](https://github.com/allenpan05) reported and fixed the AppleEvent timeout bug. Thanks to both.
