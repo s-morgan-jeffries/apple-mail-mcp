@@ -1412,7 +1412,11 @@ class AppleMailConnector:
             set acctRef to {account_clause}
             set acctEmails to email addresses of acctRef
             if acctEmails is missing value then set acctEmails to {{}}
-            set resultData to {{|host|:(server name of acctRef), |port|:(port of acctRef), |user_name|:(user name of acctRef), |email_addresses|:acctEmails}}
+            set acctHost to server name of acctRef
+            if acctHost is missing value then set acctHost to ""
+            set acctPort to port of acctRef
+            if acctPort is missing value then set acctPort to 0
+            set resultData to {{|host|:acctHost, |port|:acctPort, |user_name|:(user name of acctRef), |email_addresses|:acctEmails}}
         end tell
         '''
         script = _wrap_as_json_script(tell_body, timeout=self.timeout)
@@ -1421,9 +1425,14 @@ class AppleMailConnector:
         email_addresses = cast(list[str], parsed.get("email_addresses") or [])
         user_name = cast(str, parsed.get("user_name") or "")
         email = user_name or (email_addresses[0] if email_addresses else "")
+        # Read host/port with safe defaults: accounts without an IMAP server
+        # (POP / "On My Mac" / mid-configuration) report `server name`/`port`
+        # as `missing value`, which drops those keys from the serialized
+        # record. An empty host then fails the later connect with OSError
+        # (the graceful-fallback path) rather than KeyError-ing here.
         return (
-            cast(str, parsed["host"]),
-            cast(int, parsed["port"]),
+            cast(str, parsed.get("host") or ""),
+            cast(int, parsed.get("port") or 0),
             email,
         )
 

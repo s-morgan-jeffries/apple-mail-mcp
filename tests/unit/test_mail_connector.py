@@ -936,12 +936,33 @@ class TestAppleMailConnector:
         )
         connector._resolve_imap_config("iCloud")
         script = mock_run.call_args[0][0]
-        assert "|host|:(server name of acctRef)" in script
-        assert "|port|:(port of acctRef)" in script
+        assert "|host|:acctHost" in script
+        assert "|port|:acctPort" in script
         assert "|user_name|:(user name of acctRef)" in script
         assert "|email_addresses|:acctEmails" in script
+        # server name / port must be coerced for missing value (POP / local
+        # / mid-config accounts) so a dropped key can't KeyError the caller.
+        assert 'if acctHost is missing value then set acctHost to ""' in script
+        assert "if acctPort is missing value then set acctPort to 0" in script
         # Must assign to resultData for _wrap_as_json_script to serialize.
         assert "set resultData to" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_missing_host_port_degrades_gracefully(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """An account without an IMAP server (POP / "On My Mac" /
+        mid-config) reports `server name`/`port` as `missing value`,
+        dropping those JSON keys. The method must return ('', 0, ...) so
+        the later connect fails with OSError (the graceful-degradation
+        path) rather than KeyError-ing on bracket access here."""
+        mock_run.return_value = (
+            '{"user_name":"u@e.com","email_addresses":["u@e.com"]}'
+        )
+        host, port, email = connector._resolve_imap_config("LocalPOP")
+        assert host == ""
+        assert port == 0
+        assert email == "u@e.com"
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_resolve_imap_config_escapes_account_name(
