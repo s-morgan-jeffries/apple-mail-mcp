@@ -23,7 +23,6 @@ jobs:
 
       - name: Type check
         run: uv run mypy src/
-        continue-on-error: true
 
       - name: Unit tests
         run: uv run pytest tests/ -m "not integration and not e2e and not benchmark" -v --cov=apple_mail_mcp --cov-report=term-missing --cov-fail-under=90
@@ -31,7 +30,6 @@ jobs:
 
       - name: Complexity check
         run: ./scripts/check_complexity.sh
-        continue-on-error: true
 
       - name: Version sync check
         run: ./scripts/check_version_sync.sh
