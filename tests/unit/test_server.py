@@ -375,47 +375,107 @@ class TestDeleteRule:
         mock_mail.delete_rule.assert_not_called()
 
 
+_COND = [{"field": "subject", "operator": "contains", "value": "X"}]
+
+# (label, actions-dict) for each action that can move/disclose/delete mail.
+_DANGEROUS_RULE_ACTION_CASES = [
+    ("delete", {"delete": True}),
+    ("forward_to", {"forward_to": ["a@example.com"]}),
+    ("move_to", {"move_to": {"account": "Gmail", "mailbox": "X"}}),
+    ("copy_to", {"copy_to": {"account": "Gmail", "mailbox": "X"}}),
+]
+
+
 class TestCreateRule:
-    def test_success_returns_new_index(self, mock_mail: MagicMock) -> None:
+    @pytest.mark.asyncio
+    async def test_success_returns_new_index(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.create_rule.return_value = 6
-        result = create_rule(
+        result = await create_rule(
             name="My New Rule",
-            conditions=[
-                {"field": "subject", "operator": "contains", "value": "X"}
-            ],
+            conditions=_COND,
             actions={"mark_read": True},
+            ctx=mock_ctx_accept,
         )
         assert result["success"] is True
         assert result["rule_index"] == 6
         assert result["name"] == "My New Rule"
+        # Organizational-only rule: no confirmation prompt.
+        mock_ctx_accept.elicit.assert_not_awaited()
 
-    def test_no_elicitation_for_create(
-        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label,actions", _DANGEROUS_RULE_ACTION_CASES)
+    async def test_dangerous_action_prompts_then_creates(
+        self,
+        label: str,
+        actions: dict,
+        mock_mail: MagicMock,
+        mock_ctx_accept: MagicMock,
     ) -> None:
-        """create_rule is additive — no confirmation prompt."""
-        # create_rule is sync, takes no ctx, so this just confirms it
-        # works without one.
-        mock_mail.create_rule.return_value = 1
-        result = create_rule(
-            name="X",
-            conditions=[
-                {"field": "subject", "operator": "contains", "value": "Y"}
-            ],
-            actions={"delete": True},
+        """delete / forward_to / move_to / copy_to require confirmation (#222)."""
+        mock_mail.create_rule.return_value = 3
+        result = await create_rule(
+            name=f"rule-{label}",
+            conditions=_COND,
+            actions=actions,
+            ctx=mock_ctx_accept,
         )
         assert result["success"] is True
-        # No elicit call possible — sync function doesn't accept ctx.
+        mock_ctx_accept.elicit.assert_awaited_once()
+        mock_mail.create_rule.assert_called_once()
 
-    def test_validation_error_returns_validation_type(
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "actions",
+        [{"mark_read": True}, {"mark_flagged": True, "flag_color": "red"}],
+    )
+    async def test_organizational_only_skips_prompt(
+        self, actions: dict, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        mock_mail.create_rule.return_value = 2
+        result = await create_rule(
+            name="organize", conditions=_COND, actions=actions, ctx=mock_ctx_accept
+        )
+        assert result["success"] is True
+        mock_ctx_accept.elicit.assert_not_awaited()
+        mock_mail.create_rule.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_declined_dangerous_action_blocks_create(
+        self, mock_mail: MagicMock, mock_ctx_decline: MagicMock
+    ) -> None:
+        result = await create_rule(
+            name="X", conditions=_COND, actions={"delete": True}, ctx=mock_ctx_decline
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        mock_mail.create_rule.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_ctx_blocks_dangerous_create(
         self, mock_mail: MagicMock
     ) -> None:
+        result = await create_rule(
+            name="X", conditions=_COND, actions={"forward_to": ["a@example.com"]},
+            ctx=None,
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "confirmation_required"
+        mock_mail.create_rule.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_validation_error_returns_validation_type(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.create_rule.side_effect = ValueError("invalid field")
-        result = create_rule(
+        result = await create_rule(
             name="X",
             conditions=[
                 {"field": "bogus", "operator": "contains", "value": "Y"}
             ],
             actions={"delete": True},
+            ctx=mock_ctx_accept,
         )
         assert result["success"] is False
         assert result["error_type"] == "validation_error"

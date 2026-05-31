@@ -286,6 +286,17 @@ def _resolve_rule_name(rule_index: int) -> str | None:
     return None
 
 
+_DANGEROUS_RULE_ACTIONS = ("delete", "forward_to", "move_to", "copy_to")
+
+
+def _rule_actions_require_confirmation(actions: dict[str, Any]) -> bool:
+    """True when a rule's actions can move, disclose, or delete mail
+    (delete / forward_to / move_to / copy_to) — those require user
+    confirmation. Purely organizational actions (mark_read, mark_flagged,
+    flag_color) do not. (#222)"""
+    return any(actions.get(name) for name in _DANGEROUS_RULE_ACTIONS)
+
+
 @_tool(
     {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
     mutating=True,
@@ -372,19 +383,24 @@ async def delete_rule(
     {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False},
     mutating=True,
 )
-def create_rule(
+async def create_rule(
     name: str,
     conditions: list[dict[str, Any]],
     actions: dict[str, Any],
     match_logic: str = "all",
     enabled: bool = True,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Create a new Mail.app rule.
 
-    Additive — no confirmation prompt. Mail.app appends new rules to the
-    end of the rule list, so the returned ``rule_index`` equals the new
-    total rule count.
+    Rules with actions that can move, forward, or delete mail
+    (delete / forward_to / move_to / copy_to) require user confirmation —
+    a single create can install automation that auto-forwards or deletes
+    all future mail (#222). Organizational-only rules (mark_read,
+    mark_flagged, flag_color) are created without a prompt. Mail.app
+    appends new rules to the end of the rule list, so the returned
+    ``rule_index`` equals the new total rule count.
 
     Args:
         name: Rule display name. Need not be unique.
@@ -420,6 +436,24 @@ def create_rule(
         )
         if safety_err:
             return safety_err
+
+        # Destructive-automation gate (#222): confirm before installing a
+        # rule that can move, forward, or delete mail. Organizational-only
+        # rules (mark_read / mark_flagged / flag_color) skip the prompt.
+        if _rule_actions_require_confirmation(actions):
+            dangerous = [a for a in _DANGEROUS_RULE_ACTIONS if actions.get(a)]
+            summary = (
+                f"Create Mail rule '{name}'? It will run automatically on "
+                f"incoming mail and can move, forward, or delete messages "
+                f"(actions: {', '.join(dangerous)}). This is a destructive "
+                f"automation — confirm before installing."
+            )
+            cancel_err = await _elicit_confirmation(
+                ctx, summary, "create_rule",
+                {"name": name, "dangerous_actions": dangerous},
+            )
+            if cancel_err:
+                return cancel_err
 
         new_index = mail.create_rule(
             name=name,
