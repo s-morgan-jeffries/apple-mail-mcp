@@ -1807,14 +1807,18 @@ async def delete_mailbox(
     {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True},
     mutating=True,
 )
-def delete_messages(
+async def delete_messages(
     message_ids: list[str],
     permanent: bool = False,
     account: str | None = None,
     source_mailbox: str | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Delete messages (always moves to the account's Trash mailbox).
+
+    Destructive: gated behind user confirmation via MCP elicitation
+    (issue #239), matching delete_rule / delete_mailbox / delete_template.
 
     Args:
         message_ids: List of message IDs to delete
@@ -1862,6 +1866,27 @@ def delete_messages(
                 "error": f"Cannot delete {len(message_ids)} messages at once (max: 100)",
                 "error_type": "validation_error",
             }
+
+        # Destructive: confirm before moving to Trash. Show the count and
+        # source (not every message-id — too noisy for 100-item calls).
+        # account/source_mailbox are either both set or both None (the
+        # connector rejects a partial pair), so the two-way split is total.
+        location = (
+            f"{account}/{source_mailbox}"
+            if account and source_mailbox
+            else "across all mailboxes"
+        )
+        summary = (
+            f"Move {len(message_ids)} message(s) to Trash from {location}?\n\n"
+            f"Recoverable from the account's Trash until that mailbox is emptied."
+        )
+        cancel_err = await _elicit_confirmation(
+            ctx, summary, "delete_messages",
+            {"count": len(message_ids), "account": account,
+             "source_mailbox": source_mailbox, "permanent": permanent},
+        )
+        if cancel_err:
+            return cancel_err
 
         logger.info(f"Deleting {len(message_ids)} message(s) to trash")
 

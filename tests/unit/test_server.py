@@ -2239,14 +2239,20 @@ class TestDeleteMailboxTool:
 
 
 class TestDeleteMessages:
-    def test_success(self, mock_mail: MagicMock) -> None:
+    @pytest.mark.asyncio
+    async def test_success(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.return_value = 2
 
-        result = delete_messages(["1", "2"], permanent=False)
+        result = await delete_messages(
+            ["1", "2"], permanent=False, ctx=mock_ctx_accept
+        )
 
         assert result["success"] is True
         assert result["count"] == 2
         assert result["permanent"] is False
+        mock_ctx_accept.elicit.assert_awaited_once()
         mock_mail.delete_messages.assert_called_once_with(
             message_ids=["1", "2"],
             permanent=False,
@@ -2255,9 +2261,14 @@ class TestDeleteMessages:
             source_mailbox=None,
         )
 
-    def test_passes_source_mailbox_through(self, mock_mail: MagicMock) -> None:
+    @pytest.mark.asyncio
+    async def test_passes_source_mailbox_through(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.return_value = 1
-        delete_messages(["1"], account="Gmail", source_mailbox="INBOX")
+        await delete_messages(
+            ["1"], account="Gmail", source_mailbox="INBOX", ctx=mock_ctx_accept
+        )
         mock_mail.delete_messages.assert_called_once_with(
             message_ids=["1"],
             permanent=False,
@@ -2266,52 +2277,94 @@ class TestDeleteMessages:
             source_mailbox="INBOX",
         )
 
-    def test_empty_list_early_exit(self, mock_mail: MagicMock) -> None:
-        result = delete_messages([])
+    @pytest.mark.asyncio
+    async def test_empty_list_early_exit(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        result = await delete_messages([], ctx=mock_ctx_accept)
 
         assert result["success"] is True
         assert result["count"] == 0
         mock_mail.delete_messages.assert_not_called()
+        # No prompt for a no-op call.
+        mock_ctx_accept.elicit.assert_not_awaited()
 
-    def test_over_limit_validation_error(self, mock_mail: MagicMock) -> None:
-        result = delete_messages([str(i) for i in range(101)])
+    @pytest.mark.asyncio
+    async def test_over_limit_validation_error(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
+        result = await delete_messages(
+            [str(i) for i in range(101)], ctx=mock_ctx_accept
+        )
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
         mock_mail.delete_messages.assert_not_called()
+        # No prompt for an invalid (over-limit) call.
+        mock_ctx_accept.elicit.assert_not_awaited()
 
-    def test_value_error_from_connector(self, mock_mail: MagicMock) -> None:
+    @pytest.mark.asyncio
+    async def test_declined_elicitation_blocks_delete(
+        self, mock_mail: MagicMock, mock_ctx_decline: MagicMock
+    ) -> None:
+        result = await delete_messages(["1", "2"], ctx=mock_ctx_decline)
+
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        mock_mail.delete_messages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_ctx_blocks_delete_with_confirmation_required(
+        self, mock_mail: MagicMock
+    ) -> None:
+        result = await delete_messages(["1", "2"], ctx=None)
+
+        assert result["success"] is False
+        assert result["error_type"] == "confirmation_required"
+        mock_mail.delete_messages.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_value_error_from_connector(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.side_effect = ValueError("bad")
 
-        result = delete_messages(["1"])
+        result = await delete_messages(["1"], ctx=mock_ctx_accept)
 
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
 
-    def test_message_not_found(self, mock_mail: MagicMock) -> None:
+    @pytest.mark.asyncio
+    async def test_message_not_found(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.side_effect = MailMessageNotFoundError("x")
 
-        result = delete_messages(["999"])
+        result = await delete_messages(["999"], ctx=mock_ctx_accept)
 
         assert result["success"] is False
         assert result["error_type"] == "message_not_found"
 
-    def test_unexpected_exception_maps_to_unknown(self, mock_mail: MagicMock) -> None:
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_maps_to_unknown(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
+    ) -> None:
         mock_mail.delete_messages.side_effect = RuntimeError("boom")
 
-        result = delete_messages(["1"])
+        result = await delete_messages(["1"], ctx=mock_ctx_accept)
 
         assert result["success"] is False
         assert result["error_type"] == "unknown"
 
-    def test_permanent_true_threads_through_to_connector(
-        self, mock_mail: MagicMock
+    @pytest.mark.asyncio
+    async def test_permanent_true_threads_through_to_connector(
+        self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
     ) -> None:
         """Issue #111: the connector emits a DeprecationWarning when
         permanent=True; the server's job is just to forward the flag
         unchanged so the warning fires from the user's call frame."""
         mock_mail.delete_messages.return_value = 1
-        result = delete_messages(["1"], permanent=True)
+        result = await delete_messages(["1"], permanent=True, ctx=mock_ctx_accept)
         assert result["success"] is True
         # Server still echoes the (now-meaningless) flag in its response
         # for backwards compatibility with existing callers.
