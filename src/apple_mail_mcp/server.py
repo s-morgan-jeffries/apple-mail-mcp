@@ -2581,6 +2581,7 @@ def _merge_draft_recipients(
 async def create_draft(
     reply_to: str | None = None,
     forward_of: str | None = None,
+    seed_mailbox: str | None = None,
     to: list[str] | None = None,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
@@ -2611,6 +2612,12 @@ async def create_draft(
         forward_of: Id of a message to forward. Accepts the same id forms
             as ``reply_to``. Mutually exclusive with ``reply_to``. ``to``
             is required (recipient of the forward).
+        seed_mailbox: Mailbox the reply_to/forward_of message lives in
+            (e.g. the ``mailbox`` field from its ``search_messages`` row).
+            Lets the clean save-as-draft path fetch the original directly
+            so reply/forward drafts render without the iOS quote bug —
+            supply it especially for replies to filed (non-INBOX) mail.
+            Defaults to INBOX; a miss falls back transparently.
         to/cc/bcc: Recipient lists. For reply/forward, ``None`` keeps the
             auto-derived recipients; ``[]`` explicitly clears that group;
             a populated list replaces.
@@ -2709,6 +2716,7 @@ async def create_draft(
         result = mail.create_draft(
             seed=seed_kind,
             seed_id=seed_id,
+            seed_mailbox=seed_mailbox,
             to=to,
             cc=cc,
             bcc=bcc,

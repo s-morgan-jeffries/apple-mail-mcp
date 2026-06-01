@@ -88,3 +88,164 @@ def test_sanitizes_header_injection_chars():
     assert msg["From"] == "AliceSmith <me@x.com>"
     assert msg["Bcc"] is None
     assert msg["X-Injected"] is None
+
+
+# --- Reply/forward extensions (issue #245 follow-up) ---------------------
+
+from apple_mail_mcp.draft_builder import (  # noqa: E402
+    build_forward_body,
+    build_reply_body,
+    derive_reply_recipients,
+    forward_subject,
+    reply_subject,
+)
+
+
+def test_threading_headers_and_no_blockquote():
+    msgid, raw = build_draft_mime(
+        sender="email@fmasi.eu",
+        to=["lazar@hadleigh.co.uk"],
+        subject="Re: Flat 9 Constable House",
+        body="Hi Lazar,\n\n> quoted line",
+        in_reply_to="<orig@mail.example.com>",
+        references=["<root@x>", "<orig@mail.example.com>"],
+    )
+    text = raw.decode("utf-8")
+    assert "blockquote" not in text.lower()
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    assert msg["In-Reply-To"] == "<orig@mail.example.com>"
+    assert msg["References"] == "<root@x> <orig@mail.example.com>"
+    assert msg.get_content_type() == "text/plain"
+    assert msgid != "<orig@mail.example.com>"
+
+
+def test_forwarded_attachments_travel_with_draft():
+    _msgid, raw = build_draft_mime(
+        sender="email@fmasi.eu",
+        to=["someone@example.com"],
+        subject="Fwd: Statement",
+        body="See attached.",
+        forwarded_attachments=[("statement.pdf", "application", "pdf", b"%PDF-1.4 fake")],
+    )
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    names = [p.get_filename() for p in msg.iter_attachments()]
+    assert "statement.pdf" in names
+    att = next(p for p in msg.iter_attachments() if p.get_filename() == "statement.pdf")
+    assert att.get_content_type() == "application/pdf"
+    assert att.get_payload(decode=True) == b"%PDF-1.4 fake"
+
+
+def test_reply_subject_no_double_prefix():
+    assert reply_subject("Flat 9") == "Re: Flat 9"
+    assert reply_subject("Re: Flat 9") == "Re: Flat 9"
+    assert reply_subject("re: flat 9") == "re: flat 9"
+    assert reply_subject("") == "Re:"
+
+
+def test_forward_subject_no_double_prefix():
+    assert forward_subject("Flat 9") == "Fwd: Flat 9"
+    assert forward_subject("Fwd: Flat 9") == "Fwd: Flat 9"
+    assert forward_subject("FW: Flat 9") == "FW: Flat 9"
+
+
+def test_derive_reply_recipients_simple():
+    to, cc = derive_reply_recipients(
+        from_header="Lazar <lazar@hadleigh.co.uk>",
+        to_header="email@fmasi.eu, someone@else.com",
+        cc_header="cc@x.com",
+        self_addresses=["email@fmasi.eu"],
+        reply_all=False,
+    )
+    assert to == ["Lazar <lazar@hadleigh.co.uk>"]
+    assert cc == []
+
+
+def test_derive_reply_all_excludes_self_and_primary():
+    to, cc = derive_reply_recipients(
+        from_header="Lazar <lazar@hadleigh.co.uk>",
+        to_header="email@fmasi.eu, Bob <bob@x.com>",
+        cc_header="lazar@hadleigh.co.uk, carol@y.com",
+        self_addresses=["email@fmasi.eu"],
+        reply_all=True,
+    )
+    assert to == ["Lazar <lazar@hadleigh.co.uk>"]
+    cc_emails = cc
+    # self excluded, primary (lazar) excluded, the rest kept once
+    assert any("bob@x.com" in c for c in cc_emails)
+    assert any("carol@y.com" in c for c in cc_emails)
+    assert not any("email@fmasi.eu" in c for c in cc_emails)
+    assert not any("lazar@hadleigh.co.uk" in c for c in cc_emails)
+
+
+def test_reply_to_overrides_from():
+    to, _cc = derive_reply_recipients(
+        from_header="noreply@bot.com",
+        reply_to_header="Real Person <real@person.com>",
+    )
+    assert to == ["Real Person <real@person.com>"]
+
+
+def test_build_reply_body_quotes_original():
+    out = build_reply_body(
+        new_body="Thanks Lazar.",
+        original_from="Lazar <lazar@hadleigh.co.uk>",
+        original_date="29 May 2026 14:10",
+        original_text="Hi Frederic,\n\nConfirming the invoice.",
+    )
+    assert out.startswith("Thanks Lazar.")
+    assert "On 29 May 2026 14:10, Lazar <lazar@hadleigh.co.uk> wrote:" in out
+    assert "> Hi Frederic," in out
+    assert ">\n" in out  # blank original line quoted as bare ">"
+    assert "> Confirming the invoice." in out
+
+
+def test_build_forward_body_has_header_block():
+    out = build_forward_body(
+        new_body="FYI",
+        original_from="Lazar <lazar@hadleigh.co.uk>",
+        original_date="29 May 2026 14:10",
+        original_subject="Flat 9",
+        original_to="email@fmasi.eu",
+        original_text="Body here.",
+    )
+    assert out.startswith("FYI")
+    assert "---------- Forwarded message ----------" in out
+    assert "From: Lazar <lazar@hadleigh.co.uk>" in out
+    assert "Subject: Flat 9" in out
+    assert "Body here." in out
+
+
+def test_parse_original_message_extracts_fields_and_attachment():
+    from apple_mail_mcp.draft_builder import build_draft_mime, parse_original_message
+    # Build a representative original (with an attachment) and round-trip it.
+    _mid, raw = build_draft_mime(
+        sender="Lazar <lazar@hadleigh.co.uk>",
+        to=["email@fmasi.eu", "Bob <bob@x.com>"],
+        subject="Flat 9 Constable House",
+        body="Hi Frederic,\n\nConfirming the invoice.",
+        cc=["carol@y.com"],
+        in_reply_to="<prev@x>",
+        references=["<root@x>", "<prev@x>"],
+        forwarded_attachments=[("inv.pdf", "application", "pdf", b"%PDF data")],
+    )
+    orig = parse_original_message(raw)
+    assert "lazar@hadleigh.co.uk" in orig.from_header
+    assert "email@fmasi.eu" in orig.to_header
+    assert "carol@y.com" in orig.cc_header
+    assert orig.subject == "Flat 9 Constable House"
+    assert orig.references == ["<root@x>", "<prev@x>"]
+    assert "Confirming the invoice." in orig.text
+    assert any(a[0] == "inv.pdf" and a[3] == b"%PDF data" for a in orig.attachments)
+
+
+def test_parse_original_html_only_falls_back_to_text():
+    from email.message import EmailMessage
+
+    from apple_mail_mcp.draft_builder import parse_original_message
+    m = EmailMessage()
+    m["From"] = "x@y.com"
+    m["Subject"] = "HTML only"
+    m.set_content("<p>Hello <b>there</b></p>", subtype="html")
+    orig = parse_original_message(m.as_bytes())
+    assert "Hello" in orig.text and "there" in orig.text
+    assert "<p>" not in orig.text

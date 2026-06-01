@@ -788,6 +788,46 @@ class ImapConnector:
                 )
             return result
 
+    def fetch_raw_message(
+        self, message_id: str, mailbox: str = "INBOX"
+    ) -> bytes:
+        """Fetch the full raw RFC 822 bytes of a message by Message-ID.
+
+        Used to rebuild a clean reply/forward draft (#245 follow-up):
+        parsing the raw original yields headers, body, and attachment
+        payloads in a single fetch.
+
+        Args:
+            message_id: RFC 5322 Message-ID, with or without ``<>``.
+            mailbox: Folder to SELECT and search. The caller supplies the
+                seed message's folder (or defaults to INBOX); a miss
+                raises so the orchestrator can fall back to AppleScript,
+                which resolves the message across all folders.
+
+        Raises:
+            MailMessageNotFoundError: No message in ``mailbox`` matches.
+            IMAPClientError: Login / SELECT / SEARCH / FETCH failed.
+        """
+        bracketed = _bracket_message_id(message_id)
+        _reject_control_chars(mailbox, "mailbox")
+        with self._session() as client:
+            client.select_folder(mailbox, readonly=True)
+            uids = client.search(["HEADER", "Message-ID", bracketed])
+            if not uids:
+                raise MailMessageNotFoundError(
+                    f"Message-ID {message_id!r} not found in mailbox "
+                    f"{mailbox!r} on {self._host}."
+                )
+            fetched = client.fetch(uids[:1], [b"BODY[]"])
+            entry = next(iter(fetched.values()))
+            raw = entry.get(b"BODY[]") or b""
+            if not raw:
+                raise MailMessageNotFoundError(
+                    f"Message-ID {message_id!r} in {mailbox!r} returned an "
+                    f"empty body on {self._host}."
+                )
+            return bytes(raw)
+
     def get_attachments(
         self,
         message_id: str,
