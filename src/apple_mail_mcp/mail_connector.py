@@ -4316,7 +4316,8 @@ class AppleMailConnector:
             if addrs is None:
                 return ""  # keep auto-derived
             list_str = ", ".join(
-                f'"{escape_applescript_string(a)}"' for a in addrs
+                f'"{escape_applescript_string(sanitize_input(a))}"'
+                for a in addrs
             )
             return f"""
                 delete (every {kind} recipient of theMessage)

@@ -5305,6 +5305,28 @@ class TestCreateDraft:
         assert "set beforeIds to" in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_new_sanitizes_recipient_addresses(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """Recipient lists must go through the SECURITY_CHECKLIST two-step
+        (sanitize_input then escape_applescript_string) like every other
+        AppleScript interpolation — escape alone doesn't strip null bytes.
+        A null byte in an address must be stripped, not interpolated raw
+        into the generated script."""
+        mock_run.return_value = "1"
+        connector.create_draft(
+            seed="new",
+            to=["evil\x00@example.com"],
+            cc=["c\x00c@example.com"],
+            subject="hi",
+            body="x",
+        )
+        script = mock_run.call_args[0][0]
+        assert "\x00" not in script
+        assert "evil@example.com" in script
+        assert "cc@example.com" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_new_send_uses_send_block(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:

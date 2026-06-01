@@ -324,6 +324,23 @@ class TestCheckTestModeSafety:
         assert "Gmail" in result["error"]
         assert "TestAccount" in result["error"]
 
+    def test_delete_messages_is_account_gated(self, monkeypatch: Any) -> None:
+        """delete_messages is destructive — in test mode a delete aimed at
+        a non-test account must be rejected, same as the other
+        account-gated operations."""
+        monkeypatch.setenv("MAIL_TEST_MODE", "true")
+        monkeypatch.setenv("MAIL_TEST_ACCOUNT", "TestAccount")
+
+        result = check_test_mode_safety("delete_messages", account="Gmail")
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+
+        # ...and the matching account is allowed through.
+        assert (
+            check_test_mode_safety("delete_messages", account="TestAccount")
+            is None
+        )
+
     @patch("apple_mail_mcp.security.subprocess.run")
     def test_uuid_matching_test_account_returns_none(
         self, mock_run: Any, monkeypatch: Any

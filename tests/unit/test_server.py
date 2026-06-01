@@ -2353,6 +2353,49 @@ class TestDeleteMessages:
         )
 
     @pytest.mark.asyncio
+    async def test_success_logs_audit_trail(
+        self, mock_mail: MagicMock, mock_logger: MagicMock,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        """Every mutating tool records its success on the audit trail —
+        useful for confirming a destructive op was actually invoked."""
+        mock_mail.delete_messages.return_value = 2
+        await delete_messages(
+            ["1", "2"], account="Gmail", source_mailbox="INBOX",
+            ctx=mock_ctx_accept,
+        )
+        mock_logger.log_operation.assert_called_once_with(
+            "delete_messages",
+            {"count": 2, "account": "Gmail",
+             "source_mailbox": "INBOX", "permanent": False},
+            "success",
+        )
+
+    @pytest.mark.asyncio
+    async def test_test_mode_account_gate_blocks_non_test_account(
+        self, mock_mail: MagicMock, monkeypatch: Any,
+        mock_ctx_accept: MagicMock,
+    ) -> None:
+        """delete_messages is account-gated: in MAIL_TEST_MODE a delete
+        targeting an account that isn't MAIL_TEST_ACCOUNT must be blocked
+        before the connector is touched (and before the user is even
+        prompted)."""
+        monkeypatch.setattr(
+            "apple_mail_mcp.server.check_test_mode_safety",
+            lambda *a, **kw: {
+                "success": False, "error": "blocked",
+                "error_type": "safety_violation",
+            },
+        )
+        result = await delete_messages(
+            ["1"], account="RealAccount", source_mailbox="INBOX",
+            ctx=mock_ctx_accept,
+        )
+        assert result["error_type"] == "safety_violation"
+        mock_mail.delete_messages.assert_not_called()
+        mock_ctx_accept.elicit.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_empty_list_early_exit(
         self, mock_mail: MagicMock, mock_ctx_accept: MagicMock
     ) -> None:

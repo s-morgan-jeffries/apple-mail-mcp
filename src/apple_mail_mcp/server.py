@@ -1922,6 +1922,16 @@ async def delete_messages(
                 "message": "No messages to delete",
             }
 
+        # Test-mode safety: when account is provided, gate the delete
+        # against MAIL_TEST_ACCOUNT so an integration run can't delete
+        # from a real account (delete_messages is account-gated).
+        if account is not None:
+            safety_err = check_test_mode_safety(
+                "delete_messages", account=account
+            )
+            if safety_err:
+                return safety_err
+
         rate_err = check_rate_limit("delete_messages", {"count": len(message_ids)})
         if rate_err:
             return rate_err
@@ -1964,6 +1974,13 @@ async def delete_messages(
             skip_bulk_check=False,  # Enforce limit
             account=account,
             source_mailbox=source_mailbox,
+        )
+
+        operation_logger.log_operation(
+            "delete_messages",
+            {"count": count, "account": account,
+             "source_mailbox": source_mailbox, "permanent": permanent},
+            "success",
         )
 
         return {

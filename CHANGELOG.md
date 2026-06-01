@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-01
+
+Minor release. The theme is **hardening the destructive-operation surface and the IMAP fast path**: explicit user-confirmation gates now front the remaining unguarded deletes and rule mutations, `save_attachments` is bounded against disk-fill, a contributor-reported IMAP CRLF command-injection vector is closed, and a STRIDE threat model now documents the trust boundaries those defenses sit on. Alongside the security work: an opt-in read-only server mode, a new recency search filter, several IMAP correctness fixes (three of them contributor-authored), and a full documentation reconciliation to the current 23-tool surface.
+
+Thanks to external contributors [@fmasi](https://github.com/fmasi), [@allenpan05](https://github.com/allenpan05), and [@jason21wc](https://github.com/jason21wc) for the fixes credited below.
+
+### Added
+
+**Read-only server mode + MCP tool annotations (#217):** Tools now carry MCP annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint`) so clients can reason about each tool's effect before calling it. A new `--read-only` flag starts a split server that exposes only the non-mutating tools — a least-privilege deployment for "let the model read my mail but never change it."
+
+**`received_within_hours` search filter (#230):** `search_messages` gains a relative-recency filter (e.g. "messages in the last 6 hours") that compiles to an AppleScript date comparison server-side, avoiding a fetch-all-then-filter pass.
+
+### Changed
+
+**Destructive operations now require confirmation (#239, #222):** `delete_messages` and `create_rule` (when the rule carries a dangerous action — `delete` / `forward_to` / `move_to` / `copy_to`) now route through the `_elicit_confirmation` gate, joining the deletes and rule/draft mutations already gated. As with the existing gates, the flow fails closed: an MCP client that can't elicit gets a typed `confirmation_required` error rather than a silent execution.
+
+**`save_attachments` byte caps (#236):** Attachment saves are now bounded by per-file and total byte caps (a pre-write check plus a post-write net), defending against a malicious/oversized-attachment disk-fill DoS. The tool return now includes a `rejected` list naming any attachments skipped for exceeding a cap. Caps are configurable via `APPLE_MAIL_MCP_MAX_ATTACHMENT_BYTES` / `APPLE_MAIL_MCP_MAX_TOTAL_ATTACHMENT_BYTES`.
+
+**Complexity and type-check CI gates are now blocking (#274):** The cyclomatic-complexity gate (CC ≤ 20) and `mypy --strict` step in PR CI lost their `continue-on-error` — a complexity or type regression now fails the build instead of being advisory. (A CC-25 regression had previously merged undetected because the gate was non-blocking.)
+
+### Fixed
+
+**IMAP multipart attachment enumeration drops attachments (#266, by @jason21wc):** The IMAP BODYSTRUCTURE walk failed to enumerate attachments on some multipart message shapes, so `save_attachments` / attachment listing could under-report. Fixed alongside an `rfc822`-consistency cleanup.
+
+**`_resolve_imap_config` raises `KeyError` on accounts with no IMAP server (#267, by @jason21wc):** Accounts lacking an IMAP server property (e.g. some local/POP setups) raised `KeyError` instead of degrading gracefully; the resolver now coerces the missing value and falls back cleanly.
+
+**Compose drafts created via IMAP APPEND (#245, fix #246 by @fmasi):** Creating a compose draft through Mail.app introduced an unwanted cite-blockquote wrapper. Drafts are now written via IMAP APPEND, bypassing Mail.app's compose-window mangling.
+
+**Connector timeout threaded into non-JSON AppleScript paths (#233):** The `with timeout` protection added in v0.8.2 covered only `_wrap_as_json_script` call sites; the direct-AppleScript mutation paths (`mark_as_read`, `move_messages`, `update_message`, …) now also honor the configured connector timeout, closing the gap that entry tracked.
+
+**AppleScript mailbox resolver — nested paths + Gmail custom labels (#247):** The mailbox-name resolver mishandled nested mailbox paths and Gmail custom labels; resolution now walks the hierarchy correctly.
+
+**`search_messages` iteration order + date-literal bug (#242):** AppleScript message iteration is now reversed to return newest-first as documented, and a date-literal construction bug in the filter path is fixed.
+
+**IMAP Keychain lookup tries both name and UUID forms (#243):** `setup-imap` may key the Keychain entry under either the account display name or its UUID; runtime lookup now tries both forms before falling back to AppleScript.
+
+**Stale e2e elicitation harness repaired (#257):** The `delete_mailbox` / `delete_messages` e2e tests had drifted out of sync with the elicitation gates and were silently failing; repaired, and the manual-e2e policy (CI excludes e2e; `make test-e2e` is a mandatory pre-release gate) is now documented.
+
+### Security
+
+**IMAP CRLF command injection + attachment path traversal (#254, by @allenpan05):** Closed a CRLF-injection vector where crafted input could smuggle additional IMAP protocol commands across a line boundary, plus attachment-path traversal cases. Reported and fixed by an external contributor.
+
+**Removed latent AppleScript-injection vector (#258):** Deleted the unused `parse_date_filter` helper, which built AppleScript from input without the standard escape path — dead code, but a live injection vector if ever wired up.
+
+**Threat model documented (#213):** Added `docs/guides/THREAT_MODEL.md` — a STRIDE pass across the five trust boundaries (MCP client, server process, AppleScript bridge, IMAP, on-disk user data) — and cross-linked it from the per-feature security checklist.
+
+**Release-review hardening:** The release-gate code review surfaced three pre-existing gaps (none regressions), two fixed here: (1) `create_draft`'s recipient lists now pass through the mandated `sanitize_input` → `escape_applescript_string` two-step before AppleScript interpolation, matching every other interpolation site (previously only `escape_applescript_string` was applied, so a null byte in a recipient address would reach the generated script); (2) `delete_messages` is now an account-gated operation and calls `check_test_mode_safety` when an `account` is supplied — in `MAIL_TEST_MODE` a delete aimed at a non-test account is now rejected before the connector is touched — and its success path now records to the audit trail like every other mutating tool. The third (defense-in-depth escaping of `draft_id`, which `_validate_draft_id`'s regex already makes injection-safe) is tracked as #294.
+
+### Dependencies
+
+Bumped three transitive dependencies to clear newly-disclosed advisories (the pins were unchanged since v0.8.2; only the advisories are new): `idna` 3.11 → 3.17, `starlette` 1.0.0 → 1.2.1, `urllib3` 2.6.3 → 2.7.0.
+
+### Docs
+
+**Documentation reconciled to the current surface (#220):** Major refresh of README, `ARCHITECTURE.md` (now documents the AppleScript-default + IMAP-fast-path dispatch model, dual-emit IDs, drafts lifecycle, and thread tiers), `TOOLS.md` (corrected to 23 tools, stale `get_message` examples fixed), `DEVELOPMENT.md` (rewritten as a dev-workflow guide), `APPLESCRIPT_GOTCHAS.md` (JSON-via-ASObjC patterns), `TESTING.md`, and `SECURITY.md` (reconciled with the threat model). Refreshed the blind-agent-eval baseline (#219) and the performance benchmark baseline (#216), and added the claim-by-comment convention to `CONTRIBUTING.md` (#259).
+
 ## [0.8.2] - 2026-05-20
 
 Patch release. Three substantive bug fixes — one security regression in our own gate chain, one regression introduced at v0.8.1, and one long-latent AppleEvent timeout bug surfaced by use on slow Exchange/EWS accounts. Two of the three are contributor-authored: [@fmasi](https://github.com/fmasi) reported and fixed the v0.8.1 regression they noticed within hours of release; [@allenpan05](https://github.com/allenpan05) reported and fixed the AppleEvent timeout bug. Thanks to both.

@@ -264,6 +264,7 @@ ACCOUNT_GATED_OPERATIONS = {
     "search_messages",
     "update_message",
     "create_mailbox",
+    "delete_messages",
 }
 
 SEND_OPERATIONS = {
