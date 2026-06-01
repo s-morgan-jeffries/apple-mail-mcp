@@ -47,9 +47,15 @@ Merge the current PR, pull main, surface any open contributor PRs and untriaged 
    - If the same author appears multiple times, group them together in the table.
    - If zero rows, say "No untriaged contributor issues" for positive confirmation.
 
-7. **Determine the current milestone.** Look at the most recent closed PR's milestone, or find the earliest open milestone:
+7. **Determine the current milestone.** Look at the most recent closed PR's milestone, or find the earliest open milestone **by semantic version**. Sort on the numeric version tuple, not the title string — a lexical sort puts `v0.10.0` before `v0.9.0` (`'1' < '9'` at the third character). The `test(...)` guard sorts any non-`vX.Y.Z` title last so a future named milestone doesn't crash `tonumber`:
    ```bash
-   gh api repos/:owner/:repo/milestones --jq 'sort_by(.due_on // .title) | map(select(.state == "open")) | .[0].title'
+   gh api repos/:owner/:repo/milestones \
+     --jq 'map(select(.state == "open"))
+           | sort_by(.title
+                     | if test("^v?[0-9]+(\\.[0-9]+)*$")
+                       then (ltrimstr("v") | split(".") | map(tonumber))
+                       else [999999] end)
+           | .[0].title'
    ```
 
 8. **List open issues** on that milestone:
