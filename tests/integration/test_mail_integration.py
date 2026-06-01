@@ -1340,6 +1340,12 @@ class TestDraftsLifecycleIntegration:
             from_account=test_account,
         )
         draft_id = result["draft_id"]
+        # The IMAP-APPEND path (#245) returns a bare RFC Message-ID, not
+        # Mail's internal id; resolve it so the `id of d` lookup below
+        # matches (mirrors get_draft_state / delete_draft).
+        lookup_id = draft_id
+        if "@" in draft_id:
+            lookup_id = connector.find_message_by_message_id(draft_id) or draft_id
 
         try:
             # Read the draft's headers via osascript and confirm the
@@ -1352,7 +1358,7 @@ class TestDraftsLifecycleIntegration:
                         repeat with mb in mailboxes of acc
                             if name of mb contains "Drafts" then
                                 repeat with d in messages of mb
-                                    if (id of d as text) is "{draft_id}" then
+                                    if (id of d as text) is "{lookup_id}" then
                                         return sender of d
                                     end if
                                 end repeat
