@@ -27,7 +27,7 @@ classifiers = [
 
 dependencies = [
     "fastmcp>=3.2.4",
-    "imapclient>=3.0.0",
+    "imapclient>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -41,7 +41,7 @@ dev = [
     "mypy>=1.20.2",
 ]
 research = [
-    "imapclient>=3.0.0",
+    "imapclient>=3.1.0",
 ]
 
 [dependency-groups]
