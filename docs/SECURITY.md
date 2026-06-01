@@ -32,11 +32,21 @@ The Apple Mail MCP server provides programmatic access to your email through Cla
 - Potential for unintended actions through miscommunication
 - Prompt injection risks from malicious email content
 
+**Security docs:** this file is the user-facing posture & privacy guide;
+[`guides/THREAT_MODEL.md`](guides/THREAT_MODEL.md) is the canonical STRIDE trust-boundary analysis;
+[`guides/SECURITY_CHECKLIST.md`](guides/SECURITY_CHECKLIST.md) is the per-feature contributor
+checklist; the repo-root [`SECURITY.md`](../SECURITY.md) is the vulnerability-reporting policy.
+
+**Destructive operations require confirmation.** These tools prompt the user via MCP elicitation
+before acting (fail-closed — no confirmation context means the operation is blocked):
+`delete_messages`, `delete_mailbox`, `delete_draft`, `delete_rule`, `delete_template`, `create_rule`
+when it has a move/forward/delete action, and `create_draft` with `send_now=true`.
+
 ---
 
 ## Attack Surface Analysis
 
-> **For the canonical trust-boundary breakdown and STRIDE analysis, see [`docs/guides/THREAT_MODEL.md`](guides/THREAT_MODEL.md).** The narrative below is preserved for continuity and will be reconciled with the threat model in #220.
+> **The canonical analysis lives in [`docs/guides/THREAT_MODEL.md`](guides/THREAT_MODEL.md)** — a STRIDE pass per trust boundary with the attacker model and tracked open gaps. The narrative below is the *user-facing* counterpart: the same risks in plain language, with how-to-use-safely guidance. When the two differ, the threat model is authoritative.
 
 ### 1. Prompt Injection
 

@@ -1,214 +1,82 @@
-# Setup Guide
+# Development Workflow
 
-This guide will help you set up the Apple Mail MCP server for use with Claude Desktop.
+How to develop on the Apple Mail MCP server. For *installing/configuring* the server as a user, see
+the [README](../../README.md). For coding standards and the PR process, see
+[CONTRIBUTING.md](../../CONTRIBUTING.md).
 
-## Prerequisites
+## Environment
 
-- macOS 10.15 (Catalina) or later
-- Python 3.10 or later
-- Apple Mail configured with at least one email account
-- Claude Desktop installed
-
-## Installation
-
-### Option 1: Install from PyPI (Coming Soon)
+The project uses [`uv`](https://docs.astral.sh/uv/). One command sets up a virtualenv with all dev
+dependencies:
 
 ```bash
-pip install apple-mail-mcp
+uv sync --dev
 ```
 
-### Option 2: Install from Source
+Run anything in that environment with `uv run …` (e.g. `uv run pytest`, `uv run python -m
+apple_mail_mcp.server`). `uv sync` also installs the `apple-mail-mcp` console script into
+`.venv/bin/`.
+
+## The canonical check: `make check-all`
+
+`make check-all` is the single pre-push gate. It runs, stopping on the first failure:
+
+| Step | Command | Notes |
+|------|---------|-------|
+| Lint | `uv run ruff check src/ tests/` | blocking |
+| Type check | `uv run mypy src/` | blocking (strict) |
+| Unit tests | `uv run pytest -m "not integration and not e2e and not benchmark"` | blocking; coverage ≥ 90% |
+| Complexity | `./scripts/check_complexity.sh` | blocking — see below |
+| Version sync | `./scripts/check_version_sync.sh` | versions consistent across files |
+| Client/server parity | `./scripts/check_client_server_parity.sh` | every public connector method is exposed |
+
+CI runs the same lint / type / unit / complexity / version / parity gates (`.github/workflows/test.yml`).
+**Integration, e2e, and benchmark tests are *not* in CI** (they need real Mail.app) — run those
+locally; see [TESTING.md](TESTING.md).
+
+## Core conventions
+
+- **TDD always** — RED → GREEN → REFACTOR. Write the failing test first.
+- **Backend + frontend together** — a feature touches *both* `mail_connector.py` (the connector
+  method) and `server.py` (the MCP tool). The parity script (`check_client_server_parity.sh`) enforces
+  that every public connector method is exposed as a tool.
+- **Structured responses** — every tool returns `{"success": bool, …}`; errors carry `error` +
+  `error_type`. No exception reaches the LLM.
+- **Sanitize twice** — all user input goes through `sanitize_input()` then
+  `escape_applescript_string()` before it touches AppleScript. See
+  [SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md).
+- **Touched AppleScript → integration test** — unit tests mock `_run_applescript()` and cannot catch
+  AppleScript bugs (see [TESTING.md](TESTING.md)).
+
+## Cyclomatic-complexity gate
+
+`./scripts/check_complexity.sh` fails any function over **CC 20** (via `radon`, run through `uv`).
+Genuinely-complex functions can be admitted via the per-function `ALLOWLIST` in that script — a
+`(filename, qualified_name) → max_CC` map that ratchets (lowering an entry after a refactor is free;
+raising one needs justification). See [COMPLEXITY.md](COMPLEXITY.md).
+
+## Branch & changelog conventions
+
+- Branch names: `{type}/issue-{num}-{description}` — e.g. `fix/issue-99-timeout`,
+  `feature/issue-42-thread-support`.
+- **`CHANGELOG.md` is only updated on release branches**, never on feature branches (the release
+  skill owns it).
+
+## Common make targets
 
 ```bash
-# Clone the repository
-git clone https://github.com/s-morgan-jeffries/apple-mail-mcp.git
-cd apple-mail-mcp
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install package
-pip install -e .
+make test              # unit tests (~1s, mocked AppleScript)
+make test-integration  # real Mail.app (needs a test account; MAIL_TEST_MODE=true)
+make test-e2e          # MCP tool dispatch tests
+make lint / format / typecheck
+make coverage
+make benchmark         # perf benchmarks (opt-in; needs real Mail) — see BENCHMARKING.md
+make eval-descriptions # regenerate the blind-eval tool descriptions from the live server
 ```
 
-## Configuration
+## See also
 
-### Claude Desktop Setup
-
-1. Locate your Claude Desktop configuration file:
-   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-2. Add the Apple Mail MCP server configuration:
-
-```json
-{
-  "mcpServers": {
-    "apple-mail": {
-      "command": "python",
-      "args": ["-m", "apple_mail_mcp.server"]
-    }
-  }
-}
-```
-
-If you installed from source, use the full path to the venv:
-
-```json
-{
-  "mcpServers": {
-    "apple-mail": {
-      "command": "/path/to/apple-mail-mcp/venv/bin/python",
-      "args": ["-m", "apple_mail_mcp.server"]
-    }
-  }
-}
-```
-
-3. Restart Claude Desktop
-
-## Permissions
-
-When you first use the MCP server, macOS will prompt you for permissions:
-
-### Automation Permission
-
-1. A dialog will appear: **"python" would like to control "Mail"**
-2. Click **OK** to grant permission
-
-If you accidentally denied permission:
-
-1. Open **System Settings** (or System Preferences)
-2. Go to **Privacy & Security** → **Automation**
-3. Find **python** or **Terminal** in the list
-4. Check the box next to **Mail**
-
-### Full Disk Access (Optional)
-
-Only needed for Phase 4 analytics features using SQLite database access.
-
-1. Open **System Settings** → **Privacy & Security** → **Full Disk Access**
-2. Click the **+** button
-3. Navigate to your Python executable
-4. Enable Full Disk Access
-
-## Verification
-
-### Test the Installation
-
-1. Open Claude Desktop
-2. Start a new conversation
-3. Try a simple command:
-
-```
-List my mailboxes
-```
-
-You should see a list of your Mail.app mailboxes.
-
-### Test Basic Operations
-
-Try these commands to verify everything works:
-
-```
-# Search for unread emails
-Show me my unread emails
-
-# Get mailbox information
-List all my mail folders
-
-# Search with filters
-Find emails from john@example.com in the last week
-```
-
-## Troubleshooting
-
-### "Command not found" Error
-
-**Problem:** Claude Desktop can't find the Python command.
-
-**Solutions:**
-1. Use the full path to Python in the config:
-   ```json
-   "command": "/usr/local/bin/python3"
-   ```
-2. Or use the venv path:
-   ```json
-   "command": "/path/to/venv/bin/python"
-   ```
-
-### "Permission Denied" Error
-
-**Problem:** Automation permission not granted.
-
-**Solution:**
-1. Check System Settings → Privacy & Security → Automation
-2. Grant permission for Python/Terminal to control Mail
-
-### "Account Not Found" Error
-
-**Problem:** The MCP server can't access your mail account.
-
-**Solutions:**
-1. Verify Mail.app is open and configured
-2. Check the account name (use exact name from Mail.app preferences)
-3. Try using a different account name
-
-### No Response from MCP Server
-
-**Problem:** The server isn't starting or responding.
-
-**Solutions:**
-1. Check Claude Desktop logs:
-   - macOS: `~/Library/Logs/Claude/mcp.log`
-2. Verify Python installation:
-   ```bash
-   python3 --version
-   ```
-3. Test the server directly:
-   ```bash
-   python -m apple_mail_mcp.server
-   ```
-
-### "Module not found" Error
-
-**Problem:** Dependencies not installed.
-
-**Solution:**
-```bash
-pip install fastmcp
-```
-
-## Configuration Options
-
-### Custom Timeout
-
-Set a custom timeout for AppleScript operations:
-
-```python
-from apple_mail_mcp.mail_connector import AppleMailConnector
-
-connector = AppleMailConnector(timeout=120)  # 2 minutes
-```
-
-### Logging
-
-Enable debug logging:
-
-```bash
-export LOGLEVEL=DEBUG
-python -m apple_mail_mcp.server
-```
-
-## Next Steps
-
-- Read the [Tools Documentation](TOOLS.md) to learn about available operations
-- Review [Security Considerations](SECURITY.md)
-- Check out [Examples](EXAMPLES.md) for common use cases
-
-## Getting Help
-
-- **Issues**: [GitHub Issues](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/s-morgan-jeffries/apple-mail-mcp/discussions)
-- **Documentation**: [Full Documentation](../README.md)
+- [ARCHITECTURE.md](../reference/ARCHITECTURE.md) — dispatch model, dual-emit IDs, drafts lifecycle, thread tiers
+- [APPLESCRIPT_GOTCHAS.md](../reference/APPLESCRIPT_GOTCHAS.md) — JSON-via-ASObjC, escaping, known limits
+- [TESTING.md](TESTING.md) — test categories, the manual-e2e policy, benchmarks, blind evals
+- [TOOLS.md](../reference/TOOLS.md) — full tool reference
