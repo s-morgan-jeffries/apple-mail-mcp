@@ -442,3 +442,25 @@ def walk_thread_graph(
             break
 
     return accepted
+
+
+def is_apple_hosted_address(address: str) -> bool:
+    """True if ``address`` is on an Apple-hosted iCloud Mail domain.
+
+    iCloud Mail's IMAP server authenticates one of the account's own
+    Apple-hosted addresses (``@icloud.com`` / ``@me.com`` / legacy
+    ``@mac.com``). Used by ``_resolve_imap_config`` to pick the right IMAP
+    login when an iCloud account's Apple ID is a third-party email (#299).
+    """
+    return address.strip().lower().endswith(
+        ("@icloud.com", "@me.com", "@mac.com")
+    )
+
+
+def is_icloud_imap_host(host: str) -> bool:
+    """True if ``host`` is an iCloud Mail IMAP server (``*.mail.me.com``).
+
+    Covers the per-partition hostnames Mail.app reports (e.g.
+    ``p42-imap.mail.me.com``) as well as ``imap.mail.me.com``.
+    """
+    return host.strip().lower().endswith(".mail.me.com")
