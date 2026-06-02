@@ -6654,11 +6654,16 @@ class TestReceivedWithinHours:
 # =============================================================================
 
 
+@pytest.mark.real_account_fallback
 class TestKeychainDualFormLookup:
     """Keychain entries are written under whatever string the user typed at
     setup-imap time (typically the account NAME). Callers may legitimately
     pass either the name or the UUID (per the docstring's stability claim).
     The wrapper retries with the alternative form on initial NotFound.
+
+    Opts out of the conftest ``_alternative_account_identifier`` stub via the
+    ``real_account_fallback`` marker — these tests exercise the real fallback
+    against an instance-mocked ``list_accounts`` (no AppleScript).
     """
 
     def test_primary_lookup_succeeds_no_fallback(

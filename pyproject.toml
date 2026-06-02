@@ -80,6 +80,7 @@ markers = [
     "e2e: mark test as end-to-end test (full MCP stack)",
     "benchmark: mark test as performance benchmark",
     "slow: mark test as slow-running",
+    "real_account_fallback: opt out of the conftest stub of _alternative_account_identifier (for tests that exercise the real name<->UUID Keychain fallback)",
 ]
 
 [tool.coverage.run]
