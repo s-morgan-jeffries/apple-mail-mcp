@@ -916,6 +916,83 @@ class TestAppleMailConnector:
         assert result == ("imap.gmail.com", 993, "me@gmail.com")
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_icloud_third_party_apple_id_uses_icloud_alias(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """#299: iCloud account whose Apple ID (`user name`) is a third-party
+        email (gmail) — the *.mail.me.com server rejects that, so resolve the
+        login to the account's @icloud.com address instead."""
+        mock_run.return_value = (
+            '{"host":"p42-imap.mail.me.com",'
+            '"port":993,'
+            '"user_name":"someone@gmail.com",'
+            '"email_addresses":["someone@icloud.com","someone@me.com"]}'
+        )
+        result = connector._resolve_imap_config("iCloud")
+        assert result == ("p42-imap.mail.me.com", 993, "someone@icloud.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_icloud_falls_back_to_me_com_alias(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """#299: when only an @me.com Apple-hosted alias is present, use it."""
+        mock_run.return_value = (
+            '{"host":"p42-imap.mail.me.com",'
+            '"port":993,'
+            '"user_name":"someone@gmail.com",'
+            '"email_addresses":["someone@me.com"]}'
+        )
+        result = connector._resolve_imap_config("iCloud")
+        assert result == ("p42-imap.mail.me.com", 993, "someone@me.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_icloud_apple_user_name_unchanged(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """#299: when `user name` is already Apple-hosted, keep it (the
+        normal iCloud case) — don't second-guess it."""
+        mock_run.return_value = (
+            '{"host":"imap.mail.me.com",'
+            '"port":993,'
+            '"user_name":"primary@icloud.com",'
+            '"email_addresses":["alias@icloud.com","primary@icloud.com"]}'
+        )
+        result = connector._resolve_imap_config("iCloud")
+        assert result == ("imap.mail.me.com", 993, "primary@icloud.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_icloud_no_apple_alias_keeps_user_name(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """#299/#201: me.com host + non-Apple `user name` + NO Apple-hosted
+        alias (the pure custom-domain shape) → fall back to `user name`,
+        preserving #201."""
+        mock_run.return_value = (
+            '{"host":"imap.mail.me.com",'
+            '"port":993,'
+            '"user_name":"apple-id@example.com",'
+            '"email_addresses":["from-alias@example.com","apple-id@example.com"]}'
+        )
+        result = connector._resolve_imap_config("iCloud")
+        assert result == ("imap.mail.me.com", 993, "apple-id@example.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_non_icloud_host_not_overridden(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        """#299: the Apple-alias preference is scoped to iCloud IMAP hosts.
+        A non-me.com host keeps `user name` even if an icloud address happens
+        to be in the From list."""
+        mock_run.return_value = (
+            '{"host":"imap.gmail.com",'
+            '"port":993,'
+            '"user_name":"me@gmail.com",'
+            '"email_addresses":["me@gmail.com","old@icloud.com"]}'
+        )
+        result = connector._resolve_imap_config("Gmail")
+        assert result == ("imap.gmail.com", 993, "me@gmail.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_resolve_imap_config_propagates_account_not_found(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:

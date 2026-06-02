@@ -48,6 +48,8 @@ from .utils import (
     applescript_account_clause,
     escape_applescript_string,
     get_flag_index,
+    is_apple_hosted_address,
+    is_icloud_imap_host,
     parse_applescript_json,
     sanitize_filename,
     sanitize_input,
@@ -1578,6 +1580,16 @@ class AppleMailConnector:
             matches Mail.app's own behavior in every configuration we've
             seen. (#201)
 
+            Inverse case (#299): an iCloud account whose Apple ID is a
+            *third-party* email (e.g. a gmail-based Apple ID). There
+            `user name` is the gmail address, which iCloud's IMAP server
+            (*.mail.me.com) rejects — it wants the account's own
+            @icloud.com/@me.com address. So for iCloud IMAP hosts, when
+            `user name` is not itself Apple-hosted, we prefer an
+            Apple-hosted entry from `email addresses` (falling back to
+            `user name` when none exists, which keeps the #201 custom-domain
+            case correct).
+
         Raises:
             MailAccountNotFoundError: If the account doesn't exist.
         """
@@ -1605,8 +1617,23 @@ class AppleMailConnector:
         # as `missing value`, which drops those keys from the serialized
         # record. An empty host then fails the later connect with OSError
         # (the graceful-fallback path) rather than KeyError-ing here.
+        host = cast(str, parsed.get("host") or "")
+        # (#299) iCloud IMAP (*.mail.me.com) authenticates the account's own
+        # Apple-hosted address, not a third-party Apple ID. When `user name`
+        # is a non-Apple email (e.g. a gmail-based Apple ID), prefer an
+        # @icloud.com/@me.com/@mac.com entry from `email addresses`. Falls
+        # back to `user name` when none exists — preserving the #201
+        # custom-domain case (no Apple-hosted alias present → the Apple ID
+        # itself is the login).
+        if is_icloud_imap_host(host) and not is_apple_hosted_address(email):
+            apple_alias = next(
+                (a for a in email_addresses if is_apple_hosted_address(a)),
+                None,
+            )
+            if apple_alias:
+                email = apple_alias
         return (
-            cast(str, parsed.get("host") or ""),
+            host,
             cast(int, parsed.get("port") or 0),
             email,
         )

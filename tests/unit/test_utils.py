@@ -11,7 +11,9 @@ from apple_mail_mcp.utils import (
     format_applescript_list,
     get_flag_index,
     is_account_uuid,
+    is_apple_hosted_address,
     is_gmail_system_label,
+    is_icloud_imap_host,
     normalize_subject,
     parse_applescript_json,
     parse_applescript_list,
@@ -415,5 +417,45 @@ class TestGetFlagIndex:
 
     def test_case_insensitive(self) -> None:
         assert get_flag_index("RED") == 0
+
+
+class TestIsAppleHostedAddress:
+    """#299: detect the account's own Apple-hosted iCloud Mail addresses."""
+
+    def test_icloud_me_mac_are_apple_hosted(self) -> None:
+        assert is_apple_hosted_address("a@icloud.com") is True
+        assert is_apple_hosted_address("a@me.com") is True
+        assert is_apple_hosted_address("a@mac.com") is True
+
+    def test_case_and_whitespace_insensitive(self) -> None:
+        assert is_apple_hosted_address("  A@ICloud.Com ") is True
+
+    def test_third_party_and_custom_domains_not_apple_hosted(self) -> None:
+        assert is_apple_hosted_address("a@gmail.com") is False
+        assert is_apple_hosted_address("a@example.com") is False
+        assert is_apple_hosted_address("") is False
+
+    def test_substring_spoof_not_apple_hosted(self) -> None:
+        # The Apple domain must be the actual host, not a prefix of a
+        # look-alike domain.
+        assert is_apple_hosted_address("a@icloud.com.evil.com") is False
+        assert is_apple_hosted_address("icloud.com@evil.com") is False
+
+
+class TestIsIcloudImapHost:
+    """#299: detect iCloud Mail IMAP servers (*.mail.me.com)."""
+
+    def test_partition_and_canonical_hosts(self) -> None:
+        assert is_icloud_imap_host("p42-imap.mail.me.com") is True
+        assert is_icloud_imap_host("imap.mail.me.com") is True
+        assert is_icloud_imap_host("P66-IMAP.MAIL.ME.COM") is True
+
+    def test_non_icloud_hosts(self) -> None:
+        assert is_icloud_imap_host("imap.gmail.com") is False
+        assert is_icloud_imap_host("imap.mail.yahoo.com") is False
+        assert is_icloud_imap_host("") is False
+
+    def test_substring_spoof_not_matched(self) -> None:
+        assert is_icloud_imap_host("mail.me.com.evil.com") is False
         assert get_flag_index("Red") == 0
         assert get_flag_index("oRaNgE") == 1
