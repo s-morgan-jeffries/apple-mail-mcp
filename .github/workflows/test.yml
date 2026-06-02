@@ -26,11 +26,11 @@ jobs:
 
       - name: Unit tests
         run: uv run pytest tests/ -m "not integration and not e2e and not benchmark" -v --cov=apple_mail_mcp --cov-report=term-missing --cov-fail-under=90
-        # Suite is ~10s locally but ~5min in CI: a few IMAP error-path unit
-        # tests stall ~30s each on a real socket timeout that's instant
-        # locally. Bumped 5->10 to stop borderline flakes; the real fix
-        # (mock the socket) is tracked in #298.
-        timeout-minutes: 10
+        # The unit suite runs in seconds. A tight cap catches any future
+        # leak of a real osascript/socket call (which stalls ~30s in CI) —
+        # the #298 keychain-fallback leak that once made this ~5min is fixed
+        # in tests/unit/conftest.py.
+        timeout-minutes: 5
 
       - name: Complexity check
         run: ./scripts/check_complexity.sh
