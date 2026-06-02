@@ -56,7 +56,23 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CONNECT_TIMEOUT_S: float = 3.0
 """Per invariant 4 in imap-auth-options-decision.md: ≤3s so offline
 fallback happens inside the graceful-degradation window without
-waiting for TCP's default timeout."""
+waiting for TCP's default timeout. Bounds connect + login only — once
+logged in the socket timeout is raised to OPERATION_TIMEOUT_S (#249)."""
+
+OPERATION_TIMEOUT_S: float = 30.0
+"""Socket read timeout for SEARCH/FETCH after login. imapclient's
+``timeout=`` applies to every socket read, so the short CONNECT_TIMEOUT_S
+would otherwise kill a legitimate server-side SEARCH (10–20s on a large
+iCloud mailbox) mid-operation, silently dropping the IMAP fast path to the
+slower AppleScript fallback. We connect fast (offline detection) then raise
+the timeout for real work. (#249)"""
+
+
+def _apply_operation_timeout(client: IMAPClient) -> None:
+    """Raise the socket read timeout from the connect window to
+    OPERATION_TIMEOUT_S, post-login. Call immediately after
+    ``client.login(...)`` at every connection-open site. (#249)"""
+    client.socket().settimeout(OPERATION_TIMEOUT_S)
 
 POOL_IDLE_TIMEOUT_S: float = 270.0
 """Default pool idle threshold. iCloud and most providers drop IMAP
@@ -155,6 +171,7 @@ class ImapConnectionPool:
                     host, port=port, ssl=True, timeout=connect_timeout
                 )
                 client.login(email, password)
+                _apply_operation_timeout(client)
                 entry = _PooledClient(client=client)
                 self._cache[key] = entry
 
@@ -623,6 +640,7 @@ class ImapConnector:
         )
         try:
             client.login(self._email, self._password)
+            _apply_operation_timeout(client)
             yield client
         finally:
             client.logout()

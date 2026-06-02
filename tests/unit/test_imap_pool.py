@@ -26,6 +26,8 @@ import pytest
 from imapclient.exceptions import IMAPClientError, LoginError
 
 from apple_mail_mcp.imap_connector import (
+    CONNECT_TIMEOUT_S,
+    OPERATION_TIMEOUT_S,
     POOL_IDLE_TIMEOUT_S,
     ImapConnectionPool,
     ImapConnector,
@@ -72,6 +74,50 @@ class TestSessionReuse:
         client.login.assert_called_once_with("u@e.com", "pw")
         # No logout between calls — connection stays alive.
         client.logout.assert_not_called()
+
+
+class TestOperationTimeout:
+    """#249: connect/login bounded by the short connect timeout, then the
+    socket read timeout is raised to OPERATION_TIMEOUT_S for SEARCH/FETCH so
+    a slow server-side search isn't killed mid-operation."""
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_connect_short_then_operation_timeout_raised_post_login(
+        self, mock_cls: MagicMock, pool: ImapConnectionPool
+    ) -> None:
+        client = MagicMock()
+        mock_cls.return_value = client
+
+        with pool.session("h", 993, "u@e.com", "pw", CONNECT_TIMEOUT_S):
+            pass
+
+        # Connect uses the short timeout...
+        mock_cls.assert_called_once_with(
+            "h", port=993, ssl=True, timeout=CONNECT_TIMEOUT_S
+        )
+        # ...and after login the socket is raised to the operation timeout.
+        client.login.assert_called_once_with("u@e.com", "pw")
+        client.socket().settimeout.assert_called_once_with(OPERATION_TIMEOUT_S)
+        # Ordering: settimeout happens after login, not before.
+        names = [c[0] for c in client.mock_calls]
+        assert names.index("login") < names.index("socket().settimeout")
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_reused_session_keeps_single_timeout_application(
+        self, mock_cls: MagicMock, pool: ImapConnectionPool
+    ) -> None:
+        """A pooled connection sets the operation timeout once at creation;
+        reuse neither re-logs-in nor re-applies it."""
+        client = MagicMock()
+        mock_cls.return_value = client
+
+        with pool.session("h", 993, "u@e.com", "pw", CONNECT_TIMEOUT_S):
+            pass
+        with pool.session("h", 993, "u@e.com", "pw", CONNECT_TIMEOUT_S):
+            pass
+
+        client.login.assert_called_once()
+        client.socket().settimeout.assert_called_once_with(OPERATION_TIMEOUT_S)
 
     @patch("apple_mail_mcp.imap_connector.IMAPClient")
     def test_different_accounts_get_independent_clients(

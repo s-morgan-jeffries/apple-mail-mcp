@@ -8,7 +8,11 @@ import pytest
 from imapclient.exceptions import IMAPClientError
 from imapclient.response_types import Address, Envelope
 
-from apple_mail_mcp.imap_connector import CONNECT_TIMEOUT_S, ImapConnector
+from apple_mail_mcp.imap_connector import (
+    CONNECT_TIMEOUT_S,
+    OPERATION_TIMEOUT_S,
+    ImapConnector,
+)
 
 
 def _fake_envelope(
@@ -54,6 +58,11 @@ def _fake_fetch_result(uids: list[int]) -> dict[int, dict[bytes, Any]]:
 class TestConstructor:
     def test_timeout_is_three_seconds_by_default(self):
         assert CONNECT_TIMEOUT_S == 3.0
+
+    def test_operation_timeout_is_thirty_seconds(self):
+        # #249: connect fast (3s), operate slow (30s).
+        assert OPERATION_TIMEOUT_S == 30.0
+        assert OPERATION_TIMEOUT_S > CONNECT_TIMEOUT_S
 
     def test_default_timeout(self):
         conn = ImapConnector("host", 993, "u@i.com", "pw")
@@ -102,6 +111,14 @@ class TestSearchHappyPath:
         mock_client.logout.assert_called_once()
 
         assert len(result) == 3
+
+        # #249: connect uses the short timeout (asserted above), then the
+        # socket is raised to the operation timeout after login.
+        mock_client.socket().settimeout.assert_called_once_with(
+            OPERATION_TIMEOUT_S
+        )
+        names = [c[0] for c in mock_client.mock_calls]
+        assert names.index("login") < names.index("socket().settimeout")
 
     @patch("apple_mail_mcp.imap_connector.IMAPClient")
     def test_empty_search_result_skips_fetch(self, mock_cls):

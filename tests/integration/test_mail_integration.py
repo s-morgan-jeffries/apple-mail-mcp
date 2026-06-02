@@ -784,6 +784,31 @@ class TestDraftsLifecycleIntegration:
             except Exception:
                 pass
 
+    def test_imap_operation_timeout_applied_on_live_socket(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """#249: post-login, the live IMAP socket carries OPERATION_TIMEOUT_S
+        (not the short connect timeout), so a slow server-side SEARCH/FETCH
+        isn't killed mid-operation. Drives the real production `_session`
+        path and inspects the actual socket timeout, then runs a real
+        operation under it.
+        """
+        from apple_mail_mcp.imap_connector import (
+            OPERATION_TIMEOUT_S,
+            ImapConnector,
+        )
+        from apple_mail_mcp.keychain import get_imap_password
+
+        self._skip_without_keychain(connector, test_account)
+
+        host, port, email = connector._resolve_imap_config(test_account)
+        pw = get_imap_password(test_account, email)
+        imap = ImapConnector(host, port, email, pw)
+        with imap._session() as client:
+            assert client.socket().gettimeout() == OPERATION_TIMEOUT_S
+            # A real operation completes under the raised timeout.
+            client.select_folder("INBOX", readonly=True)
+
     def test_attachment_extraction_round_trip(
         self,
         connector: AppleMailConnector,
