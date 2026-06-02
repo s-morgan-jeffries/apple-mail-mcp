@@ -845,6 +845,70 @@ class TestDraftsLifecycleIntegration:
         finally:
             connector.delete_draft(draft_id)
 
+    def test_extract_attachments_on_imap_draft_resolves_rfc_id(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+        tmp_path: Path,
+    ) -> None:
+        """#294: extract_draft_attachments must resolve an RFC Message-ID
+        draft_id (IMAP-APPEND drafts, #245) to Mail's internal id, like
+        delete_draft/get_draft_state. Pre-fix it interpolated the raw RFC id
+        as targetId, never matched Mail's numeric `id`, and update_draft
+        silently lost attachments on IMAP-created drafts. Skips unless the
+        account has Keychain creds — only then does create_draft take the
+        IMAP-APPEND path and return an RFC-id draft_id (the case under test).
+        """
+        self._skip_without_keychain(connector, test_account)
+
+        original = tmp_path / "src" / "report.pdf"
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b"%PDF-294-INTEG")
+
+        import time as _time
+
+        from apple_mail_mcp.exceptions import MailDraftNotFoundError
+
+        result = connector.create_draft(
+            seed="new",
+            from_account=test_account,
+            to=["target@example.com"],
+            subject="ZZZ-AMM-294-ATTACH",
+            body="see attached",
+            attachment_paths=[original],
+        )
+        draft_id = result["draft_id"]
+        try:
+            # IMAP-APPEND path returns a bare RFC Message-ID (has @, no <>).
+            assert "@" in draft_id and "<" not in draft_id, (
+                f"expected IMAP-APPEND draft_id; got {draft_id!r}"
+            )
+            # Mail.app's IMAP sync may lag the APPEND; poll until the draft
+            # is resolvable by its Message-ID (also the case under test for
+            # extract — which now resolves the RFC id the same way).
+            state = None
+            for _ in range(10):
+                try:
+                    state = connector.get_draft_state(draft_id)
+                    break
+                except MailDraftNotFoundError:
+                    _time.sleep(3)
+            assert state is not None, "draft never synced into Mail.app in 30s"
+            assert "report.pdf" in state["attachment_names"]
+
+            extract_dir = tmp_path / "extract"
+            extract_dir.mkdir()
+            extracted = connector.extract_draft_attachments(
+                draft_id, state["attachment_names"], extract_dir
+            )
+            assert len(extracted) == 1 and extracted[0].is_file()
+            assert extracted[0].read_bytes() == b"%PDF-294-INTEG"
+        finally:
+            try:
+                connector.delete_draft(draft_id)
+            except Exception:
+                pass
+
     def test_delete_draft_removes_from_drafts_mailbox(
         self,
         connector: AppleMailConnector,

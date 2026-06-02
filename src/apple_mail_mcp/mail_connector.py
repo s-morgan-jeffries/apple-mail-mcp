@@ -3940,6 +3940,11 @@ class AppleMailConnector:
         """
         _validate_draft_id(draft_id)
         lookup_id = self._resolve_draft_lookup_id(draft_id)
+        # Defense-in-depth: _validate_draft_id's charset already excludes
+        # AppleScript-breaking chars, but apply the SECURITY_CHECKLIST
+        # two-step at the interpolation site so safety doesn't hinge on the
+        # regex staying narrow. (#294)
+        lookup_id_safe = escape_applescript_string(sanitize_input(lookup_id))
 
         script = _wrap_with_timeout(
             f"""tell application "Mail"
@@ -3949,7 +3954,7 @@ class AppleMailConnector:
                     repeat with mb in mailboxes of acc
                         if name of mb contains "Drafts" then
                             try
-                                set m to first message of mb whose id is "{lookup_id}"
+                                set m to first message of mb whose id is "{lookup_id_safe}"
                                 delete m
                                 set didDelete to true
                                 exit repeat
@@ -4067,10 +4072,11 @@ class AppleMailConnector:
         """
         _validate_draft_id(draft_id)
         lookup_id = self._resolve_draft_lookup_id(draft_id)
+        lookup_id_safe = escape_applescript_string(sanitize_input(lookup_id))
 
         tell_body = f"""
         tell application "Mail"
-            set targetId to "{lookup_id}"
+            set targetId to "{lookup_id_safe}"
             set foundDraft to missing value
             repeat with acc in accounts
                 try
@@ -4817,6 +4823,12 @@ class AppleMailConnector:
             FileNotFoundError: ``dest_dir`` does not exist.
         """
         _validate_draft_id(draft_id)
+        # Resolve RFC Message-ID draft ids (IMAP-APPEND drafts, #245) to
+        # Mail's internal numeric id, matching delete_draft/get_draft_state.
+        # Without this, update_draft loses attachments on IMAP-created drafts
+        # (their `id` is numeric, never equal to the RFC-id targetId). (#294)
+        lookup_id = self._resolve_draft_lookup_id(draft_id)
+        lookup_id_safe = escape_applescript_string(sanitize_input(lookup_id))
         dest_dir = Path(dest_dir)
         if not dest_dir.is_dir():
             raise FileNotFoundError(f"dest_dir does not exist: {dest_dir}")
@@ -4838,7 +4850,7 @@ class AppleMailConnector:
 
         script = _wrap_with_timeout(
             f"""tell application "Mail"
-            set targetId to "{draft_id}"
+            set targetId to "{lookup_id_safe}"
             set foundDraft to missing value
             repeat with acc in accounts
                 try

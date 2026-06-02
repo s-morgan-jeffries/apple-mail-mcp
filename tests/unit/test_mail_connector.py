@@ -5165,6 +5165,31 @@ class TestDeleteDraft:
             connector.delete_draft("missing@host")
         mock_run.assert_not_called()
 
+    @patch.object(
+        AppleMailConnector, "_resolve_draft_lookup_id", return_value='1"x\\y'
+    )
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_delete_draft_escapes_resolved_id(
+        self,
+        mock_run: MagicMock,
+        mock_resolve: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """#294 defense-in-depth: the resolved id is escaped at the
+        interpolation site, so a (hypothetical) quote/backslash-bearing id
+        can't break out of the AppleScript string even if it ever got past
+        validation/resolution."""
+        from apple_mail_mcp.utils import (
+            escape_applescript_string,
+            sanitize_input,
+        )
+
+        mock_run.return_value = "OK"
+        connector.delete_draft("validid")
+        script = mock_run.call_args[0][0]
+        expected = escape_applescript_string(sanitize_input('1"x\\y'))
+        assert f'whose id is "{expected}"' in script
+
 
 class TestFindMessageByMessageId:
     """Tests for AppleMailConnector.find_message_by_message_id."""
@@ -5422,6 +5447,31 @@ class TestGetDraftState:
         script = mock_run.call_args[0][0]
         assert '"In-Reply-To"' in script
         assert '"References"' in script
+
+    @patch.object(
+        AppleMailConnector, "_resolve_draft_lookup_id", return_value='1"x\\y'
+    )
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_get_draft_state_escapes_resolved_id(
+        self,
+        mock_run: MagicMock,
+        mock_resolve: MagicMock,
+        connector: AppleMailConnector,
+    ) -> None:
+        """#294 defense-in-depth: the resolved id is escaped into targetId."""
+        from apple_mail_mcp.utils import (
+            escape_applescript_string,
+            sanitize_input,
+        )
+
+        mock_run.return_value = '{"found":false}'
+        try:
+            connector.get_draft_state("validid")
+        except MailDraftNotFoundError:
+            pass
+        script = mock_run.call_args[0][0]
+        expected = escape_applescript_string(sanitize_input('1"x\\y'))
+        assert f'set targetId to "{expected}"' in script
 
 
 class TestCreateDraft:
@@ -5989,6 +6039,51 @@ class TestExtractDraftAttachments:
         script = mock_run.call_args[0][0]
         assert "save a in (POSIX file tp)" in script
         assert "mail attachments of foundDraft" in script
+
+    @patch.object(
+        AppleMailConnector, "find_message_by_message_id", return_value="160991"
+    )
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_extract_resolves_rfc_message_id(
+        self,
+        mock_run: MagicMock,
+        mock_find: MagicMock,
+        connector: AppleMailConnector,
+        tmp_path: Any,
+    ) -> None:
+        """#294: extract_draft_attachments resolves an RFC Message-ID
+        draft_id to Mail's internal id (like delete_draft/get_draft_state),
+        so update_draft preserves attachments on IMAP-APPEND drafts (#245)."""
+        mock_run.return_value = "0"
+        connector.extract_draft_attachments(
+            "abc.123@host", ["a.pdf"], tmp_path
+        )
+        mock_find.assert_called_once_with("abc.123@host")
+        script = mock_run.call_args[0][0]
+        assert 'set targetId to "160991"' in script
+
+    @patch.object(
+        AppleMailConnector, "_resolve_draft_lookup_id", return_value='1"x\\y'
+    )
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_extract_escapes_resolved_id(
+        self,
+        mock_run: MagicMock,
+        mock_resolve: MagicMock,
+        connector: AppleMailConnector,
+        tmp_path: Any,
+    ) -> None:
+        """#294 defense-in-depth: the resolved id is escaped into targetId."""
+        from apple_mail_mcp.utils import (
+            escape_applescript_string,
+            sanitize_input,
+        )
+
+        mock_run.return_value = "0"
+        connector.extract_draft_attachments("validid", ["a.pdf"], tmp_path)
+        script = mock_run.call_args[0][0]
+        expected = escape_applescript_string(sanitize_input('1"x\\y'))
+        assert f'set targetId to "{expected}"' in script
 
 
 class TestUpdateMailbox:
