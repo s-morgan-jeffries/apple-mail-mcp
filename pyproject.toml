@@ -26,32 +26,32 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=3.2.4",
-    "imapclient>=3.0.0",
+    "fastmcp>=3.3.1",
+    "imapclient>=3.1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.3",
-    "pytest-asyncio>=0.24.0",
+    "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
-    "radon>=6.0.0",
+    "radon>=6.0.1",
     "pip-audit>=2.7.0",
-    "ruff>=0.15.12",
+    "ruff>=0.15.15",
     "mypy>=1.20.2",
 ]
 research = [
-    "imapclient>=3.0.0",
+    "imapclient>=3.1.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
-    "pytest-asyncio>=0.24.0",
+    "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
-    "radon>=6.0.0",
+    "radon>=6.0.1",
     "pip-audit>=2.7.0",
-    "ruff>=0.15.12",
+    "ruff>=0.15.15",
     "mypy>=1.20.2",
 ]
 
