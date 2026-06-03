@@ -1,8 +1,8 @@
 {
   "imap_repeat_5_calls_no_pool": 12.078,
   "imap_repeat_5_calls_pooled": 11.87,
-  "mark_as_read_50_msgs": 3.65,
-  "move_messages_50_msgs": 17.167,
+  "mark_as_read_50_msgs": 0.8,
+  "move_messages_50_msgs": 3.953,
   "move_messages_50_msgs_gmail": 3.463,
   "save_attachments_one_file": 0.432,
   "search_messages_no_filter": 0.721,
@@ -10,5 +10,6 @@
   "search_messages_with_sender_filter": 0.756,
   "search_messages_with_sender_filter_gmail": 1.762,
   "search_messages_with_zero_matches": 0.52,
-  "search_messages_with_zero_matches_gmail": 1.571
+  "search_messages_with_zero_matches_gmail": 1.571,
+  "update_message_move_50_msgs_imap": 23.562
 }

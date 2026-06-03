@@ -43,26 +43,41 @@ Benchmarks measure real Mail.app behavior, so they need real data:
 |-----------|----------|
 | `search_messages_*` | At least 1 message in INBOX, Archive, or Sent Messages |
 | `save_attachments_*` | At least 1 message with an attachment in those mailboxes |
-| `mark_as_read_50_msgs` | At least 50 messages across those mailboxes |
+| `mark_as_read_50_msgs`, `move_messages_50_msgs`, `update_message_move_50_msgs_imap` | Keychain IMAP credentials for `MAIL_TEST_ACCOUNT` — the source pool **self-seeds** synthetic messages (no real ≥50-msg mailbox needed; #287) |
 | `search_messages_*_gmail` | A Gmail account configured in Mail.app + Keychain IMAP credentials (#73 opt-in) |
 | `move_messages_50_msgs_gmail` | Same as above. Exercises the `gmail_mode=True` copy+delete path |
 
 If a precondition isn't met, the benchmark skips with a clear message rather than failing. This is by design — running a smaller bulk benchmark on 5 messages would defeat the point (the scaling signal is what matters).
 
-### Gmail-variant fixtures use synthetic data
+### Bulk fixtures use synthetic data (both account families)
 
-Unlike the iCloud benchmarks (which find a real mailbox with ≥50 messages and shuttle real messages), the Gmail variants populate two dedicated mailboxes via IMAP `APPEND`:
+The bulk benchmarks never touch your real mail. Both the generic
+(`MAIL_TEST_ACCOUNT`) and Gmail (`MAIL_TEST_ACCOUNT_GMAIL`) families seed a
+dedicated source mailbox with 50 synthetic RFC 5322 messages via IMAP `APPEND`
+(subject `ZZZ-AMM-BENCH Synthetic Message NNN`), idempotently (re-runs only
+append what's missing):
 
-- `[apple-mail-mcp-bench-gmail-source]` — holds 50 synthetic RFC 5322 messages (subject `ZZZ-AMM-BENCH Synthetic Message NNN`). Created and populated once per test session; idempotent (re-runs only append what's missing).
-- `[apple-mail-mcp-bench-gmail]` — the move-target. Populated per-test from the source via `move_messages(... gmail_mode=True)`; drained back on teardown.
+- Generic: `[apple-mail-mcp-bench-source]` → `[apple-mail-mcp-bench]` (#287).
+- Gmail: `[apple-mail-mcp-bench-gmail-source]` → `[apple-mail-mcp-bench-gmail]`, moved with `gmail_mode=True` (copy+delete).
 
-Your real Gmail INBOX is never touched. Both fixture mailboxes persist across runs (cheaper than re-creating per-run, and easy to spot from the prefix). Use `delete_mailbox` to clean them up if desired.
+The move-target is populated per-test from the source and drained back on
+teardown. All four fixture mailboxes persist across runs (cheaper than
+re-creating per-run, and easy to spot from the prefix). Use `delete_mailbox`
+to clean them up if desired.
 
-## Bulk benchmarks (mark_as_read, move_messages) currently skip
+## Bulk-move: IMAP fast path vs AppleScript (#287)
 
-The bulk-operation benchmarks rely on `move_messages` to populate the bench mailbox. `move_messages` in the connector currently scans every account × every mailbox to find each message ID — on a configuration with 4 accounts and ~115 total mailboxes (typical when Gmail is enabled, since it surfaces 90+ labels), that's 5,750 IMAP searches per call. The fixture setup times out and the bulk benchmarks skip with a clear message pointing at issue #103.
+The bulk benchmarks are captured against a self-seeding synthetic source (above), so they no longer depend on a real ≥50-message mailbox. Captured medians (50 messages, iCloud):
 
-Once #103 ships an optimized bulk path with a `source_mailbox` parameter, the fixture will succeed and bulk baselines can be captured via `make benchmark-baseline`. No code changes are needed in the benchmarks themselves — the suite is wired and ready.
+| Benchmark | Path | Median |
+|-----------|------|--------|
+| `mark_as_read_50_msgs` | flag toggle | ~0.8s |
+| `move_messages_50_msgs` | AppleScript bulk move (one direction ≈ half) | ~4.0s |
+| `update_message_move_50_msgs_imap` | `update_message` IMAP move-only fast path (#149) | ~23.6s |
+
+**Surprising result:** the IMAP "fast path" is **~6× *slower*** than the AppleScript move. The likely cause is that resolving 50 RFC 5322 Message-IDs to IMAP UIDs issues ~50 individual `SEARCH HEADER Message-ID` round-trips (unindexed on most servers), which dominates the move itself. This is tracked for investigation in a follow-up — the benchmark exists precisely to surface this kind of regression-vs-intuition.
+
+(Historical note: these benchmarks previously skipped because the fixture needed a real ≥50-message mailbox and the AppleScript `move_messages` setup was slow on many-mailbox accounts, #103. The self-seeding source + the IMAP-search robustness fix #314 unblocked capture.)
 
 ## How baselines are stored
 
