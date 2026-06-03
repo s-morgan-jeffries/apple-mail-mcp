@@ -41,6 +41,9 @@ jobs:
       - name: Client-server parity check
         run: ./scripts/check_client_server_parity.sh
 
+      - name: Docs drift check
+        run: ./scripts/check_docs.sh
+
   test-summary:
     runs-on: ubuntu-latest
     needs: [unit-tests]

@@ -69,6 +69,7 @@ coverage:
 check-all: lint typecheck test complexity
 	@./scripts/check_version_sync.sh
 	@./scripts/check_client_server_parity.sh
+	@./scripts/check_docs.sh
 	@echo ""
 	@echo "All checks passed."
 

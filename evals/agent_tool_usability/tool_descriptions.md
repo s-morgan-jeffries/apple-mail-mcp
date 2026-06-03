@@ -39,6 +39,7 @@ it for later or send it now.
 
 - `reply_to` (string, optional): Id of a message to reply to. Accepts either Mail.app's internal numeric id or an RFC 5322 Message-ID — pass the ``id`` field from any ``search_messages`` / ``get_messages`` row verbatim. Mutually exclusive with ``forward_of``. When set, ``to``/``cc`` recipients and ``subject`` are auto-derived from the original (override by passing them explicitly).
 - `forward_of` (string, optional): Id of a message to forward. Accepts the same id forms as ``reply_to``. Mutually exclusive with ``reply_to``. ``to`` is required (recipient of the forward).
+- `seed_mailbox` (string, optional): Mailbox the reply_to/forward_of message lives in (e.g. the ``mailbox`` field from its ``search_messages`` row). Lets the clean save-as-draft path fetch the original directly so reply/forward drafts render without the iOS quote bug — supply it especially for replies to filed (non-INBOX) mail. Defaults to INBOX; a miss falls back transparently.
 - `to` (list[string], optional)
 - `cc` (list[string], optional)
 - `bcc` (list[string], optional)

@@ -42,6 +42,21 @@ Update ALL files (pyproject.toml is authoritative):
 
 ## Phase 8: Documentation Review
 - README, CLAUDE.md, CHANGELOG, docs/**, tool docstrings, skills
+- The content-drift gate (`check_docs.sh`, Phase 9) automates the tool-set /
+  removed-name / cross-ref / eval-description-sync parts; this phase is the
+  human read for things it can't check (accuracy, tone, completeness).
+
+## Phase 8.5: Refresh derived artifacts (mandatory, #288)
+Derived artifacts rot silently between releases — refresh them against the
+release commit so a stale snapshot can't ship:
+1. `make eval-descriptions` — regenerate the blind-eval tool descriptions;
+   commit if changed. (`check_docs.sh` also fails on drift here.)
+2. Re-capture the benchmark baseline (#216): `MAIL_TEST_MODE=true
+   MAIL_TEST_ACCOUNT=<acct> uv run pytest tests/benchmarks/ --run-benchmark
+   --capture-baseline` (needs real Mail.app); commit the refreshed
+   `baseline.json`.
+3. Re-run the blind agent eval (#219) and refresh its scored snapshot (needs
+   `OPENROUTER_API_KEY`); commit.
 
 ## Phase 9: Validation
 Run ALL checks (stop on failure):
@@ -52,6 +67,7 @@ Run ALL checks (stop on failure):
 5. `make test-e2e` — **mandatory** (requires `MAIL_TEST_MODE=true` + a test Mail.app account). CI excludes e2e, so this is the only gate that catches a stale e2e failure. A pre-existing failure on `main` is a **release-blocker**, not a known issue to ship around (#257).
 6. `./scripts/check_dependencies.sh`
 7. `./scripts/check_applescript_safety.sh`
+8. `./scripts/check_docs.sh` — doc/artifact drift gate (tool-set coverage, removed-name, cross-refs, eval-description sync) (#288)
 
 ## Phase 10: Commit, Push, PR
 - Commit: `"release: vX.Y.Z"`
