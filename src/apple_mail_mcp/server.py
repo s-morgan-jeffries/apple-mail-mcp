@@ -2689,6 +2689,10 @@ async def create_draft(
         send_now: ``False`` (default) saves as draft. ``True`` sends
             immediately and elicits user confirmation.
 
+    A draft created via the clean IMAP path triggers an account sync so it
+    shows up in Mail.app's Drafts promptly; a brief lag can still remain
+    since Mail controls the final UI refresh (#269).
+
     Returns:
         ``{"success": True, "draft_id": "<id>", "sent_message_id": "",
         "details": {...}}`` when saved as draft. ``draft_id`` is empty when

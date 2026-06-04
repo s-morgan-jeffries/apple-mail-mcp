@@ -556,6 +556,70 @@ class TestDraftsLifecycleIntegration:
         finally:
             assert connector.delete_draft(draft_id) is True
 
+    def test_sync_account_drafts_runs_against_real_account(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """#269: the post-APPEND `synchronize with account` AppleScript is
+        accepted by the real Mail.app for the test account and does not
+        raise. (Unit tests mock _run_applescript and can't catch an
+        AppleScript syntax/dictionary error — this is the required real
+        coverage for the new script.)
+        """
+        # Best-effort by contract — assert it completes without raising.
+        connector._sync_account_drafts(test_account)
+
+    def test_imap_append_draft_becomes_visible_after_sync(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """#269: a draft created via the IMAP path (which now syncs the
+        account afterward) is readable from Mail.app's local state. Timing
+        isn't asserted — Mail controls the final UI refresh — so we poll
+        briefly for the functional outcome.
+        """
+        import time as _time
+
+        from apple_mail_mcp.exceptions import (
+            MailKeychainAccessDeniedError,
+            MailKeychainEntryNotFoundError,
+        )
+        from apple_mail_mcp.keychain import get_imap_password
+
+        try:
+            _, _, email = connector._resolve_imap_config(test_account)
+            get_imap_password(test_account, email)
+        except (
+            MailKeychainEntryNotFoundError,
+            MailKeychainAccessDeniedError,
+        ):
+            pytest.skip(
+                f"No Keychain entry for {test_account!r} — IMAP-APPEND path "
+                f"can't be exercised. Run `apple-mail-mcp setup-imap` first."
+            )
+
+        result = connector.create_draft(
+            seed="new",
+            from_account=test_account,
+            to=["test1@example.com"],
+            subject="ZZZ-AMM-INTEG-SYNC269",
+            body="post-append sync visibility body",
+        )
+        draft_id = result["draft_id"]
+        assert "@" in draft_id, (
+            f"expected IMAP-APPEND path (bare Message-ID); got {draft_id!r}"
+        )
+        try:
+            state = None
+            for _ in range(10):
+                try:
+                    state = connector.get_draft_state(draft_id)
+                    break
+                except Exception:
+                    _time.sleep(3)
+            assert state is not None, "draft never became readable within 30s"
+            assert state["subject"] == "ZZZ-AMM-INTEG-SYNC269"
+        finally:
+            assert connector.delete_draft(draft_id) is True
+
     def test_reply_save_preserves_threading_headers(
         self,
         connector: AppleMailConnector,

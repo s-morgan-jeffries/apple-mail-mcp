@@ -4552,6 +4552,11 @@ class AppleMailConnector:
         original isn't in ``seed_mailbox``. ``send_now=True`` still uses
         AppleScript.
 
+        After an IMAP-path APPEND the account is synchronized so the draft
+        appears in Mail.app's local Drafts pane promptly rather than after
+        Mail's background poll (#269); a brief lag can still remain since
+        Mail controls the final UI refresh.
+
         Args:
             seed: ``"new"``, ``"reply"``, or ``"forward"``.
             seed_id: Identifier of the message to reply/forward. Accepts
@@ -4627,6 +4632,10 @@ class AppleMailConnector:
         )
         if imap_result is not None:
             imap_result.setdefault("from_account", effective_account or "")
+            # The draft is now on the server, but Mail.app doesn't poll
+            # Drafts on its own — nudge it to sync so the draft surfaces in
+            # the local UI promptly. (#269)
+            self._sync_account_drafts(effective_account)
             return imap_result
 
         # Committed to the AppleScript path, which carries Mail.app's
@@ -4799,6 +4808,27 @@ class AppleMailConnector:
             "sent_message_id": "",
             "from_account": effective_account or "",
         }
+
+    def _sync_account_drafts(self, account: str | None) -> None:
+        """Best-effort: poke Mail.app to synchronize ``account`` so a
+        just-APPENDed draft surfaces in the local Drafts pane without
+        waiting for Mail's background poll (#269).
+
+        Never raises: the draft already exists on the server, so a sync
+        failure is a UI-latency nuisance, not a draft failure. Mail still
+        controls the final UI refresh, so a brief lag can remain.
+        """
+        if not account:
+            return
+        script = _wrap_with_timeout(
+            f'tell application "Mail" to synchronize with '
+            f"{applescript_account_clause(account)}",
+            timeout=self.timeout,
+        )
+        try:
+            self._run_applescript(script)
+        except Exception as exc:  # noqa: BLE001 — UI nicety, never fail draft
+            logger.debug("post-APPEND Drafts sync failed for %r: %s", account, exc)
 
     @staticmethod
     def _draft_fallback_warning(effective_account: str | None) -> str:

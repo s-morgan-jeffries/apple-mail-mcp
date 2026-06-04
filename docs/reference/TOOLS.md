@@ -869,6 +869,10 @@ reserved for future use. `details.from_account` is the account the draft
 was created under (including an auto-resolved one), or `""` when Mail's
 default was used.
 
+A draft created via the clean IMAP path triggers an account sync so it
+appears in Mail.app's Drafts promptly; a brief lag can still remain since
+Mail controls the final UI refresh (#269).
+
 **Warnings:** when a save-as-draft falls back to the AppleScript path
 (IMAP not configured, unreachable, no `from_account` and >1 account), the
 response includes an optional `warnings: list[str]` field noting the body

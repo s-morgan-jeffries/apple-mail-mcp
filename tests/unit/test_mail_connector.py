@@ -7125,8 +7125,11 @@ class TestCreateDraftImapAppend:
             send_now=False,
         )
 
-        # IMAP path used, AppleScript NOT touched.
-        mock_applescript.assert_not_called()
+        # IMAP path used for creation; the only AppleScript is the
+        # post-APPEND account sync (#269), never a draft-build script.
+        scripts = [c[0][0] for c in mock_applescript.call_args_list]
+        assert all("synchronize with" in s for s in scripts)
+        assert not any("make new outgoing message" in s for s in scripts)
         append = mock_imap_cls.return_value.append_draft
         append.assert_called_once()
         raw = append.call_args[0][0]
@@ -7245,6 +7248,11 @@ class TestCreateReplyForwardDraftViaImap:
                          return_value=("h", 993, "email@fmasi.eu")),
             patch.object(AppleMailConnector, "_resolve_account_to_sender",
                          return_value="email@fmasi.eu"),
+            # The IMAP path now fires a post-APPEND account sync (#269);
+            # stub _run_applescript so it doesn't shell out to real
+            # osascript in unit tests (#298).
+            patch.object(AppleMailConnector, "_run_applescript",
+                         return_value=""),
         ]
 
     def _run(self, connector, mock_imap, **kw):
@@ -7536,3 +7544,119 @@ class TestCreateDraftImplicitAccountAndWarning:
             )
         mock_resolve.assert_not_called()
         assert seen == []
+
+
+class TestSyncAccountDrafts:
+    """#269: after an IMAP-APPEND draft, create_draft pokes Mail.app to
+    synchronize the account so the draft surfaces in the local Drafts pane
+    promptly. Best-effort — a sync failure must never fail the draft."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=42)
+
+    def test_emits_synchronize_script_for_account(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            AppleMailConnector, "_run_applescript", return_value=""
+        ) as mock_run:
+            connector._sync_account_drafts("iCloud")
+        script = mock_run.call_args[0][0]
+        assert 'synchronize with account "iCloud"' in script
+        assert "with timeout of 42 seconds" in script
+
+    def test_uuid_account_uses_account_id_clause(
+        self, connector: AppleMailConnector
+    ) -> None:
+        uuid = "D73C0000-1111-2222-3333-444455556666"
+        with patch.object(
+            AppleMailConnector, "_run_applescript", return_value=""
+        ) as mock_run:
+            connector._sync_account_drafts(uuid)
+        script = mock_run.call_args[0][0]
+        assert f'synchronize with account id "{uuid}"' in script
+
+    def test_noop_when_account_falsy(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            AppleMailConnector, "_run_applescript"
+        ) as mock_run:
+            connector._sync_account_drafts(None)
+            connector._sync_account_drafts("")
+        mock_run.assert_not_called()
+
+    def test_swallows_applescript_failure(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            AppleMailConnector, "_run_applescript",
+            side_effect=MailAppleScriptError("boom"),
+        ):
+            # Must not raise — the draft already exists server-side.
+            connector._sync_account_drafts("iCloud")
+
+    @pytest.mark.parametrize("seed", ["new", "reply"])
+    def test_create_draft_imap_success_triggers_sync(
+        self, connector: AppleMailConnector, seed: str
+    ) -> None:
+        imap_ret = {"draft_id": "<m@h>", "sent_message_id": ""}
+        method = (
+            "_create_draft_via_imap" if seed == "new"
+            else "_create_reply_forward_draft_via_imap"
+        )
+        with (
+            patch.object(AppleMailConnector, method, return_value=imap_ret),
+            patch.object(AppleMailConnector, "_sync_account_drafts") as mock_sync,
+        ):
+            kwargs: dict[str, Any] = {
+                "seed": seed, "from_account": "iCloud", "body": "x",
+            }
+            if seed == "new":
+                kwargs.update(to=["x@example.com"], subject="Hi")
+            else:
+                kwargs.update(seed_id="orig@host")
+            connector.create_draft(**kwargs)
+        mock_sync.assert_called_once_with("iCloud")
+
+    def test_create_draft_applescript_fallback_no_sync(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # No from_account, can't auto-resolve → AppleScript path; sync is
+        # only for a real IMAP APPEND.
+        with (
+            patch.object(
+                AppleMailConnector, "_resolve_implicit_account",
+                return_value=None,
+            ),
+            patch.object(
+                AppleMailConnector, "_run_applescript", return_value="999",
+            ),
+            patch.object(AppleMailConnector, "_sync_account_drafts") as mock_sync,
+        ):
+            connector.create_draft(
+                seed="new", to=["x@example.com"], subject="Hi", body="x",
+            )
+        mock_sync.assert_not_called()
+
+    def test_create_draft_survives_sync_failure(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # Sync going through the real helper and failing must not break a
+        # successful IMAP draft.
+        with (
+            patch.object(
+                AppleMailConnector, "_create_draft_via_imap",
+                return_value={"draft_id": "<m@h>", "sent_message_id": ""},
+            ),
+            patch.object(
+                AppleMailConnector, "_run_applescript",
+                side_effect=MailAppleScriptError("sync boom"),
+            ),
+        ):
+            result = connector.create_draft(
+                seed="new", to=["x@example.com"], subject="Hi", body="x",
+                from_account="iCloud",
+            )
+        assert result["draft_id"] == "<m@h>"
