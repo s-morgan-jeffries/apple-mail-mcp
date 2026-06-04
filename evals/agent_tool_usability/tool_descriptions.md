@@ -49,7 +49,7 @@ it for later or send it now.
 - `reply_all` (boolean, optional) (default: False): For ``reply_to`` only — use ``reply to all``.
 - `template_name` (string, optional): Optional template to render for ``subject`` and ``body``. Caller-supplied ``subject``/``body`` override the rendered output. ``template_vars`` override auto-fills.
 - `template_vars` (object, optional): Variables to pass to the template renderer. Requires ``template_name``.
-- `from_account` (string, optional): Mail.app account name or UUID. ``None`` uses Mail's default.
+- `from_account` (string, optional): Mail.app account name or UUID. ``None`` uses Mail's default; on a save-as-draft with exactly one enabled account, that account is adopted so the clean (no iOS quote bug) IMAP draft path can engage.
 - `send_now` (boolean, optional) (default: False): ``False`` (default) saves as draft. ``True`` sends immediately and elicits user confirmation.
 
 ### create_mailbox

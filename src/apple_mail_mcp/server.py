@@ -2683,13 +2683,19 @@ async def create_draft(
         template_vars: Variables to pass to the template renderer.
             Requires ``template_name``.
         from_account: Mail.app account name or UUID. ``None`` uses Mail's
-            default.
+            default; on a save-as-draft with exactly one enabled account,
+            that account is adopted so the clean (no iOS quote bug) IMAP
+            draft path can engage.
         send_now: ``False`` (default) saves as draft. ``True`` sends
             immediately and elicits user confirmation.
 
     Returns:
-        ``{"success": True, "draft_id": "<id>", "sent_message_id": ""}``
-        when saved as draft. ``draft_id`` is empty when sent.
+        ``{"success": True, "draft_id": "<id>", "sent_message_id": "",
+        "details": {...}}`` when saved as draft. ``draft_id`` is empty when
+        sent. A ``warnings`` list is included when a save-as-draft fell back
+        to the AppleScript path (whose body may render as a quote on iOS
+        Mail — Mail.app bug FB11734014); configure IMAP for the account to
+        avoid it.
     """
     try:
         # ----------------------------------------------------------------
@@ -2762,6 +2768,7 @@ async def create_draft(
             if attachment_paths is not None
             else None
         )
+        warnings: list[str] = []
         result = mail.create_draft(
             seed=seed_kind,
             seed_id=seed_id,
@@ -2775,6 +2782,7 @@ async def create_draft(
             reply_all=reply_all,
             from_account=from_account,
             send_now=send_now,
+            on_warning=warnings.append,
         )
         draft_id = result.get("draft_id", "")
 
@@ -2792,12 +2800,19 @@ async def create_draft(
             },
             "success",
         )
-        return {
+        response: dict[str, Any] = {
             "success": True,
             "draft_id": draft_id,
             "sent_message_id": result.get("sent_message_id", ""),
-            "details": {"seed_kind": seed_kind, "send_now": send_now},
+            "details": {
+                "seed_kind": seed_kind,
+                "send_now": send_now,
+                "from_account": result.get("from_account", ""),
+            },
         }
+        if warnings:
+            response["warnings"] = warnings
+        return response
 
     except Exception as e:
         handled = _draft_action_error("create_draft", e)

@@ -4531,6 +4531,7 @@ class AppleMailConnector:
         reply_all: bool = False,
         from_account: str | None = None,
         send_now: bool = False,
+        on_warning: Callable[[str], None] | None = None,
     ) -> dict[str, str]:
         """Create a draft (fresh, reply, or forward). Optionally send.
 
@@ -4575,7 +4576,15 @@ class AppleMailConnector:
             attachment_paths: List of file paths. Each must exist.
             reply_all: For ``seed="reply"`` only — use ``reply to all``.
             from_account: Mail.app account name or UUID; ``None`` uses
-                Mail's default sender for the seed message.
+                Mail's default sender for the seed message. When ``None``
+                on a save-as-draft and exactly one enabled account exists,
+                that account is adopted so the clean IMAP path can engage
+                (it is Mail's default sender anyway, so the From is
+                unchanged). (#321)
+            on_warning: Optional callback invoked with a human-readable
+                string when a save-as-draft falls back to the AppleScript
+                path (whose body carries Mail.app's cite-blockquote wrapper,
+                FB11734014) instead of the clean IMAP path. (#270)
             send_now: ``False`` saves as draft and returns
                 ``{"draft_id": ...}``. ``True`` sends and returns
                 ``{"draft_id": "", "sent_message_id": ""}`` (sent_message_id
@@ -4593,37 +4602,38 @@ class AppleMailConnector:
         """
         self._validate_create_draft_args(seed, seed_id, to, subject)
 
-        # Clean IMAP-APPEND paths (issue #245) — return a draft dict when
-        # they handle the request, or None to fall through to AppleScript.
-        # Both avoid Mail.app's cite-blockquote wrapper (bug FB11734014).
-        imap_result = self._try_imap_compose_draft(
+        # #321: with no explicit account the clean IMAP draft path can't
+        # engage (it must name the account for creds + From); adopt the
+        # sole enabled account when there is one (it's Mail's default
+        # sender anyway, so the From is unchanged).
+        effective_account = self._effective_from_account(from_account, send_now)
+
+        # Clean IMAP-APPEND paths (issue #245) avoid Mail.app's
+        # cite-blockquote wrapper (bug FB11734014); they return a draft
+        # dict, or None to fall through to AppleScript.
+        imap_result = self._try_imap_draft_paths(
             seed=seed,
+            seed_id=seed_id,
+            seed_mailbox=seed_mailbox,
             send_now=send_now,
-            from_account=from_account,
+            effective_account=effective_account,
             to=to,
             cc=cc,
             bcc=bcc,
             subject=subject,
             body=body,
+            reply_all=reply_all,
             attachment_paths=attachment_paths,
         )
-        if imap_result is None:
-            imap_result = self._try_imap_reply_forward_draft(
-                seed=seed,
-                seed_id=seed_id,
-                seed_mailbox=seed_mailbox,
-                send_now=send_now,
-                from_account=from_account,
-                to=to,
-                cc=cc,
-                bcc=bcc,
-                subject=subject,
-                body=body,
-                reply_all=reply_all,
-                attachment_paths=attachment_paths,
-            )
         if imap_result is not None:
+            imap_result.setdefault("from_account", effective_account or "")
             return imap_result
+
+        # Committed to the AppleScript path, which carries Mail.app's
+        # cite-blockquote wrapper (FB11734014). Warn save-as-draft callers
+        # so a silently-wrapped draft is visible and actionable. (#270)
+        if not send_now and on_warning is not None:
+            on_warning(self._draft_fallback_warning(effective_account))
 
         # If the caller handed us an RFC 5322 Message-ID (the form read
         # tools emit on the IMAP path per #148), resolve to Mail's
@@ -4650,8 +4660,8 @@ class AppleMailConnector:
         # and the Display-Name <email> form from #158 broadened what
         # characters can appear here. (#173)
         sender_clause = ""
-        if from_account is not None:
-            sender_email = self._resolve_account_to_sender(from_account)
+        if effective_account is not None:
+            sender_email = self._resolve_account_to_sender(effective_account)
             sender_safe = escape_applescript_string(sanitize_input(sender_email))
             sender_clause = f'set sender of theMessage to "{sender_safe}"'
 
@@ -4783,8 +4793,118 @@ class AppleMailConnector:
             raise
 
         if send_now:
-            return {"draft_id": "", "sent_message_id": ""}
-        return {"draft_id": result, "sent_message_id": ""}
+            return {"draft_id": "", "sent_message_id": "", "from_account": ""}
+        return {
+            "draft_id": result,
+            "sent_message_id": "",
+            "from_account": effective_account or "",
+        }
+
+    @staticmethod
+    def _draft_fallback_warning(effective_account: str | None) -> str:
+        """Build the #270 warning shown when a save-as-draft lands on the
+        AppleScript path (and thus the cite-blockquote wrapper, FB11734014)
+        instead of the clean IMAP path."""
+        tail = (
+            "Body may render as a blockquote on iOS Mail (Mail.app bug "
+            "FB11734014)."
+        )
+        if effective_account is None:
+            return (
+                "Draft created via AppleScript: no from_account was given "
+                "and there isn't exactly one enabled account, so the clean "
+                f"IMAP draft path couldn't be auto-selected. {tail} Pass "
+                "from_account, or set up IMAP with `apple-mail-mcp "
+                "setup-imap`."
+            )
+        return (
+            "Draft created via AppleScript fallback: the IMAP draft path is "
+            f"unavailable for {effective_account!r} (IMAP not configured, "
+            f"unreachable, or a non-RFC reply seed). {tail} Configure or "
+            "repair IMAP for the account with `apple-mail-mcp setup-imap`."
+        )
+
+    def _effective_from_account(
+        self, from_account: str | None, send_now: bool
+    ) -> str | None:
+        """Resolve the account create_draft should act under (#321).
+
+        Honors an explicit ``from_account``; otherwise, for a save-as-draft,
+        adopts the sole enabled account so the clean IMAP path can engage.
+        ``send_now`` stays on the AppleScript send path, so it isn't
+        auto-resolved.
+        """
+        if from_account is not None or send_now:
+            return from_account
+        return self._resolve_implicit_account()
+
+    def _try_imap_draft_paths(
+        self,
+        *,
+        seed: str,
+        seed_id: str | None,
+        seed_mailbox: str | None,
+        send_now: bool,
+        effective_account: str | None,
+        to: list[str] | None,
+        cc: list[str] | None,
+        bcc: list[str] | None,
+        subject: str | None,
+        body: str,
+        reply_all: bool,
+        attachment_paths: list[Path] | None,
+    ) -> dict[str, str] | None:
+        """Try the clean IMAP-APPEND draft paths (compose, then
+        reply/forward), returning a draft dict or ``None`` to fall through
+        to AppleScript. (#245)"""
+        result = self._try_imap_compose_draft(
+            seed=seed,
+            send_now=send_now,
+            from_account=effective_account,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            attachment_paths=attachment_paths,
+        )
+        if result is not None:
+            return result
+        return self._try_imap_reply_forward_draft(
+            seed=seed,
+            seed_id=seed_id,
+            seed_mailbox=seed_mailbox,
+            send_now=send_now,
+            from_account=effective_account,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            reply_all=reply_all,
+            attachment_paths=attachment_paths,
+        )
+
+    def _resolve_implicit_account(self) -> str | None:
+        """Return the sole enabled Mail account's name, or ``None`` (#321).
+
+        ``create_draft`` uses this when no ``from_account`` is supplied: the
+        clean IMAP-APPEND draft path needs to name the account (for creds
+        and the From header), so it can't engage on an anonymous call. With
+        exactly one enabled account, Mail's default sender already *is* that
+        account, so adopting it is behavior-preserving for the From header.
+        With zero or several enabled accounts we return ``None`` and the
+        caller keeps Mail's default (AppleScript) behavior.
+        """
+        try:
+            accounts = self.list_accounts()
+        except Exception:
+            return None
+        enabled = [a for a in accounts if a.get("enabled")]
+        if len(enabled) != 1:
+            return None
+        name = enabled[0].get("name")
+        return cast(str, name) if name else None
 
     def extract_draft_attachments(
         self,

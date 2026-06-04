@@ -394,3 +394,44 @@ class TestPromptInjectionAnnotation:
         }
         result = await server.mcp.call_tool("get_messages", {"message_ids": ["1"]})
         assert "prompt_injection" not in result.structured_content["messages"][0]
+
+
+class TestCreateDraftFallbackWarning:
+    """#270: a save-as-draft that falls back to the AppleScript path
+    surfaces a warnings list through the full FastMCP dispatch layer."""
+
+    @pytest.fixture(autouse=True)
+    def _accept_elicitation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _accept(*_a: object, **_k: object) -> None:
+            return None
+
+        monkeypatch.setattr(
+            "apple_mail_mcp.server._elicit_confirmation", _accept
+        )
+
+    async def test_warnings_surface_through_dispatch(
+        self, mock_mail: MagicMock
+    ) -> None:
+        def fake_create_draft(**kwargs: Any) -> dict[str, str]:
+            on_warning = kwargs.get("on_warning")
+            if on_warning is not None:
+                on_warning("Draft created via AppleScript (FB11734014).")
+            return {"draft_id": "d1", "sent_message_id": "", "from_account": ""}
+
+        mock_mail.create_draft.side_effect = fake_create_draft
+        result = await server.mcp.call_tool(
+            "create_draft", {"to": ["a@example.com"], "subject": "s", "body": "b"}
+        )
+        warnings = result.structured_content["warnings"]
+        assert any("FB11734014" in w for w in warnings)
+
+    async def test_no_warnings_field_on_clean_path(
+        self, mock_mail: MagicMock
+    ) -> None:
+        mock_mail.create_draft.return_value = {
+            "draft_id": "d1", "sent_message_id": "", "from_account": "iCloud"
+        }
+        result = await server.mcp.call_tool(
+            "create_draft", {"to": ["a@example.com"], "subject": "s", "body": "b"}
+        )
+        assert "warnings" not in result.structured_content

@@ -850,7 +850,7 @@ Create a draft (fresh, reply, or forward). Optionally send immediately.
 | `reply_all` | boolean | No | False | For `reply_to` only — use `reply to all`. |
 | `template_name` | string | No | None | Optional template to render for `subject` + `body`. Caller-supplied `subject`/`body` override the rendered output. |
 | `template_vars` | object | No | None | Variables for the template renderer. Requires `template_name`. |
-| `from_account` | string | No | None | Mail.app account name or UUID. None = Mail's default. |
+| `from_account` | string | No | None | Mail.app account name or UUID. None = Mail's default. On a save-as-draft with exactly one enabled account, that account is adopted so the clean (no iOS quote bug) IMAP draft path can engage — it's Mail's default sender anyway, so the From is unchanged (#321). |
 | `send_now` | boolean | No | False | `False` saves as draft. `True` sends immediately and elicits confirmation. |
 
 **Returns:**
@@ -860,12 +860,21 @@ Create a draft (fresh, reply, or forward). Optionally send immediately.
   "success": true,
   "draft_id": "161055",
   "sent_message_id": "",
-  "details": {"seed_kind": "new", "send_now": false}
+  "details": {"seed_kind": "new", "send_now": false, "from_account": "iCloud"}
 }
 ```
 
 `draft_id` is empty when sent (`send_now=True`); `sent_message_id` is
-reserved for future use.
+reserved for future use. `details.from_account` is the account the draft
+was created under (including an auto-resolved one), or `""` when Mail's
+default was used.
+
+**Warnings:** when a save-as-draft falls back to the AppleScript path
+(IMAP not configured, unreachable, no `from_account` and >1 account), the
+response includes an optional `warnings: list[str]` field noting the body
+may render as a blockquote on iOS Mail (Mail.app bug FB11734014, #245).
+The field is **omitted** on the clean path. Configure IMAP for the account
+(`apple-mail-mcp setup-imap`) — or pass `from_account` — to avoid it.
 
 **Examples:**
 

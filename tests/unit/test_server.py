@@ -3053,6 +3053,79 @@ class TestCreateDraftTool:
         # Sanity: nothing in state dir.
         assert list(store.root.iterdir()) == [] if store.root.is_dir() else True
 
+    @pytest.mark.asyncio
+    async def test_on_warning_callback_passed_to_connector(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        # #270: the tool hands the connector a callback so fallback
+        # warnings can be surfaced.
+        from apple_mail_mcp.server import create_draft
+
+        mock_mail.create_draft.return_value = {
+            "draft_id": "1", "sent_message_id": ""
+        }
+        await create_draft(to=["a@example.com"], subject="hi", body="x")
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert callable(kwargs.get("on_warning"))
+
+    @pytest.mark.asyncio
+    async def test_warnings_field_present_when_callback_fires(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        # #270: a connector that emits via on_warning surfaces a warnings
+        # list on the response.
+        from apple_mail_mcp.server import create_draft
+
+        def fake_create_draft(**kwargs: Any) -> dict[str, str]:
+            on_warning = kwargs.get("on_warning")
+            if on_warning is not None:
+                on_warning("Draft created via AppleScript (FB11734014).")
+            return {"draft_id": "1", "sent_message_id": "", "from_account": ""}
+
+        mock_mail.create_draft.side_effect = fake_create_draft
+        result = await create_draft(to=["a@example.com"], subject="hi", body="x")
+        assert "warnings" in result
+        assert any("FB11734014" in w for w in result["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_warnings_field_omitted_when_no_callback_fires(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        # No warning emitted → no warnings key (don't pollute the happy path).
+        from apple_mail_mcp.server import create_draft
+
+        mock_mail.create_draft.return_value = {
+            "draft_id": "1", "sent_message_id": "", "from_account": "iCloud"
+        }
+        result = await create_draft(to=["a@example.com"], subject="hi", body="x")
+        assert "warnings" not in result
+
+    @pytest.mark.asyncio
+    async def test_details_reports_from_account_used(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        # #321 transparency: the account the draft was created under (incl.
+        # an auto-resolved one) is surfaced in details.
+        from apple_mail_mcp.server import create_draft
+
+        mock_mail.create_draft.return_value = {
+            "draft_id": "1", "sent_message_id": "", "from_account": "iCloud"
+        }
+        result = await create_draft(to=["a@example.com"], subject="hi", body="x")
+        assert result["details"]["from_account"] == "iCloud"
+
 
 class TestUpdateDraftTool:
     @pytest.fixture(autouse=True)

@@ -5520,7 +5520,9 @@ class TestCreateDraft:
             subject="hi",
             body="hello",
         )
-        assert result == {"draft_id": "161055", "sent_message_id": ""}
+        assert result == {
+            "draft_id": "161055", "sent_message_id": "", "from_account": ""
+        }
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_new_send_returns_empty_ids(
@@ -5534,7 +5536,9 @@ class TestCreateDraft:
             body="hello",
             send_now=True,
         )
-        assert result == {"draft_id": "", "sent_message_id": ""}
+        assert result == {
+            "draft_id": "", "sent_message_id": "", "from_account": ""
+        }
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_new_script_shape(
@@ -5923,12 +5927,19 @@ class TestCreateDraft:
         script = mock_run.call_args[0][0]
         assert 'whose id is "160989"' in script
 
+    # No from_account → create_draft would auto-resolve a sole account
+    # (#321) via list_accounts; stub it out so this test isolates the RFC
+    # seed-resolution path.
+    @patch.object(
+        AppleMailConnector, "_resolve_implicit_account", return_value=None
+    )
     @patch.object(AppleMailConnector, "find_message_by_message_id")
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_unresolvable_rfc_seed_raises_message_not_found(
         self,
         mock_run: MagicMock,
         mock_resolve: MagicMock,
+        _mock_implicit: MagicMock,
         connector: AppleMailConnector,
     ) -> None:
         """When the RFC id doesn't match any message, surface the same
@@ -7348,3 +7359,180 @@ class TestCreateReplyForwardDraftViaImap:
                 body="hi",
             )
             assert "draft_id" in result
+
+
+class TestResolveImplicitAccount:
+    """#321: _resolve_implicit_account returns the sole enabled account name,
+    else None, so create_draft can engage the clean IMAP path on an
+    anonymous (no from_account) save-as-draft."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    def test_single_enabled_account_returns_name(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            AppleMailConnector, "list_accounts",
+            return_value=[{"name": "iCloud", "enabled": True}],
+        ):
+            assert connector._resolve_implicit_account() == "iCloud"
+
+    def test_zero_accounts_returns_none(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(AppleMailConnector, "list_accounts", return_value=[]):
+            assert connector._resolve_implicit_account() is None
+
+    def test_multiple_enabled_accounts_returns_none(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            AppleMailConnector, "list_accounts",
+            return_value=[
+                {"name": "iCloud", "enabled": True},
+                {"name": "Gmail", "enabled": True},
+            ],
+        ):
+            assert connector._resolve_implicit_account() is None
+
+    def test_one_enabled_one_disabled_returns_enabled(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            AppleMailConnector, "list_accounts",
+            return_value=[
+                {"name": "iCloud", "enabled": True},
+                {"name": "OldPOP", "enabled": False},
+            ],
+        ):
+            assert connector._resolve_implicit_account() == "iCloud"
+
+    def test_list_accounts_failure_returns_none(
+        self, connector: AppleMailConnector
+    ) -> None:
+        with patch.object(
+            AppleMailConnector, "list_accounts",
+            side_effect=RuntimeError("osascript boom"),
+        ):
+            assert connector._resolve_implicit_account() is None
+
+
+class TestCreateDraftImplicitAccountAndWarning:
+    """#321 (auto-resolve sole account) + #270 (warn on AppleScript
+    fallback) for create_draft."""
+
+    @pytest.fixture
+    def connector(self) -> AppleMailConnector:
+        return AppleMailConnector(timeout=30)
+
+    def test_no_account_single_account_takes_imap_path(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # from_account omitted + exactly one enabled account → the IMAP
+        # compose path engages, using the resolved account.
+        with (
+            patch.object(
+                AppleMailConnector, "_resolve_implicit_account",
+                return_value="iCloud",
+            ),
+            patch.object(
+                AppleMailConnector, "_create_draft_via_imap",
+                return_value={"draft_id": "<m@h>", "sent_message_id": ""},
+            ) as mock_imap,
+        ):
+            result = connector.create_draft(
+                seed="new", to=["x@example.com"], subject="Hi", body="x",
+            )
+        assert result["draft_id"] == "<m@h>"
+        assert result["from_account"] == "iCloud"
+        assert mock_imap.call_args.kwargs["from_account"] == "iCloud"
+
+    def test_no_account_multi_account_falls_back_and_warns(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # from_account omitted + can't auto-resolve → AppleScript path +
+        # the "no account" warning.
+        seen: list[str] = []
+        with (
+            patch.object(
+                AppleMailConnector, "_resolve_implicit_account",
+                return_value=None,
+            ),
+            patch.object(
+                AppleMailConnector, "_run_applescript", return_value="999",
+            ),
+        ):
+            result = connector.create_draft(
+                seed="new", to=["x@example.com"], subject="Hi", body="x",
+                on_warning=seen.append,
+            )
+        assert result["draft_id"] == "999"
+        assert result["from_account"] == ""
+        assert len(seen) == 1
+        assert "no from_account" in seen[0]
+        assert "FB11734014" in seen[0]
+
+    def test_account_given_imap_unavailable_warns_with_account(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # Explicit account but IMAP not configured → AppleScript fallback +
+        # the account-specific warning.
+        seen: list[str] = []
+        with (
+            patch.object(
+                AppleMailConnector, "_create_draft_via_imap",
+                side_effect=MailKeychainEntryNotFoundError("no entry"),
+            ),
+            patch.object(
+                AppleMailConnector, "_resolve_account_to_sender",
+                return_value="me@icloud.com",
+            ),
+            patch.object(
+                AppleMailConnector, "_run_applescript", return_value="999",
+            ),
+        ):
+            result = connector.create_draft(
+                seed="new", to=["x@example.com"], subject="Hi", body="x",
+                from_account="iCloud", on_warning=seen.append,
+            )
+        assert result["from_account"] == "iCloud"
+        assert len(seen) == 1
+        assert "iCloud" in seen[0]
+        assert "setup-imap" in seen[0]
+
+    def test_no_warning_when_imap_succeeds(
+        self, connector: AppleMailConnector
+    ) -> None:
+        seen: list[str] = []
+        with patch.object(
+            AppleMailConnector, "_create_draft_via_imap",
+            return_value={"draft_id": "<m@h>", "sent_message_id": ""},
+        ):
+            connector.create_draft(
+                seed="new", to=["x@example.com"], subject="Hi", body="x",
+                from_account="iCloud", on_warning=seen.append,
+            )
+        assert seen == []
+
+    def test_no_warning_and_no_autoresolve_when_send_now(
+        self, connector: AppleMailConnector
+    ) -> None:
+        # send_now never auto-resolves (no IMAP send path) and never warns
+        # (the wrapper-on-sent-mail case is #322/SMTP, not #270).
+        seen: list[str] = []
+        with (
+            patch.object(
+                AppleMailConnector, "_resolve_implicit_account",
+            ) as mock_resolve,
+            patch.object(
+                AppleMailConnector, "_run_applescript", return_value="SENT",
+            ),
+        ):
+            connector.create_draft(
+                seed="new", to=["x@example.com"], subject="Hi", body="x",
+                send_now=True, on_warning=seen.append,
+            )
+        mock_resolve.assert_not_called()
+        assert seen == []
