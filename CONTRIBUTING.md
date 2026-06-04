@@ -21,7 +21,7 @@ uv sync --dev
 
 0. **Before you start coding,** open an issue (or comment on an existing one) describing what you plan to fix or build. This lets us flag duplicate or in-flight work and saves you from rebases or wasted effort.
 
-   **Claiming an existing issue:** if you want to take an existing issue, leave a comment asking to be assigned. If the issue is **unclaimed** (no assignee) AND has no comments suggesting someone else is already working on it, you can start work in parallel — you don't need to wait for maintainer response before beginning. The maintainer typically responds within ~24h to assign you; if you don't hear back within ~3 days, feel free to @-mention `@s-morgan-jeffries` directly and keep going. An assigned issue is the canonical "this is taken" signal — please respect it.
+   **Claiming an existing issue:** if you want to take an existing issue, leave a comment saying so. If the issue has **no assignee** AND no comment indicating someone's already on it, you can start work in parallel — you don't need to wait for a maintainer response before beginning. The maintainer typically replies within ~24h to acknowledge your claim; if you don't hear back within ~3 days, feel free to @-mention `@s-morgan-jeffries` directly and keep going. GitHub only lets repository collaborators be set as assignees, so for external contributors the canonical "this is taken" signal is a **maintainer comment acknowledging the claim** (an assignee is used when the claimant is a collaborator). Either way, please respect an issue someone has already claimed.
 1. Create a branch: `git checkout -b feature/issue-N-description`
 2. Write tests first (TDD): RED -> GREEN -> REFACTOR
 3. Implement backend (`mail_connector.py`) and frontend (`server.py`) together
