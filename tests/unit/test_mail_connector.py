@@ -6991,6 +6991,45 @@ class TestKeychainDualFormLookup:
         with pytest.raises(MailKeychainEntryNotFoundError):
             c._get_imap_password_with_fallback("Unknown", "alice@example.com")
 
+    def test_env_var_keyed_on_name_found_when_caller_passes_uuid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#248 + #243 compose: the env var is keyed on the account NAME, but
+        the caller passes the UUID. The real get_imap_password is exercised —
+        the UUID form misses (env + Keychain), the wrapper resolves UUID→name,
+        and the name form hits the env var (no Keychain shell-out for it)."""
+        from apple_mail_mcp.mail_connector import AppleMailConnector
+
+        monkeypatch.setenv("APPLE_MAIL_MCP_IMAP_PASSWORD_GMAIL", "ENV-PW")
+        # The UUID form has no env var and its Keychain lookup must report
+        # not-found (exit 44) so the wrapper falls back to the name form.
+        run_calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            run_calls.append(cmd)
+            m = MagicMock()
+            m.returncode = 44  # item not found
+            m.stdout = ""
+            m.stderr = "could not be found in the keychain."
+            return m
+
+        monkeypatch.setattr(
+            "apple_mail_mcp.keychain.subprocess.run", fake_run
+        )
+        c = AppleMailConnector()
+        monkeypatch.setattr(
+            c, "list_accounts",
+            lambda: [{"name": "Gmail", "id": "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16"}],
+        )
+        result = c._get_imap_password_with_fallback(
+            "04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16", "alice@gmail.com"
+        )
+        assert result == "ENV-PW"
+        # Only the UUID form shelled out to `security`; the name form was
+        # satisfied by the env var without a Keychain call.
+        assert len(run_calls) == 1
+        assert "apple-mail-mcp.imap.04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16" in run_calls[0]
+
 
 # =============================================================================
 # Mailbox resolver shape (#247)
