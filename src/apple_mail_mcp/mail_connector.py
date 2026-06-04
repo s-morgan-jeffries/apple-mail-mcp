@@ -29,6 +29,7 @@ from .drafts import _validate_draft_id
 from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailDraftHtmlUnavailableError,
     MailDraftNotFoundError,
     MailImapMoveUnsupportedError,
     MailImapRequiredError,
@@ -4284,10 +4285,15 @@ class AppleMailConnector:
         subject: str,
         body: str,
         attachment_paths: list[Path] | None,
+        body_html: str | None = None,
     ) -> dict[str, str]:
         """Create a save-as-draft by APPENDing a clean RFC822 message over
         IMAP (issue #245), instead of Mail.app's AppleScript ``content``
         setter. Returns the generated RFC Message-ID as ``draft_id``.
+
+        When ``body_html`` is given the message is a multipart/alternative
+        (text/plain + text/html); HTML drafts only exist on this IMAP path
+        (#251).
 
         Raises the standard ``_IMAP_FALLBACK_EXCS`` (e.g. no Keychain
         opt-in, network failure) which ``create_draft`` catches to fall
@@ -4305,6 +4311,7 @@ class AppleMailConnector:
             bcc=bcc,
             subject=subject,
             body=body,
+            body_html=body_html,
             attachments=(
                 [Path(p) for p in attachment_paths] if attachment_paths else None
             ),
@@ -4428,6 +4435,7 @@ class AppleMailConnector:
         subject: str | None,
         body: str,
         attachment_paths: list[Path] | None,
+        body_html: str | None = None,
     ) -> dict[str, str] | None:
         """IMAP-APPEND path for a ``seed="new"`` save-as-draft (issue #245).
 
@@ -4435,7 +4443,8 @@ class AppleMailConnector:
         signal ``create_draft`` to fall through to the AppleScript path.
         Scoped to ``seed="new"`` save-as-draft with a known account; on the
         usual IMAP-degradation signals (e.g. no Keychain opt-in) it logs
-        and returns ``None``, preserving prior behavior.
+        and returns ``None``, preserving prior behavior. ``body_html``
+        builds a multipart/alternative draft (#251).
         """
         if not (
             seed == "new"
@@ -4452,6 +4461,7 @@ class AppleMailConnector:
                 bcc=bcc,
                 subject=subject or "",
                 body=body,
+                body_html=body_html,
                 attachment_paths=attachment_paths,
             )
         except _IMAP_FALLBACK_EXCS as exc:
@@ -4527,6 +4537,7 @@ class AppleMailConnector:
         bcc: list[str] | None = None,
         subject: str | None = None,
         body: str = "",
+        body_html: str | None = None,
         attachment_paths: list[Path] | None = None,
         reply_all: bool = False,
         from_account: str | None = None,
@@ -4627,6 +4638,7 @@ class AppleMailConnector:
             bcc=bcc,
             subject=subject,
             body=body,
+            body_html=body_html,
             reply_all=reply_all,
             attachment_paths=attachment_paths,
         )
@@ -4637,6 +4649,18 @@ class AppleMailConnector:
             # the local UI promptly. (#269)
             self._sync_account_drafts(effective_account)
             return imap_result
+
+        # HTML drafts exist only on the clean IMAP path (Mail.app's
+        # AppleScript `content` setter is plain-text only). If the IMAP path
+        # couldn't engage, fail loud rather than silently dropping the HTML
+        # into a plain-text AppleScript draft. (#251)
+        if body_html is not None:
+            raise MailDraftHtmlUnavailableError(
+                "HTML drafts require IMAP credentials"
+                + (f" for account {effective_account!r}" if effective_account else "")
+                + ". Opt in to Keychain IMAP access (see docs) or omit "
+                "body_html to create a plain-text draft."
+            )
 
         # Committed to the AppleScript path, which carries Mail.app's
         # cite-blockquote wrapper (FB11734014). Warn save-as-draft callers
@@ -4883,10 +4907,15 @@ class AppleMailConnector:
         body: str,
         reply_all: bool,
         attachment_paths: list[Path] | None,
+        body_html: str | None = None,
     ) -> dict[str, str] | None:
         """Try the clean IMAP-APPEND draft paths (compose, then
         reply/forward), returning a draft dict or ``None`` to fall through
-        to AppleScript. (#245)"""
+        to AppleScript. (#245)
+
+        ``body_html`` is honored only on the compose (``seed="new"``) path;
+        reply/forward HTML is out of scope for #251.
+        """
         result = self._try_imap_compose_draft(
             seed=seed,
             send_now=send_now,
@@ -4896,6 +4925,7 @@ class AppleMailConnector:
             bcc=bcc,
             subject=subject,
             body=body,
+            body_html=body_html,
             attachment_paths=attachment_paths,
         )
         if result is not None:

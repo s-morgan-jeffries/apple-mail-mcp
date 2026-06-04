@@ -846,6 +846,7 @@ Create a draft (fresh, reply, or forward). Optionally send immediately.
 | `bcc` | array[string] | No | None | BCC recipients. |
 | `subject` | string | When fresh | None | Subject. For reply/forward, `None` keeps Mail's `Re:`/`Fwd:` prefix. |
 | `body` | string | No | "" | Body text. For reply/forward, a non-empty body **replaces** Mail's auto-quoted content (the auto-quote isn't readable from AppleScript before save). Empty body leaves Mail's auto-quote intact. |
+| `body_html` | string | No | None | Optional HTML body (#251). Builds a `multipart/alternative` draft (HTML + a plain-text alternative from `body`, or derived from the HTML when `body` is empty). **Requires IMAP credentials** for the account (built over the clean IMAP path; Mail's AppleScript path is plain-text only) and is **fresh-draft-only**: combining `body_html` with `send_now` or `reply_to`/`forward_of` is rejected (`validation_error`), and if IMAP can't engage the call fails with `html_requires_imap` rather than silently dropping the HTML. HTML is caller-trusted (not sanitized). |
 | `attachment_paths` | array[string] | No | None | List of file paths to attach. |
 | `reply_all` | boolean | No | False | For `reply_to` only — use `reply to all`. |
 | `template_name` | string | No | None | Optional template to render for `subject` + `body`. Caller-supplied `subject`/`body` override the rendered output. |
@@ -914,10 +915,11 @@ create_draft(
 
 **Error Codes:**
 
-- `validation_error`: Mutually exclusive seeds, missing required fields, or `template_vars` without `template_name`.
+- `validation_error`: Mutually exclusive seeds, missing required fields, `template_vars` without `template_name`, or `body_html` combined with `send_now` / `reply_to` / `forward_of`.
 - `message_not_found`: `reply_to` / `forward_of` doesn't match any Mail.app message.
 - `account_not_found`: `from_account` doesn't match.
 - `file_not_found`: An attachment path doesn't exist.
+- `html_requires_imap`: `body_html` was set but the clean IMAP path couldn't engage (no Keychain opt-in / IMAP credentials). HTML drafts are never silently downgraded to plain text.
 - `cancelled`: User declined the elicitation prompt (when `send_now=True`).
 - `applescript_error`, `unknown`: Lower-level failures.
 
@@ -942,6 +944,7 @@ after this call. Callers caching the id must re-read the response.
 | `to` / `cc` / `bcc` | array[string] | No | None | Override recipient groups: `None` keeps existing, `[]` clears, populated list replaces. |
 | `subject` | string | No | None | Override subject. `None` keeps existing. |
 | `body` | string | No | None | Override body. `None` keeps existing; non-None replaces (including `""`). |
+| `body_html` | string | No | None | Optional HTML body for the recreated draft (#251); see `create_draft`. Requires IMAP credentials; limited to fresh-seed drafts (not reply/forward) and `send_now=False`. **Not auto-preserved:** because update is delete-and-recreate and draft state captures only plain text, existing HTML is dropped unless `body_html` is passed again. |
 | `attachment_paths` | array[string] | No | None | Override attachments: `None` **preserves existing** (extracted to a temp dir and re-attached); `[]` clears; populated list replaces. |
 | `template_name` / `template_vars` | string / object | No | None | Optional template render. User-supplied `subject`/`body` override the rendered output. |
 | `from_account` | string | No | None | Override sender. |

@@ -20,6 +20,7 @@ from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
     MailDraftError,
+    MailDraftHtmlUnavailableError,
     MailDraftInvalidIdError,
     MailDraftNotFoundError,
     MailImapRequiredError,
@@ -2351,6 +2352,8 @@ def _draft_error_response(e: MailDraftError) -> dict[str, Any]:
         et = "draft_not_found"
     elif isinstance(e, MailDraftInvalidIdError):
         et = "invalid_draft_id"
+    elif isinstance(e, MailDraftHtmlUnavailableError):
+        et = "html_requires_imap"
     else:
         et = "draft_error"
     return {"success": False, "error": str(e), "error_type": et}
@@ -2466,6 +2469,60 @@ def _build_draft_send_summary(
         preview = body[:200] + "..." if len(body) > 200 else body
         lines.append(f"\n{preview}")
     return verb + "\n\n" + "\n".join(lines)
+
+
+def _validate_draft_common_inputs(
+    template_name: str | None,
+    template_vars: dict[str, Any] | None,
+    body_html: str | None,
+    send_now: bool,
+) -> dict[str, Any] | None:
+    """Param-shape checks shared by create_draft and update_draft. Returns a
+    validation_error response, or None when inputs are valid.
+
+    HTML drafts (#251) have no send path (send_now is AppleScript, which is
+    plain-text only), so body_html + send_now is rejected here.
+    """
+    if template_vars and not template_name:
+        return {
+            "success": False,
+            "error": "template_vars requires template_name",
+            "error_type": "validation_error",
+        }
+    if body_html is not None and send_now:
+        return {
+            "success": False,
+            "error": "body_html cannot be combined with send_now",
+            "error_type": "validation_error",
+        }
+    return None
+
+
+def _validate_create_draft_seed_inputs(
+    reply_to: str | None,
+    forward_of: str | None,
+    body_html: str | None,
+) -> dict[str, Any] | None:
+    """create_draft seed-shape checks. Returns a validation_error response,
+    or None when valid. HTML reply/forward quoting is out of scope (#251),
+    so body_html is fresh-draft-only.
+    """
+    if reply_to and forward_of:
+        return {
+            "success": False,
+            "error": "reply_to and forward_of are mutually exclusive",
+            "error_type": "validation_error",
+        }
+    if body_html is not None and (reply_to or forward_of):
+        return {
+            "success": False,
+            "error": (
+                "body_html is only supported for fresh drafts, not "
+                "reply_to/forward_of"
+            ),
+            "error_type": "validation_error",
+        }
+    return None
 
 
 def _resolve_create_draft_seed(
@@ -2670,6 +2727,7 @@ async def create_draft(
     bcc: StrList | None = None,
     subject: str | None = None,
     body: str = "",
+    body_html: str | None = None,
     attachment_paths: StrList | None = None,
     reply_all: bool = False,
     template_name: str | None = None,
@@ -2709,6 +2767,16 @@ async def create_draft(
         body: Body text. For reply/forward, a non-empty body REPLACES
             Mail's auto-quoted content; an empty body leaves the
             auto-quote intact (matches Mail.app's default reply behavior).
+        body_html: Optional HTML body. When set, the draft is built as a
+            multipart/alternative (HTML + a plain-text alternative taken
+            from ``body``, or derived from the HTML when ``body`` is empty).
+            HTML drafts are created over the clean IMAP path, so they
+            REQUIRE IMAP credentials for the account and are limited to
+            fresh save-as-draft: passing ``body_html`` with ``send_now`` or
+            with ``reply_to``/``forward_of`` is rejected, and if IMAP can't
+            engage the call fails (``error_type: "html_requires_imap"``)
+            rather than silently downgrading to plain text. HTML is
+            caller-trusted (not sanitized). (#251)
         attachment_paths: List of file paths to attach.
         reply_all: For ``reply_to`` only — use ``reply to all``.
         template_name: Optional template to render for ``subject`` and
@@ -2739,18 +2807,16 @@ async def create_draft(
         # ----------------------------------------------------------------
         # Param-shape validation
         # ----------------------------------------------------------------
-        if reply_to and forward_of:
-            return {
-                "success": False,
-                "error": "reply_to and forward_of are mutually exclusive",
-                "error_type": "validation_error",
-            }
-        if template_vars and not template_name:
-            return {
-                "success": False,
-                "error": "template_vars requires template_name",
-                "error_type": "validation_error",
-            }
+        common_err = _validate_draft_common_inputs(
+            template_name, template_vars, body_html, send_now
+        )
+        if common_err:
+            return common_err
+        seed_err = _validate_create_draft_seed_inputs(
+            reply_to, forward_of, body_html
+        )
+        if seed_err:
+            return seed_err
 
         seed_kind, seed_id = _resolve_create_draft_seed(reply_to, forward_of)
 
@@ -2816,6 +2882,7 @@ async def create_draft(
             bcc=bcc,
             subject=subject,
             body=body,
+            body_html=body_html,
             attachment_paths=attachment_path_objs,
             reply_all=reply_all,
             from_account=from_account,
@@ -2871,6 +2938,7 @@ async def update_draft(
     bcc: StrList | None = None,
     subject: str | None = None,
     body: str | None = None,
+    body_html: str | None = None,
     attachment_paths: StrList | None = None,
     template_name: str | None = None,
     template_vars: StrDict | None = None,
@@ -2904,6 +2972,13 @@ async def update_draft(
         subject: Override subject. None keeps existing.
         body: Override body. None keeps existing. Non-None replaces
             (including the empty string, which clears).
+        body_html: Optional HTML body for the recreated draft (see
+            ``create_draft``). Requires IMAP credentials and is limited to
+            drafts whose seed is a fresh draft (not reply/forward) and to
+            ``send_now=False``. NOTE: because the draft is recreated and
+            draft state captures only plain text, an existing HTML draft is
+            NOT preserved across an update unless ``body_html`` is passed
+            again. (#251)
         attachment_paths: Override attachments. None preserves existing
             via temp-dir extraction; [] clears; list replaces.
         template_name / template_vars: Optional template render. User-
@@ -2917,12 +2992,11 @@ async def update_draft(
     """
     tempdir: tempfile.TemporaryDirectory[str] | None = None
     try:
-        if template_vars and not template_name:
-            return {
-                "success": False,
-                "error": "template_vars requires template_name",
-                "error_type": "validation_error",
-            }
+        common_err = _validate_draft_common_inputs(
+            template_name, template_vars, body_html, send_now
+        )
+        if common_err:
+            return common_err
 
         try:
             state = mail.get_draft_state(draft_id)
@@ -2933,6 +3007,15 @@ async def update_draft(
         seed_kind, seed_id, reply_all = _resolve_draft_seed(
             draft_id, state, store
         )
+        if body_html is not None and seed_kind != "new":
+            return {
+                "success": False,
+                "error": (
+                    "body_html is only supported for fresh drafts, not "
+                    "reply/forward drafts"
+                ),
+                "error_type": "validation_error",
+            }
 
         try:
             final_subject, final_body = _resolve_update_subject_body(
@@ -2989,6 +3072,7 @@ async def update_draft(
             bcc=final_bcc,
             subject=final_subject,
             body=final_body or "",
+            body_html=body_html,
             attachment_paths=final_attachments,
             reply_all=reply_all,
             from_account=from_account,

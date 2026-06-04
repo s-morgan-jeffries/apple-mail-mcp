@@ -7209,6 +7209,89 @@ class TestCreateDraftImapAppend:
         mock_applescript.assert_called_once()
         assert result["draft_id"] == "123"
 
+    @patch.object(AppleMailConnector, "_run_applescript")
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password", return_value="pw")
+    @patch.object(
+        AppleMailConnector,
+        "_resolve_imap_config",
+        return_value=("imap.host", 993, "appleid@fmasi.eu"),
+    )
+    @patch.object(
+        AppleMailConnector,
+        "_resolve_account_to_sender",
+        return_value="Fred <email@fmasi.eu>",
+    )
+    def test_body_html_appends_multipart_alternative(
+        self, _sender, _cfg, _pw, mock_imap_cls, mock_applescript
+    ):
+        """#251: body_html threads into the IMAP MIME as a
+        multipart/alternative (text/plain + text/html)."""
+        import email as _email
+        from email import policy as _policy
+
+        conn = self._conn()
+        result = conn.create_draft(
+            seed="new",
+            to=["lazar@hadleigh.co.uk"],
+            subject="Q2 numbers",
+            body="plain fallback",
+            body_html="<p>Revenue <b>up</b></p>",
+            from_account="iCloud",
+            send_now=False,
+        )
+        raw = mock_imap_cls.return_value.append_draft.call_args[0][0]
+        msg = _email.message_from_bytes(raw, policy=_policy.default)
+        assert msg.get_content_type() == "multipart/alternative"
+        assert "<b>up</b>" in msg.get_body(preferencelist=("html",)).get_content()
+        assert msg.get_body(preferencelist=("plain",)).get_content().strip() == (
+            "plain fallback"
+        )
+        assert "@" in result["draft_id"]
+
+    @patch.object(AppleMailConnector, "_run_applescript", return_value="123")
+    @patch("apple_mail_mcp.mail_connector.ImapConnector")
+    @patch("apple_mail_mcp.mail_connector.get_imap_password", return_value="pw")
+    @patch.object(
+        AppleMailConnector,
+        "_resolve_imap_config",
+        return_value=("imap.host", 993, "appleid@fmasi.eu"),
+    )
+    @patch.object(
+        AppleMailConnector,
+        "_resolve_account_to_sender",
+        return_value="Fred <email@fmasi.eu>",
+    )
+    def test_body_html_fails_loud_when_imap_unavailable(
+        self, _sender, _cfg, _pw, mock_imap_cls, mock_applescript
+    ):
+        """#251: when body_html is set and the IMAP path can't engage, raise
+        MailDraftHtmlUnavailableError — never silently downgrade to a
+        plain-text AppleScript draft."""
+        from apple_mail_mcp.exceptions import (
+            MailDraftHtmlUnavailableError,
+            MailKeychainEntryNotFoundError,
+        )
+
+        mock_imap_cls.return_value.append_draft.side_effect = (
+            MailKeychainEntryNotFoundError("no creds")
+        )
+        conn = self._conn()
+        with pytest.raises(MailDraftHtmlUnavailableError):
+            conn.create_draft(
+                seed="new",
+                to=["x@example.invalid"],
+                subject="hi",
+                body="body",
+                body_html="<p>rich</p>",
+                from_account="iCloud",
+                send_now=False,
+            )
+        # IMAP was attempted, but NO AppleScript draft-build fallback ran.
+        mock_imap_cls.return_value.append_draft.assert_called_once()
+        scripts = [c[0][0] for c in mock_applescript.call_args_list]
+        assert not any("make new outgoing message" in s for s in scripts)
+
 
 class TestCreateReplyForwardDraftViaImap:
     """Issue #245 follow-up: reply/forward save-as-draft via IMAP APPEND of

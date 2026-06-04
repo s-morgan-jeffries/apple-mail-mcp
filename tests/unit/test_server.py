@@ -2920,6 +2920,86 @@ class TestCreateDraftTool:
         assert kwargs["send_now"] is False
 
     @pytest.mark.asyncio
+    async def test_body_html_threads_to_connector(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        """#251: body_html is passed through to the connector for a fresh
+        save-as-draft."""
+        from apple_mail_mcp.server import create_draft
+
+        mock_mail.create_draft.return_value = {
+            "draft_id": "161099", "sent_message_id": ""
+        }
+        result = await create_draft(
+            to=["a@example.com"], subject="hi",
+            body="plain", body_html="<p>rich</p>",
+        )
+        assert result["success"] is True
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert kwargs["body_html"] == "<p>rich</p>"
+
+    @pytest.mark.asyncio
+    async def test_body_html_with_send_now_rejected(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        """#251: no HTML send path — body_html + send_now is a
+        validation_error and never reaches the connector."""
+        from apple_mail_mcp.server import create_draft
+
+        result = await create_draft(
+            to=["a@example.com"], subject="hi",
+            body_html="<p>rich</p>", send_now=True,
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_mail.create_draft.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_body_html_with_reply_to_rejected(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        """#251: HTML reply/forward is out of scope — rejected as a
+        validation_error before the connector."""
+        from apple_mail_mcp.server import create_draft
+
+        result = await create_draft(
+            reply_to="160989", body_html="<p>rich</p>",
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_mail.create_draft.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_body_html_unavailable_maps_to_html_requires_imap(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        """#251: the connector's fail-loud exception surfaces as
+        error_type 'html_requires_imap'."""
+        from apple_mail_mcp.exceptions import MailDraftHtmlUnavailableError
+        from apple_mail_mcp.server import create_draft
+
+        mock_mail.create_draft.side_effect = MailDraftHtmlUnavailableError(
+            "HTML drafts require IMAP credentials"
+        )
+        result = await create_draft(
+            to=["a@example.com"], subject="hi", body_html="<p>rich</p>",
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "html_requires_imap"
+
+    @pytest.mark.asyncio
     async def test_reply_to_routes_to_reply_seed(
         self,
         isolated_drafts: Any,
@@ -3270,6 +3350,68 @@ class TestUpdateDraftTool:
         assert kwargs["body"] == "new body"
         # Recipients preserved from existing state.
         assert kwargs["to"] == ["alice@example.com"]
+
+    @pytest.mark.asyncio
+    async def test_update_body_html_threads_for_fresh_seed(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        """#251: body_html threads to the recreated draft when the seed is a
+        fresh draft."""
+        from apple_mail_mcp.server import update_draft
+
+        mock_mail.get_draft_state.return_value = {
+            "draft_id": "160991",
+            "to": ["alice@example.com"], "cc": [], "bcc": [],
+            "subject": "hi", "body": "old",
+            "in_reply_to": "", "references": "",
+            "attachment_names": [],
+        }
+        mock_mail.delete_draft.return_value = True
+        mock_mail.create_draft.return_value = {
+            "draft_id": "161000", "sent_message_id": ""
+        }
+        result = await update_draft(
+            draft_id="160991", body_html="<p>rich</p>"
+        )
+        assert result["success"] is True
+        kwargs = mock_mail.create_draft.call_args.kwargs
+        assert kwargs["seed"] == "new"
+        assert kwargs["body_html"] == "<p>rich</p>"
+
+    @pytest.mark.asyncio
+    async def test_update_body_html_rejected_for_reply_seed(
+        self,
+        isolated_drafts: Any,
+        mock_mail: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        """#251: HTML reply/forward drafts are out of scope — reject and
+        leave the existing draft untouched (no delete/recreate)."""
+        from apple_mail_mcp.drafts import DraftStateStore, SeedRecord
+        from apple_mail_mcp.server import update_draft
+
+        store = DraftStateStore()
+        store.set_seed(
+            "160991",
+            SeedRecord(seed_kind="reply", seed_id="160000", reply_all=False),
+        )
+        mock_mail.get_draft_state.return_value = {
+            "draft_id": "160991",
+            "to": ["alice@example.com"], "cc": [], "bcc": [],
+            "subject": "Re: hi", "body": "old",
+            "in_reply_to": "<orig@x>", "references": "<orig@x>",
+            "attachment_names": [],
+        }
+        result = await update_draft(
+            draft_id="160991", body_html="<p>rich</p>"
+        )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_mail.delete_draft.assert_not_called()
+        mock_mail.create_draft.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_falls_back_to_in_reply_to(

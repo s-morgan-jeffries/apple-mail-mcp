@@ -620,6 +620,69 @@ class TestDraftsLifecycleIntegration:
         finally:
             assert connector.delete_draft(draft_id) is True
 
+    def test_create_draft_html_body_round_trips_as_multipart_alternative(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """#251: a draft created with body_html is APPENDed as a real
+        multipart/alternative and the HTML survives a round-trip fetch from
+        the Drafts folder over IMAP."""
+        import email as _email
+        from email import policy as _policy
+
+        from apple_mail_mcp.exceptions import (
+            MailKeychainAccessDeniedError,
+            MailKeychainEntryNotFoundError,
+            MailMessageNotFoundError,
+        )
+        from apple_mail_mcp.imap_connector import ImapConnector
+        from apple_mail_mcp.keychain import get_imap_password
+
+        try:
+            host, port, email = connector._resolve_imap_config(test_account)
+            password = get_imap_password(test_account, email)
+        except (
+            MailKeychainEntryNotFoundError,
+            MailKeychainAccessDeniedError,
+        ):
+            pytest.skip(
+                f"No Keychain entry for {test_account!r} — HTML IMAP-APPEND "
+                f"path can't be exercised. Run `apple-mail-fast-mcp setup-imap`."
+            )
+
+        marker = "ZZZ-AMM-INTEG-HTML251"
+        result = connector.create_draft(
+            seed="new",
+            from_account=test_account,
+            to=["test1@example.com"],
+            subject=marker,
+            body="plain fallback",
+            body_html=f"<p>Revenue <b>{marker}</b></p>",
+        )
+        draft_id = result["draft_id"]
+        assert "@" in draft_id, (
+            f"expected IMAP-APPEND path (bare Message-ID); got {draft_id!r}"
+        )
+        try:
+            # Fetch the raw draft back over IMAP from the Drafts folder.
+            imap = ImapConnector(host, port, email, password)
+            raw = None
+            for folder in ImapConnector._CONVENTIONAL_DRAFTS_NAMES:
+                try:
+                    raw = imap.fetch_raw_message(draft_id, folder)
+                    break
+                except MailMessageNotFoundError:
+                    continue
+            assert raw is not None, "HTML draft not found in any Drafts folder"
+            msg = _email.message_from_bytes(raw, policy=_policy.default)
+            assert msg.get_content_type() == "multipart/alternative"
+            html = msg.get_body(preferencelist=("html",))
+            plain = msg.get_body(preferencelist=("plain",))
+            assert html is not None and plain is not None
+            assert f"<b>{marker}</b>" in html.get_content()
+            assert "plain fallback" in plain.get_content()
+        finally:
+            assert connector.delete_draft(draft_id) is True
+
     def test_reply_save_preserves_threading_headers(
         self,
         connector: AppleMailConnector,

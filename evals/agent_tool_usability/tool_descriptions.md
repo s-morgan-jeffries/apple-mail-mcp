@@ -45,6 +45,7 @@ it for later or send it now.
 - `bcc` (list[string], optional)
 - `subject` (string, optional): Subject. Required when both seeds are None. For reply/forward, ``None`` keeps Mail's ``Re:``/``Fwd:`` prefix.
 - `body` (string, optional) (default: ''): Body text. For reply/forward, a non-empty body REPLACES Mail's auto-quoted content; an empty body leaves the auto-quote intact (matches Mail.app's default reply behavior).
+- `body_html` (string, optional): Optional HTML body. When set, the draft is built as a multipart/alternative (HTML + a plain-text alternative taken from ``body``, or derived from the HTML when ``body`` is empty). HTML drafts are created over the clean IMAP path, so they REQUIRE IMAP credentials for the account and are limited to fresh save-as-draft: passing ``body_html`` with ``send_now`` or with ``reply_to``/``forward_of`` is rejected, and if IMAP can't engage the call fails (``error_type: "html_requires_imap"``) rather than silently downgrading to plain text. HTML is caller-trusted (not sanitized). (#251)
 - `attachment_paths` (list[string], optional): List of file paths to attach.
 - `reply_all` (boolean, optional) (default: False): For ``reply_to`` only — use ``reply to all``.
 - `template_name` (string, optional): Optional template to render for ``subject`` and ``body``. Caller-supplied ``subject``/``body`` override the rendered output. ``template_vars`` override auto-fills.
@@ -382,6 +383,7 @@ explicit body if so.
 - `bcc` (list[string], optional)
 - `subject` (string, optional): Override subject. None keeps existing.
 - `body` (string, optional): Override body. None keeps existing. Non-None replaces (including the empty string, which clears).
+- `body_html` (string, optional): Optional HTML body for the recreated draft (see ``create_draft``). Requires IMAP credentials and is limited to drafts whose seed is a fresh draft (not reply/forward) and to ``send_now=False``. NOTE: because the draft is recreated and draft state captures only plain text, an existing HTML draft is NOT preserved across an update unless ``body_html`` is passed again. (#251)
 - `attachment_paths` (list[string], optional): Override attachments. None preserves existing via temp-dir extraction; [] clears; list replaces.
 - `template_name` (string, optional)
 - `template_vars` (object, optional)

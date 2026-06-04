@@ -165,6 +165,17 @@ class MailDraftNotFoundError(MailDraftError):
     pass
 
 
+class MailDraftHtmlUnavailableError(MailDraftError):
+    """An HTML draft (``body_html``) was requested but the clean IMAP-APPEND
+    path could not run (no Keychain opt-in / IMAP credentials, breaker open,
+    or APPEND failed). HTML drafts are built as RFC822 multipart/alternative
+    over IMAP — Mail.app's AppleScript ``content`` setter is plain-text only —
+    so we fail loud rather than silently downgrade to a plain-text draft.
+    (#251)"""
+
+    pass
+
+
 class MailTemplateError(MailError):
     """Base class for email-template errors."""
 

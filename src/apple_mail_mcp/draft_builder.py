@@ -47,6 +47,7 @@ def build_draft_mime(
     to: list[str],
     subject: str,
     body: str,
+    body_html: str | None = None,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
     attachments: list[Path] | None = None,
@@ -54,11 +55,18 @@ def build_draft_mime(
     references: list[str] | None = None,
     forwarded_attachments: list[ForwardedAttachment] | None = None,
 ) -> tuple[str, bytes]:
-    """Build a plain-text draft message.
+    """Build a draft message (plain-text, or multipart/alternative for HTML).
 
     Returns ``(message_id, raw_bytes)`` where ``message_id`` is the
     generated RFC 5322 Message-ID (angle-bracketed) and ``raw_bytes`` is
     the serialized message suitable for ``IMAPClient.append``.
+
+    HTML body (issue #251): when ``body_html`` is given the message is built
+    as ``multipart/alternative`` with a ``text/html`` part and a
+    ``text/plain`` alternative. The plain part is ``body`` when supplied,
+    otherwise a crude text rendering of the HTML (so non-HTML readers and
+    reply-quoting still have something). ``body_html`` is caller-trusted
+    content (like ``body``); it is MIME-encoded but not HTML-sanitized.
 
     Reply/forward extras (issue #245 follow-up):
 
@@ -85,7 +93,14 @@ def build_draft_mime(
         msg["In-Reply-To"] = _sanitize_header(in_reply_to)
     if references:
         msg["References"] = " ".join(_sanitize_header(r) for r in references)
-    msg.set_content(body)
+    if body_html is not None:
+        # multipart/alternative: text/plain first (fallback + reply quoting),
+        # then text/html. Derive the plain part from the HTML when no
+        # explicit plain body was supplied. (#251)
+        msg.set_content(body if body else _html_to_text(body_html))
+        msg.add_alternative(body_html, subtype="html")
+    else:
+        msg.set_content(body)
 
     for path in attachments or []:
         path = Path(path)

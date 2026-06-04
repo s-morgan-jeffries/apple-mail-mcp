@@ -90,6 +90,88 @@ def test_sanitizes_header_injection_chars():
     assert msg["X-Injected"] is None
 
 
+# --- HTML body support (issue #251) --------------------------------------
+
+
+def test_body_html_only_builds_multipart_alternative_with_derived_plain():
+    """body_html alone -> multipart/alternative with a text/html part and a
+    text/plain part auto-derived from the HTML (so non-HTML readers and
+    reply-quoting still have something)."""
+    _msgid, raw = build_draft_mime(
+        sender="me@example.invalid",
+        to=["you@example.invalid"],
+        subject="Q2 numbers",
+        body="",
+        body_html="<p>Revenue <b>up 12%</b></p>",
+    )
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    assert msg.get_content_type() == "multipart/alternative"
+
+    html_part = msg.get_body(preferencelist=("html",))
+    plain_part = msg.get_body(preferencelist=("plain",))
+    assert html_part is not None and plain_part is not None
+    assert "<b>up 12%</b>" in html_part.get_content()
+    # Derived plain strips tags but keeps the text.
+    derived = plain_part.get_content()
+    assert "Revenue" in derived and "up 12%" in derived
+    assert "<b>" not in derived
+
+
+def test_body_and_body_html_uses_body_as_plain_part():
+    """When both are given, body is the text/plain alternative verbatim and
+    body_html is the text/html part (standard multipart shape)."""
+    _msgid, raw = build_draft_mime(
+        sender="me@example.invalid",
+        to=["you@example.invalid"],
+        subject="hi",
+        body="plain fallback text",
+        body_html="<p>rich text</p>",
+    )
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    assert msg.get_content_type() == "multipart/alternative"
+    assert msg.get_body(preferencelist=("plain",)).get_content().strip() == (
+        "plain fallback text"
+    )
+    assert "<p>rich text</p>" in msg.get_body(
+        preferencelist=("html",)
+    ).get_content()
+
+
+def test_body_only_stays_single_text_plain():
+    """No body_html -> unchanged behavior: a single text/plain part."""
+    _msgid, raw = build_draft_mime(
+        sender="me@example.invalid",
+        to=["you@example.invalid"],
+        subject="hi",
+        body="just text",
+    )
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    assert msg.get_content_type() == "text/plain"
+    assert "just text" in msg.get_content()
+
+
+def test_body_html_with_attachment_nests_alternative_in_mixed(tmp_path):
+    """body_html + attachment -> multipart/mixed wrapping the
+    multipart/alternative and the attachment."""
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nfake")
+    _msgid, raw = build_draft_mime(
+        sender="me@example.invalid",
+        to=["you@example.invalid"],
+        subject="report",
+        body="see attached",
+        body_html="<p>see <i>attached</i></p>",
+        attachments=[pdf],
+    )
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    assert msg.get_content_type() == "multipart/mixed"
+    # Both alternatives still reachable.
+    assert msg.get_body(preferencelist=("html",)) is not None
+    assert msg.get_body(preferencelist=("plain",)) is not None
+    names = [p.get_filename() for p in msg.iter_attachments()]
+    assert "report.pdf" in names
+
+
 # --- Reply/forward extensions (issue #245 follow-up) ---------------------
 
 from apple_mail_mcp.draft_builder import (  # noqa: E402
