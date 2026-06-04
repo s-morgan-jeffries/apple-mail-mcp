@@ -62,9 +62,21 @@ def mock_logger() -> Any:
 
 @pytest.fixture
 def mock_ctx_accept() -> MagicMock:
-    """Mock MCP Context that accepts elicitation."""
+    """Mock MCP Context that accepts elicitation with an affirmative
+    ``True`` (the confirm checkbox is set). Under the bool confirmation
+    pattern (#282) only an explicit ``True`` proceeds."""
     ctx = MagicMock()
-    ctx.elicit = AsyncMock(return_value=AcceptedElicitation(data={}))
+    ctx.elicit = AsyncMock(return_value=AcceptedElicitation(data=True))
+    return ctx
+
+
+@pytest.fixture
+def mock_ctx_accept_false() -> MagicMock:
+    """Mock MCP Context that accepts the elicitation but with ``False``
+    (the user submitted the form without confirming). This must block,
+    same as a decline (#282)."""
+    ctx = MagicMock()
+    ctx.elicit = AsyncMock(return_value=AcceptedElicitation(data=False))
     return ctx
 
 
@@ -145,6 +157,39 @@ class TestElicitConfirmationFailsClosed:
             operation="op", params={"k": "v"},
         )
         assert result is None
+
+    async def test_returns_cancelled_when_accepted_but_false(
+        self, mock_ctx_accept_false: MagicMock,
+    ) -> None:
+        """#282: under the bool confirmation pattern, an elicitation that
+        is *accepted* but carries ``False`` must still block — only an
+        explicit affirmative proceeds. Fail-closed by construction."""
+        result = await _elicit_confirmation(
+            ctx=mock_ctx_accept_false, summary="Do X?",
+            operation="op", params={"k": "v"},
+        )
+        assert result is not None
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+
+    async def test_elicit_called_with_non_none_response_type(
+        self, mock_ctx_accept: MagicMock,
+    ) -> None:
+        """#282: the gate must pass an explicit, non-``None`` response_type
+        to ``ctx.elicit`` — passing ``None`` triggers FastMCPDeprecationWarning
+        and renders a broken empty form in some clients. Unit tests mock
+        ``ctx.elicit`` so they can't observe the warning directly; this
+        asserts the call shape that avoids it."""
+        await _elicit_confirmation(
+            ctx=mock_ctx_accept, summary="Do X?",
+            operation="op", params={"k": "v"},
+        )
+        mock_ctx_accept.elicit.assert_awaited_once()
+        call = mock_ctx_accept.elicit.await_args
+        response_type = call.kwargs.get("response_type")
+        if response_type is None and len(call.args) > 1:
+            response_type = call.args[1]
+        assert response_type is bool
 
     async def test_logs_to_audit_trail_on_missing_ctx(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -346,6 +391,19 @@ class TestDeleteRule:
             {"index": 1, "name": "Junk filter", "enabled": True},
         ]
         result = await delete_rule(rule_index=1, ctx=mock_ctx_decline)
+        assert result["success"] is False
+        assert result["error_type"] == "cancelled"
+        mock_mail.delete_rule.assert_not_called()
+
+    async def test_accepted_but_false_blocks_delete(
+        self, mock_mail: MagicMock, mock_ctx_accept_false: MagicMock
+    ) -> None:
+        """#282: accepting the confirmation form with ``False`` (confirm
+        unchecked) blocks the destructive op, end to end."""
+        mock_mail.list_rules.return_value = [
+            {"index": 1, "name": "Junk filter", "enabled": True},
+        ]
+        result = await delete_rule(rule_index=1, ctx=mock_ctx_accept_false)
         assert result["success"] is False
         assert result["error_type"] == "cancelled"
         mock_mail.delete_rule.assert_not_called()

@@ -171,9 +171,16 @@ async def _elicit_confirmation(
     """Elicit user confirmation via MCP. Fails closed — confirmation gates
     the destructive operation entirely.
 
+    Uses a boolean ``response_type`` (FastMCP ≥3.3.1 requires a non-``None``
+    schema; the legacy ``None``/empty-schema form is deprecated and renders a
+    broken empty form in some clients — #282). Only an explicit affirmative
+    (``True``) proceeds.
+
     Returns:
-        - ``None`` only when the user explicitly accepted.
-        - ``{"error_type": "cancelled"}`` when the user declined.
+        - ``None`` only when the user explicitly affirmed (accepted with
+          ``True``).
+        - ``{"error_type": "cancelled"}`` when the user declined, cancelled,
+          or accepted with ``False``.
         - ``{"error_type": "confirmation_required"}`` when no context was
           provided or the client's elicitation call failed (capability
           unsupported, IO error). Pre-#226 these paths silently
@@ -193,7 +200,20 @@ async def _elicit_confirmation(
             "error_type": "confirmation_required",
         }
     try:
-        result = await ctx.elicit(summary, None)
+        # mypy 1.20.x collapses every ctx.elicit overload to the
+        # response_type=None variant (the inter-overload docstrings break
+        # its overload grouping), so it reports a bogus arg-type here and
+        # types result.data as dict[str, Any] below — hence the ignore and
+        # the cast. At runtime FastMCP wraps the bool and returns a real
+        # bool in result.data.
+        result = await ctx.elicit(
+            summary,
+            response_type=bool,  # type: ignore[arg-type]
+            response_title="Confirm",
+            response_description=(
+                "Set to true to proceed with this operation."
+            ),
+        )
     except Exception as e:
         logger.warning(
             "Elicitation unavailable; blocking %s: %s", operation, e
@@ -209,7 +229,13 @@ async def _elicit_confirmation(
             ),
             "error_type": "confirmation_required",
         }
-    if not isinstance(result, AcceptedElicitation):
+    # Fail closed unless the user explicitly affirmed (accepted *and* set
+    # the confirm flag true). Decline, cancel, and accept-with-false all
+    # block. (#282)
+    if not (
+        isinstance(result, AcceptedElicitation)
+        and cast(bool, result.data) is True
+    ):
         operation_logger.log_operation(operation, params, "cancelled")
         return {
             "success": False,
