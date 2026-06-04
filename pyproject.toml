@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "apple-mail-mcp"
+name = "apple-mail-fast-mcp"
 version = "0.9.1"
 description = "MCP server for Apple Mail integration"
 readme = "README.md"
@@ -58,12 +58,12 @@ dev = [
 ]
 
 [project.scripts]
-apple-mail-mcp = "apple_mail_mcp.server:main"
+apple-mail-fast-mcp = "apple_mail_mcp.server:main"
 
 [project.urls]
-Homepage = "https://github.com/s-morgan-jeffries/apple-mail-mcp"
-Repository = "https://github.com/s-morgan-jeffries/apple-mail-mcp"
-Issues = "https://github.com/s-morgan-jeffries/apple-mail-mcp/issues"
+Homepage = "https://github.com/s-morgan-jeffries/apple-mail-fast-mcp"
+Repository = "https://github.com/s-morgan-jeffries/apple-mail-fast-mcp"
+Issues = "https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/apple_mail_mcp"]

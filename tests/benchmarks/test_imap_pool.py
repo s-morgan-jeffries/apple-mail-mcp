@@ -54,7 +54,7 @@ def _skip_if_no_imap(
     except (MailKeychainEntryNotFoundError, MailKeychainAccessDeniedError):
         pytest.skip(
             f"No Keychain entry for {test_account!r} — pool can't be "
-            f"exercised. Run `apple-mail-mcp setup-imap` first."
+            f"exercised. Run `apple-mail-fast-mcp setup-imap` first."
         )
 
     for mb in ("INBOX", "Archive", "Sent Messages"):

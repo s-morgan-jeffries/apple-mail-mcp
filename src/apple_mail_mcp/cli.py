@@ -1,4 +1,4 @@
-"""CLI subcommands for the ``apple-mail-mcp`` entry point.
+"""CLI subcommands for the ``apple-mail-fast-mcp`` entry point.
 
 Today the only subcommand is ``setup-imap`` (issue #76). The default
 invocation (no subcommand) starts the MCP server — that path lives in

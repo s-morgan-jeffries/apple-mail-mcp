@@ -14,7 +14,7 @@ uv sync --dev
 ```
 
 Run anything in that environment with `uv run …` (e.g. `uv run pytest`, `uv run python -m
-apple_mail_mcp.server`). `uv sync` also installs the `apple-mail-mcp` console script into
+apple_mail_mcp.server`). `uv sync` also installs the `apple-mail-fast-mcp` console script into
 `.venv/bin/`.
 
 ## The canonical check: `make check-all`

@@ -18,7 +18,7 @@ Any sanitized string that gets interpolated into AppleScript source must additio
 safe = escape_applescript_string(sanitize_input(user_value))
 ```
 
-A common mistake is escaping but forgetting the literal AppleScript string quotes around the interpolation site — `whose id is {safe}` parses dashes as subtraction operators on UUID-style ids and crashes. Always wrap in quotes: `whose id is "{safe}"`. See [#86](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/86) for the bug this prevented.
+A common mistake is escaping but forgetting the literal AppleScript string quotes around the interpolation site — `whose id is {safe}` parses dashes as subtraction operators on UUID-style ids and crashes. Always wrap in quotes: `whose id is "{safe}"`. See [#86](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/issues/86) for the bug this prevented.
 
 For lists of values (e.g. message-id lists), each element must be individually sanitized + escaped + quoted, then joined:
 

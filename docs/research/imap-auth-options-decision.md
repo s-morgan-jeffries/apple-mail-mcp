@@ -131,7 +131,7 @@ def get_imap_password(mail_app_account: str, email: str) -> str:
 **Server-side setup helper (tracked in #76):**
 
 ```bash
-apple-mail-mcp setup-imap --account iCloud --email user@icloud.com
+apple-mail-fast-mcp setup-imap --account iCloud --email user@icloud.com
 # → prompts for app password, writes to Keychain with the right service/account
 ```
 

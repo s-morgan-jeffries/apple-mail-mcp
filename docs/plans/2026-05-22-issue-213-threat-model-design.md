@@ -13,7 +13,7 @@ The project has two existing security docs:
 
 Neither doc lets a reviewer answer "what's the worst thing an attacker could do, and what stops them?" without reading source. As the project moves toward broader distribution, an explicit STRIDE-style write-up makes trust boundaries legible and surfaces gaps the checklist wouldn't catch.
 
-This issue produces that doc. SECURITY.md's full reconciliation happens later in [#220](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/220) (docs refresh); here, we leave SECURITY.md alone except for a one-line cross-link pointing at the new threat model.
+This issue produces that doc. SECURITY.md's full reconciliation happens later in [#220](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/issues/220) (docs refresh); here, we leave SECURITY.md alone except for a one-line cross-link pointing at the new threat model.
 
 ## Non-goals
 

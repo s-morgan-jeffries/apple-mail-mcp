@@ -1,6 +1,6 @@
 # Threat Model
 
-> Reviewer-oriented STRIDE analysis of the trust boundaries crossed by `apple-mail-mcp`. Companion to [`SECURITY_CHECKLIST.md`](SECURITY_CHECKLIST.md) (how to build safely) and [`../SECURITY.md`](../SECURITY.md) (user-facing posture).
+> Reviewer-oriented STRIDE analysis of the trust boundaries crossed by `apple-mail-fast-mcp`. Companion to [`SECURITY_CHECKLIST.md`](SECURITY_CHECKLIST.md) (how to build safely) and [`../SECURITY.md`](../SECURITY.md) (user-facing posture).
 
 ## Overview
 
@@ -115,10 +115,10 @@ Findings flagged `⚠️` in the tables above, mapped to tracked issues:
 
 | Boundary | Gap | Issue |
 |---|---|---|
-| osascript / AppleScript (§1) | Non-wrapped AS paths bypass `with timeout of N` | [#233](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/233) |
-| IMAP (§2) | Audit every IMAP→AS path applies `escape_applescript_string` | [#214](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/214) (property tests) |
-| MCP / LLM-as-conduit (§5) | Injection detection is warn-only + regex (recall-tuned) — surfaces a `prompt_injection` warning but doesn't block; subtle attacks may slip | [#225](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/225) (warn-only shipped; block / LLM-classifier deferred) |
-| MCP / LLM-as-conduit (§5) | `create_rule` does not gate dangerous actions (move / forward / delete / copy) | [#222](https://github.com/s-morgan-jeffries/apple-mail-mcp/issues/222) |
+| osascript / AppleScript (§1) | Non-wrapped AS paths bypass `with timeout of N` | [#233](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/issues/233) |
+| IMAP (§2) | Audit every IMAP→AS path applies `escape_applescript_string` | [#214](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/issues/214) (property tests) |
+| MCP / LLM-as-conduit (§5) | Injection detection is warn-only + regex (recall-tuned) — surfaces a `prompt_injection` warning but doesn't block; subtle attacks may slip | [#225](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/issues/225) (warn-only shipped; block / LLM-classifier deferred) |
+| MCP / LLM-as-conduit (§5) | `create_rule` does not gate dangerous actions (move / forward / delete / copy) | [#222](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/issues/222) |
 
 Lower-severity / informational items (not tracked as issues):
 

@@ -1,4 +1,4 @@
-"""Tests for the apple-mail-mcp CLI entry point and setup-imap subcommand."""
+"""Tests for the apple-mail-fast-mcp CLI entry point and setup-imap subcommand."""
 
 from __future__ import annotations
 

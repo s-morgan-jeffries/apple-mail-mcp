@@ -242,7 +242,7 @@ def bench_source(
     once per run.
 
     Skips cleanly if MAIL_TEST_ACCOUNT has no Keychain IMAP creds (the
-    synthetic seeding needs the IMAP path). Run `apple-mail-mcp setup-imap
+    synthetic seeding needs the IMAP path). Run `apple-mail-fast-mcp setup-imap
     --account <acct>` first."""
     from imapclient import IMAPClient
 
@@ -263,7 +263,7 @@ def bench_source(
     except (MailKeychainEntryNotFoundError, MailKeychainAccessDeniedError):
         pytest.skip(
             f"No Keychain IMAP creds for {test_account!r}; the synthetic "
-            f"bench source can't be seeded. Run `apple-mail-mcp setup-imap "
+            f"bench source can't be seeded. Run `apple-mail-fast-mcp setup-imap "
             f"--account {test_account}`. See docs/guides/BENCHMARKING.md."
         )
 
@@ -403,7 +403,7 @@ def _make_synthetic_message(i: int) -> bytes:
         f"Date: Thu, 01 May 2026 12:00:00 +0000\r\n"
         f"\r\n"
         f"Synthetic benchmark message #{i} for issue #101. "
-        f"If you see this in your inbox, the apple-mail-mcp benchmark "
+        f"If you see this in your inbox, the apple-mail-fast-mcp benchmark "
         f"fixture leaked.\r\n"
     ).encode()
 

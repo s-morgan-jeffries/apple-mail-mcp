@@ -418,7 +418,7 @@ RULE_GATED_OPERATIONS = {
     "delete_rule",
 }
 
-RULE_TEST_PREFIX = "[apple-mail-mcp-test]"
+RULE_TEST_PREFIX = "[apple-mail-fast-mcp-test]"
 
 
 def _is_test_mode_enabled() -> bool:

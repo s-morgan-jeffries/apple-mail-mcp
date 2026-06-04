@@ -857,7 +857,7 @@ class AppleMailConnector:
                 logger.warning(
                     "IMAP login rejected for %r — likely an expired or "
                     "revoked app password. To refresh: "
-                    "`apple-mail-mcp setup-imap --account %s`. The "
+                    "`apple-mail-fast-mcp setup-imap --account %s`. The "
                     "AppleScript fallback is being used in the meantime; "
                     "results will be correct but slower.",
                     account, account,
@@ -1782,7 +1782,7 @@ class AppleMailConnector:
                 f"AppleScript body search can take minutes on large "
                 f"mailboxes (measured 148s for 100 cold-cache messages on "
                 f"a 47k-message Gmail INBOX). Run "
-                f"`apple-mail-mcp setup-imap --account {account!r}` for "
+                f"`apple-mail-fast-mcp setup-imap --account {account!r}` for "
                 f"sub-second IMAP body search."
             )
 
@@ -4844,14 +4844,14 @@ class AppleMailConnector:
                 "Draft created via AppleScript: no from_account was given "
                 "and there isn't exactly one enabled account, so the clean "
                 f"IMAP draft path couldn't be auto-selected. {tail} Pass "
-                "from_account, or set up IMAP with `apple-mail-mcp "
+                "from_account, or set up IMAP with `apple-mail-fast-mcp "
                 "setup-imap`."
             )
         return (
             "Draft created via AppleScript fallback: the IMAP draft path is "
             f"unavailable for {effective_account!r} (IMAP not configured, "
             f"unreachable, or a non-RFC reply seed). {tail} Configure or "
-            "repair IMAP for the account with `apple-mail-mcp setup-imap`."
+            "repair IMAP for the account with `apple-mail-fast-mcp setup-imap`."
         )
 
     def _effective_from_account(

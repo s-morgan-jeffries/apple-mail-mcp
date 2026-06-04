@@ -2,7 +2,7 @@
 
 Entries live under service name
 ``apple-mail-mcp.imap.<mail_app_account_name>`` keyed by the account's
-email. The ``apple-mail-mcp setup-imap`` CLI is the supported way to
+email. The ``apple-mail-fast-mcp setup-imap`` CLI is the supported way to
 write entries; this module also exposes set/delete helpers that the
 CLI uses, plus the read helper used by the IMAP fallback path at
 runtime.

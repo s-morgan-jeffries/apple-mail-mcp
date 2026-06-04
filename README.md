@@ -1,12 +1,12 @@
 # Apple Mail MCP Server
 
-[![Tests](https://github.com/s-morgan-jeffries/apple-mail-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/s-morgan-jeffries/apple-mail-mcp/actions/workflows/test.yml)
+[![Tests](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/actions/workflows/test.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 An MCP server that provides programmatic access to Apple Mail, enabling AI assistants like Claude to read, send, search, and manage emails on macOS.
 
-> ⚠️ **Pre-1.0 — expect breaking changes.** The MCP tool surface (tool names, parameters, return shapes) is still evolving as the project matures. Pin to a specific version (for example, `apple-mail-mcp==0.9.1`) and review the [CHANGELOG](CHANGELOG.md) before upgrading.
+> ⚠️ **Pre-1.0 — expect breaking changes.** The MCP tool surface (tool names, parameters, return shapes) is still evolving as the project matures. Pin to a specific version (for example, `apple-mail-fast-mcp==0.9.1`) and review the [CHANGELOG](CHANGELOG.md) before upgrading.
 
 ## Tools (23)
 
@@ -33,26 +33,26 @@ Destructive operations (`delete_*`, `create_rule` with move/forward/delete actio
 
 ```bash
 # From source (recommended for development)
-git clone https://github.com/s-morgan-jeffries/apple-mail-mcp.git
-cd apple-mail-mcp
+git clone https://github.com/s-morgan-jeffries/apple-mail-fast-mcp.git
+cd apple-mail-fast-mcp
 uv sync --dev
 ```
 
 ## Configuration
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`). `uv sync` installs a console script at `.venv/bin/apple-mail-mcp`; point Claude Desktop at its **absolute path** — it's the most reliable form under Claude Desktop's restricted spawn environment (no reliance on `uv` being on `PATH`):
+Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`). `uv sync` installs a console script at `.venv/bin/apple-mail-fast-mcp`; point Claude Desktop at its **absolute path** — it's the most reliable form under Claude Desktop's restricted spawn environment (no reliance on `uv` being on `PATH`):
 
 ```json
 {
   "mcpServers": {
     "apple-mail": {
-      "command": "/path/to/apple-mail-mcp/.venv/bin/apple-mail-mcp"
+      "command": "/path/to/apple-mail-fast-mcp/.venv/bin/apple-mail-fast-mcp"
     }
   }
 }
 ```
 
-(Equivalent alternative if you prefer driving it through uv: `"command": "uv", "args": ["--directory", "/path/to/apple-mail-mcp", "run", "apple-mail-mcp"]`.)
+(Equivalent alternative if you prefer driving it through uv: `"command": "uv", "args": ["--directory", "/path/to/apple-mail-fast-mcp", "run", "apple-mail-fast-mcp"]`.)
 
 ### Optional: split read / write servers
 
@@ -62,11 +62,11 @@ Claude Desktop prompts per-tool for permission. If you want to **batch-approve t
 {
   "mcpServers": {
     "apple-mail-read": {
-      "command": "/path/to/apple-mail-mcp/.venv/bin/apple-mail-mcp",
+      "command": "/path/to/apple-mail-fast-mcp/.venv/bin/apple-mail-fast-mcp",
       "args": ["--read-only"]
     },
     "apple-mail-write": {
-      "command": "/path/to/apple-mail-mcp/.venv/bin/apple-mail-mcp"
+      "command": "/path/to/apple-mail-fast-mcp/.venv/bin/apple-mail-fast-mcp"
     }
   }
 }
@@ -94,7 +94,7 @@ On first run, macOS will prompt for Automation access. Grant permission in:
 
 2. Run the `setup-imap` subcommand. It prompts for the password (no echo), writes the Keychain entry, and verifies by connecting:
    ```bash
-   apple-mail-mcp setup-imap --account iCloud
+   apple-mail-fast-mcp setup-imap --account iCloud
    ```
    Substitute the Mail.app account name exactly — whatever it's labeled in Mail.app (e.g. `iCloud`, `Gmail`, `"Yahoo!"`). The CLI:
    - looks up the account's primary email from Mail.app (override with `--email`),
@@ -104,7 +104,7 @@ On first run, macOS will prompt for Automation access. Grant permission in:
 
 3. If you see a one-time "security wants to use the 'login' keychain" prompt on the next IMAP-backed call, click **Always Allow**.
 
-To remove the entry later: `apple-mail-mcp setup-imap --account iCloud --uninstall`.
+To remove the entry later: `apple-mail-fast-mcp setup-imap --account iCloud --uninstall`.
 
 **Verifying the setup.** The `setup-imap` command does this for you. If you want to spot-check post-hoc:
 ```bash

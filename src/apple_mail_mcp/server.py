@@ -3047,7 +3047,7 @@ def delete_draft(draft_id: str) -> dict[str, Any]:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="apple-mail-mcp",
+        prog="apple-mail-fast-mcp",
         description=(
             "Apple Mail MCP server. With no subcommand, starts the MCP "
             "server (this is what Claude Desktop / mcp clients invoke)."

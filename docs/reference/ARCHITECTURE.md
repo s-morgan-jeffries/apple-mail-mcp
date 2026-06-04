@@ -30,7 +30,7 @@ with no extra setup. On top of that, several read and bulk-mutation operations t
 path** when two conditions hold:
 
 1. the caller hints the location — an `account` (and, where relevant, a `source_mailbox` / `mailbox`), and
-2. the account has Keychain IMAP credentials (opt-in via `apple-mail-mcp setup-imap`).
+2. the account has Keychain IMAP credentials (opt-in via `apple-mail-fast-mcp setup-imap`).
 
 When both hold, the connector issues server-side IMAP (e.g. `SEARCH`, `UID MOVE`, `STORE`) instead of
 driving Mail.app's per-message AppleScript loop. **On any IMAP failure** — no credentials, bad

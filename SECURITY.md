@@ -9,7 +9,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please report it via [GitHub private security advisory](https://github.com/s-morgan-jeffries/apple-mail-mcp/security/advisories/new).
+If you discover a security vulnerability, please report it via [GitHub private security advisory](https://github.com/s-morgan-jeffries/apple-mail-fast-mcp/security/advisories/new).
 
 **Do not open a public issue for security vulnerabilities.**
 

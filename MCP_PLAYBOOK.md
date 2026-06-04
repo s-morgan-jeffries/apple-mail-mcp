@@ -174,7 +174,7 @@ All subprocess execution goes through one method (e.g., `_run_applescript(script
 
 | Element | Convention | Example |
 |---------|-----------|---------|
-| Project directory | kebab-case | `apple-mail-mcp` |
+| Project directory | kebab-case | `apple-mail-fast-mcp` |
 | Python package | snake_case | `apple_mail_mcp` |
 | Source modules | snake_case | `mail_connector.py` |
 | Test files | `test_` prefix + feature | `test_attachments.py` |

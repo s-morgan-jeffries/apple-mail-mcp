@@ -55,3 +55,23 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # Publish to PyPI via OIDC trusted publishing (#335) — no API token.
+  # Requires a PyPI trusted publisher registered for this repo with
+  # workflow `release.yml` and environment `pypi`. Runs only on real
+  # version tags (the `v*` / `!v*-rc*` filter above); RC tags go to
+  # release-hygiene.yml and never publish.
+  publish-pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # mint the short-lived OIDC token for PyPI
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v7
+
+      - run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

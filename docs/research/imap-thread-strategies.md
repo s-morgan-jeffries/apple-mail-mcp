@@ -28,7 +28,7 @@ This doc evaluates two server-side alternatives:
 
 ## What we measured
 
-Only one account on this machine has IMAP delegation set up: **iCloud** (host `p42-imap.mail.me.com`). MobileMe, Gmail, Yahoo, and a Pitt account exist in Mail.app but have no Keychain entries, so they can't be queried over IMAP without credentials we don't have (running `apple-mail-mcp setup-imap --account <name>` would unblock them; any future revision of this doc should re-run on whatever's available).
+Only one account on this machine has IMAP delegation set up: **iCloud** (host `p42-imap.mail.me.com`). MobileMe, Gmail, Yahoo, and a Pitt account exist in Mail.app but have no Keychain entries, so they can't be queried over IMAP without credentials we don't have (running `apple-mail-fast-mcp setup-imap --account <name>` would unblock them; any future revision of this doc should re-run on whatever's available).
 
 ### iCloud — `CAPABILITY` advertisement
 

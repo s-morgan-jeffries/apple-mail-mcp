@@ -268,7 +268,7 @@ The conclusion is cheap and definitive: the spike's hypothesis is falsified on t
 
 | # | Option | Trade-off |
 |---|--------|-----------|
-| a | User-supplied Keychain item under a known service name (e.g. `apple-mail-mcp.<account>`) populated via a setup script | Simplest; works with app passwords across all providers; requires one-time user setup |
+| a | User-supplied Keychain item under a known service name (e.g. `apple-mail-fast-mcp.<account>`) populated via a setup script | Simplest; works with app passwords across all providers; requires one-time user setup |
 | b | Extract Google OAuth refresh tokens from Keychain and speak XOAUTH2 | Gmail/Google only; must handle token refresh; brittle against Google OAuth changes |
 | c | Read the Accounts framework DB via a TCC-entitled helper | Requires user to grant Full Disk Access; entitlement distribution issues; heavyweight |
 | d | Plain env vars / config file for IMAP credentials | Trivial to implement; no Keychain integration; worst UX and worst security story |

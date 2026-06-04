@@ -42,7 +42,7 @@ wheels = [
 ]
 
 [[package]]
-name = "apple-mail-mcp"
+name = "apple-mail-fast-mcp"
 version = "0.9.1"
 source = { editable = "." }
 dependencies = [

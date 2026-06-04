@@ -152,7 +152,7 @@ def test_update_message_move_50_msgs_imap(
     except MailKeychainEntryNotFoundError:
         pytest.skip(
             f"IMAP not configured for {test_account!r}; nothing to "
-            f"benchmark. Run `apple-mail-mcp setup-imap --account "
+            f"benchmark. Run `apple-mail-fast-mcp setup-imap --account "
             f"{test_account}` to enable."
         )
 

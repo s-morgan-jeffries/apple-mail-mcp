@@ -384,7 +384,7 @@ class TestCheckTestModeSafety:
         assert (
             check_test_mode_safety(
                 "update_rule",
-                rule_name="[apple-mail-mcp-test] my rule",
+                rule_name="[apple-mail-fast-mcp-test] my rule",
             )
             is None
         )
@@ -400,7 +400,7 @@ class TestCheckTestModeSafety:
         )
         assert result is not None
         assert result["error_type"] == "safety_violation"
-        assert "[apple-mail-mcp-test]" in result["error"]
+        assert "[apple-mail-fast-mcp-test]" in result["error"]
 
     def test_rule_mutation_outside_test_mode_allowed(
         self, monkeypatch: Any
