@@ -10,9 +10,11 @@ from imapclient.response_types import Address, Envelope
 
 from apple_mail_mcp.exceptions import MailMessageNotFoundError
 from apple_mail_mcp.imap_connector import (
+    _MSGID_SEARCH_CHUNK,
     CONNECT_TIMEOUT_S,
     OPERATION_TIMEOUT_S,
     ImapConnector,
+    _or_message_id_criteria,
 )
 
 
@@ -1396,7 +1398,7 @@ class TestImapMoveMessages:
         client = MagicMock()
         mock_cls.return_value = client
         client.capabilities.return_value = {b"IMAP4REV1", b"MOVE", b"UIDPLUS"}
-        client.search.side_effect = [[101], [102]]
+        client.search.return_value = [101, 102]
 
         moved = ImapConnector("h", 993, "u@e.com", "pw").move_messages(
             ["msg-a@example.com", "<msg-b@example.com>"],
@@ -1420,7 +1422,7 @@ class TestImapMoveMessages:
         client = MagicMock()
         mock_cls.return_value = client
         client.capabilities.return_value = {b"IMAP4REV1", b"UIDPLUS"}
-        client.search.side_effect = [[201], [202]]
+        client.search.return_value = [201, 202]
 
         moved = ImapConnector("h", 993, "u@e.com", "pw").move_messages(
             ["a@example.com", "b@example.com"],
@@ -1488,7 +1490,7 @@ class TestImapMoveMessages:
         client = MagicMock()
         mock_cls.return_value = client
         client.capabilities.return_value = {b"MOVE"}
-        client.search.side_effect = [[1], [2]]
+        client.search.return_value = [1, 2]
 
         ImapConnector("h", 993, "u@e.com", "pw").move_messages(
             ["bare@example.com", "<wrapped@example.com>"],
@@ -1497,9 +1499,12 @@ class TestImapMoveMessages:
         )
 
         searches = [c[0][0] for c in client.search.call_args_list]
+        # One batched OR search instead of one per id (#316); both ids
+        # still pass through _bracket_message_id (the #254 guard).
         assert searches == [
-            ["HEADER", "Message-ID", "<bare@example.com>"],
-            ["HEADER", "Message-ID", "<wrapped@example.com>"],
+            ["OR",
+             ["HEADER", "Message-ID", "<bare@example.com>"],
+             ["HEADER", "Message-ID", "<wrapped@example.com>"]],
         ]
 
     @patch("apple_mail_mcp.imap_connector.IMAPClient")
@@ -1511,7 +1516,7 @@ class TestImapMoveMessages:
         client = MagicMock()
         mock_cls.return_value = client
         client.capabilities.return_value = {b"MOVE"}
-        client.search.side_effect = [[10], [], [11]]
+        client.search.return_value = [10, 11]
 
         moved = ImapConnector("h", 993, "u@e.com", "pw").move_messages(
             ["a@x", "b@x", "c@x"],
@@ -1521,6 +1526,58 @@ class TestImapMoveMessages:
 
         assert moved == 2
         client.move.assert_called_once_with([10, 11], "Archive")
+
+
+class TestResolveUidsBatch:
+    """#316: _resolve_uids_batch collapses N per-id SEARCH HEADER calls into
+    one OR-of-HEADER search per _MSGID_SEARCH_CHUNK ids."""
+
+    def test_single_id_is_a_bare_header_clause(self) -> None:
+        # No OR wrapper for one id — same shape as the old per-id search.
+        assert _or_message_id_criteria(["a@x"]) == [
+            "HEADER", "Message-ID", "<a@x>"
+        ]
+
+    def test_multiple_ids_fold_into_nested_or(self) -> None:
+        assert _or_message_id_criteria(["a@x", "b@x", "c@x"]) == [
+            "OR",
+            ["HEADER", "Message-ID", "<a@x>"],
+            ["OR",
+             ["HEADER", "Message-ID", "<b@x>"],
+             ["HEADER", "Message-ID", "<c@x>"]],
+        ]
+
+    def test_criteria_brackets_and_rejects_control_chars(self) -> None:
+        # Bracketless ids get wrapped; a control char is rejected (the #254
+        # CRLF-injection guard, via _bracket_message_id).
+        assert _or_message_id_criteria(["<x@y>"]) == [
+            "HEADER", "Message-ID", "<x@y>"
+        ]
+        with pytest.raises(ValueError, match="control character"):
+            _or_message_id_criteria(["a@x", "b\r\nEVIL@x"])
+
+    def test_empty_input_no_search(self) -> None:
+        client = MagicMock()
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        assert conn._resolve_uids_batch(client, []) == []
+        client.search.assert_not_called()
+
+    def test_one_search_per_chunk(self) -> None:
+        client = MagicMock()
+        client.search.return_value = []
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        ids = [f"id{i}@x" for i in range(_MSGID_SEARCH_CHUNK + 1)]
+        conn._resolve_uids_batch(client, ids)
+        # 51 ids @ chunk 50 → 2 searches (50 + 1).
+        assert client.search.call_count == 2
+
+    def test_dedupes_across_chunks_preserving_order(self) -> None:
+        client = MagicMock()
+        # Two chunks; overlapping UID 2 must appear once, first-seen order.
+        client.search.side_effect = [[1, 2], [2, 3]]
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        ids = [f"id{i}@x" for i in range(_MSGID_SEARCH_CHUNK + 1)]
+        assert conn._resolve_uids_batch(client, ids) == [1, 2, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -1611,7 +1668,7 @@ class TestImapDeleteMessages:
         mock_cls.return_value = client
         client.capabilities.return_value = {b"IMAP4REV1", b"MOVE", b"UIDPLUS"}
         client.list_folders.return_value = self._trash_listing()
-        client.search.side_effect = [[101], [102]]
+        client.search.return_value = [101, 102]
 
         deleted = ImapConnector("h", 993, "u@e.com", "pw").delete_messages(
             ["a@example.com", "<b@example.com>"],
@@ -1634,7 +1691,7 @@ class TestImapDeleteMessages:
         mock_cls.return_value = client
         client.capabilities.return_value = {b"IMAP4REV1", b"UIDPLUS"}
         client.list_folders.return_value = self._trash_listing()
-        client.search.side_effect = [[201], [202]]
+        client.search.return_value = [201, 202]
 
         deleted = ImapConnector("h", 993, "u@e.com", "pw").delete_messages(
             ["a@x", "b@x"],
@@ -1794,16 +1851,19 @@ class TestImapDeleteMessages:
         mock_cls.return_value = client
         client.capabilities.return_value = {b"MOVE"}
         client.list_folders.return_value = self._trash_listing()
-        client.search.side_effect = [[1], [2]]
+        client.search.return_value = [1, 2]
 
         ImapConnector("h", 993, "u@e.com", "pw").delete_messages(
             ["bare@example.com", "<wrapped@example.com>"],
             source_mailbox="INBOX",
         )
         searches = [c[0][0] for c in client.search.call_args_list]
+        # One batched OR search instead of one per id (#316); both ids
+        # still pass through _bracket_message_id (the #254 guard).
         assert searches == [
-            ["HEADER", "Message-ID", "<bare@example.com>"],
-            ["HEADER", "Message-ID", "<wrapped@example.com>"],
+            ["OR",
+             ["HEADER", "Message-ID", "<bare@example.com>"],
+             ["HEADER", "Message-ID", "<wrapped@example.com>"]],
         ]
 
     @patch("apple_mail_mcp.imap_connector.IMAPClient")
@@ -1816,7 +1876,7 @@ class TestImapDeleteMessages:
         mock_cls.return_value = client
         client.capabilities.return_value = {b"MOVE"}
         client.list_folders.return_value = self._trash_listing()
-        client.search.side_effect = [[10], [], [11]]
+        client.search.return_value = [10, 11]
 
         deleted = ImapConnector("h", 993, "u@e.com", "pw").delete_messages(
             ["a@x", "b@x", "c@x"],
@@ -1837,7 +1897,7 @@ class TestImapSetReadStatus:
     ) -> None:
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[101], [102]]
+        client.search.return_value = [101, 102]
 
         marked = ImapConnector("h", 993, "u@e.com", "pw").set_read_status(
             ["a@example.com", "b@example.com"],
@@ -1858,7 +1918,7 @@ class TestImapSetReadStatus:
     ) -> None:
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[201], [202]]
+        client.search.return_value = [201, 202]
 
         marked = ImapConnector("h", 993, "u@e.com", "pw").set_read_status(
             ["a@x", "b@x"],
@@ -1898,7 +1958,7 @@ class TestImapSetReadStatus:
         arrive at SEARCH HEADER as the bracketed RFC 5322 form."""
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[1], [2]]
+        client.search.return_value = [1, 2]
 
         ImapConnector("h", 993, "u@e.com", "pw").set_read_status(
             ["bare@example.com", "<wrapped@example.com>"],
@@ -1906,9 +1966,12 @@ class TestImapSetReadStatus:
             read=True,
         )
         searches = [c[0][0] for c in client.search.call_args_list]
+        # One batched OR search instead of one per id (#316); both ids
+        # still pass through _bracket_message_id (the #254 guard).
         assert searches == [
-            ["HEADER", "Message-ID", "<bare@example.com>"],
-            ["HEADER", "Message-ID", "<wrapped@example.com>"],
+            ["OR",
+             ["HEADER", "Message-ID", "<bare@example.com>"],
+             ["HEADER", "Message-ID", "<wrapped@example.com>"]],
         ]
 
     @patch("apple_mail_mcp.imap_connector.IMAPClient")
@@ -1919,7 +1982,7 @@ class TestImapSetReadStatus:
         the 2; return 2."""
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[10], [], [11]]
+        client.search.return_value = [10, 11]
 
         marked = ImapConnector("h", 993, "u@e.com", "pw").set_read_status(
             ["a@x", "b@x", "c@x"],
@@ -1965,7 +2028,7 @@ class TestImapSetFlaggedStatus:
     ) -> None:
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[101], [102]]
+        client.search.return_value = [101, 102]
 
         marked = ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
             ["a@example.com", "b@example.com"],
@@ -1986,7 +2049,7 @@ class TestImapSetFlaggedStatus:
     ) -> None:
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[201], [202]]
+        client.search.return_value = [201, 202]
 
         marked = ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
             ["a@x", "b@x"],
@@ -2025,7 +2088,7 @@ class TestImapSetFlaggedStatus:
         """Mix of bracketless and bracketed Message-IDs as input."""
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[1], [2]]
+        client.search.return_value = [1, 2]
 
         ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
             ["bare@example.com", "<wrapped@example.com>"],
@@ -2033,9 +2096,12 @@ class TestImapSetFlaggedStatus:
             flagged=True,
         )
         searches = [c[0][0] for c in client.search.call_args_list]
+        # One batched OR search instead of one per id (#316); both ids
+        # still pass through _bracket_message_id (the #254 guard).
         assert searches == [
-            ["HEADER", "Message-ID", "<bare@example.com>"],
-            ["HEADER", "Message-ID", "<wrapped@example.com>"],
+            ["OR",
+             ["HEADER", "Message-ID", "<bare@example.com>"],
+             ["HEADER", "Message-ID", "<wrapped@example.com>"]],
         ]
 
     @patch("apple_mail_mcp.imap_connector.IMAPClient")
@@ -2046,7 +2112,7 @@ class TestImapSetFlaggedStatus:
         the 2; return 2."""
         client = MagicMock()
         mock_cls.return_value = client
-        client.search.side_effect = [[10], [], [11]]
+        client.search.return_value = [10, 11]
 
         marked = ImapConnector("h", 993, "u@e.com", "pw").set_flagged_status(
             ["a@x", "b@x", "c@x"],

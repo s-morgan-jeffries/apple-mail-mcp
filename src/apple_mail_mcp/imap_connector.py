@@ -289,6 +289,41 @@ def _bracket_message_id(message_id: str) -> str:
     return f"<{message_id}>"
 
 
+# Max Message-IDs folded into a single OR SEARCH. Keeps the command well
+# under server line-length limits while still collapsing the common
+# bulk-mutation case (≤50 ids) into one round-trip. (#316)
+_MSGID_SEARCH_CHUNK = 50
+
+
+def _validate_message_ids(message_ids: list[str]) -> None:
+    """Reject control characters in every Message-ID up front (the #254
+    CRLF-injection guard), before any SELECT/capability work — so a crafted
+    id is refused regardless of server capabilities or where resolution
+    happens. ``_resolve_uids_batch`` re-applies the guard when it brackets
+    ids, but the chokepoint must also fail closed early."""
+    for mid in message_ids:
+        _bracket_message_id(mid)
+
+
+def _or_message_id_criteria(message_ids: list[str]) -> list[Any]:
+    """Build an IMAP SEARCH criteria matching ANY of ``message_ids`` by
+    ``HEADER "Message-ID"``, so a batch resolves in one round-trip. (#316)
+
+    Each id is routed through :func:`_bracket_message_id` (the CRLF-injection
+    chokepoint, #254). One id yields a bare ``HEADER`` clause; N ids fold
+    into right-nested binary ``OR`` (IMAP's ``OR`` takes exactly two keys):
+    ``["OR", a, ["OR", b, c]]``. Assumes ``message_ids`` is non-empty.
+    """
+    clauses = [
+        ["HEADER", "Message-ID", _bracket_message_id(mid)]
+        for mid in message_ids
+    ]
+    criteria: list[Any] = clauses[-1]
+    for clause in reversed(clauses[:-1]):
+        criteria = ["OR", clause, criteria]
+    return criteria
+
+
 def _build_search_criteria(
     sender_contains: str | None,
     subject_contains: str | None,
@@ -1078,6 +1113,30 @@ class ImapConnector:
         with self._session() as client:
             client.rename_folder(old_name, new_name)
 
+    def _resolve_uids_batch(
+        self,
+        client: IMAPClient,
+        message_ids: list[str],
+    ) -> list[int]:
+        """Resolve RFC 5322 Message-IDs to UIDs in the selected mailbox,
+        batching the lookups into one ``OR HEADER "Message-ID"`` SEARCH per
+        ``_MSGID_SEARCH_CHUNK`` ids instead of one SEARCH per id. (#316)
+
+        Returns the matched UIDs (first-seen order, de-duplicated). Ids that
+        don't resolve are silently skipped — callers act on the whole set,
+        matching the AppleScript path's best-effort partial-success. Each id
+        is validated via :func:`_bracket_message_id` (the #254 guard).
+        """
+        uids: list[int] = []
+        seen: set[int] = set()
+        for i in range(0, len(message_ids), _MSGID_SEARCH_CHUNK):
+            chunk = message_ids[i:i + _MSGID_SEARCH_CHUNK]
+            for uid in client.search(_or_message_id_criteria(chunk)):
+                if uid not in seen:
+                    seen.add(uid)
+                    uids.append(uid)
+        return uids
+
     def move_messages(
         self,
         message_ids: list[str],
@@ -1118,7 +1177,7 @@ class ImapConnector:
             IMAPClientError: SELECT / SEARCH / MOVE / COPY / STORE /
                 EXPUNGE failed at the protocol level.
         """
-        bracketed_ids = [_bracket_message_id(mid) for mid in message_ids]
+        _validate_message_ids(message_ids)
         _reject_control_chars(source_mailbox, "source_mailbox")
         _reject_control_chars(destination_mailbox, "destination_mailbox")
 
@@ -1134,10 +1193,7 @@ class ImapConnector:
                     f"safe scoped move"
                 )
 
-            uids: list[int] = []
-            for bracketed in bracketed_ids:
-                found = client.search(["HEADER", "Message-ID", bracketed])
-                uids.extend(found)
+            uids = self._resolve_uids_batch(client, message_ids)
             if not uids:
                 return 0
 
@@ -1252,7 +1308,7 @@ class ImapConnector:
                 SPECIAL-USE or conventional names.
             IMAPClientError: Protocol-level failure.
         """
-        bracketed_ids = [_bracket_message_id(mid) for mid in message_ids]
+        _validate_message_ids(message_ids)
         _reject_control_chars(source_mailbox, "source_mailbox")
 
         with self._session() as client:
@@ -1284,10 +1340,7 @@ class ImapConnector:
 
             client.select_folder(source_mailbox, readonly=False)
 
-            uids: list[int] = []
-            for bracketed in bracketed_ids:
-                found = client.search(["HEADER", "Message-ID", bracketed])
-                uids.extend(found)
+            uids = self._resolve_uids_batch(client, message_ids)
             if not uids:
                 return 0
 
@@ -1329,16 +1382,13 @@ class ImapConnector:
             IMAPClientError: SELECT / SEARCH / STORE failed at the
                 protocol level.
         """
-        bracketed_ids = [_bracket_message_id(mid) for mid in message_ids]
+        _validate_message_ids(message_ids)
         _reject_control_chars(source_mailbox, "source_mailbox")
 
         with self._session() as client:
             client.select_folder(source_mailbox, readonly=False)
 
-            uids: list[int] = []
-            for bracketed in bracketed_ids:
-                found = client.search(["HEADER", "Message-ID", bracketed])
-                uids.extend(found)
+            uids = self._resolve_uids_batch(client, message_ids)
             if not uids:
                 return 0
 
@@ -1386,16 +1436,13 @@ class ImapConnector:
             IMAPClientError: SELECT / SEARCH / STORE failed at the
                 protocol level.
         """
-        bracketed_ids = [_bracket_message_id(mid) for mid in message_ids]
+        _validate_message_ids(message_ids)
         _reject_control_chars(source_mailbox, "source_mailbox")
 
         with self._session() as client:
             client.select_folder(source_mailbox, readonly=False)
 
-            uids: list[int] = []
-            for bracketed in bracketed_ids:
-                found = client.search(["HEADER", "Message-ID", bracketed])
-                uids.extend(found)
+            uids = self._resolve_uids_batch(client, message_ids)
             if not uids:
                 return 0
 

@@ -1445,6 +1445,77 @@ class TestDraftsLifecycleIntegration:
             except Exception:
                 pass
 
+    def test_flag_two_ids_resolves_via_single_or_search(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+    ) -> None:
+        """#316: two Message-IDs flagged in one update_message call resolve
+        through a single OR-of-HEADER SEARCH. Proves imapclient's nested-OR
+        criteria actually serializes and matches on the live server (the
+        thing unit tests with a mocked client can't verify), and that both
+        ids are found in one round-trip."""
+        import uuid as _uuid
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+
+        from imapclient import IMAPClient
+
+        from apple_mail_mcp.keychain import get_imap_password
+
+        suffix = _uuid.uuid4().hex[:8]
+        src = f"ZZZ-AMM-OR316-{suffix}"
+        ids_local = [
+            f"{_uuid.uuid4().hex}@apple-mail-mcp-test.invalid" for _ in range(2)
+        ]
+
+        host, port, email = connector._resolve_imap_config(test_account)
+        pw = get_imap_password(test_account, email)
+
+        assert connector.create_mailbox(account=test_account, name=src)
+        try:
+            now = format_datetime(datetime.now(tz=timezone.utc))
+            append_client = IMAPClient(host, port=port, ssl=True, timeout=30)
+            append_client.login(email, pw)
+            try:
+                for mid in ids_local:
+                    raw = (
+                        f"From: s@apple-mail-mcp-test.invalid\r\n"
+                        f"To: r@apple-mail-mcp-test.invalid\r\n"
+                        f"Subject: AMM #316 OR-search test\r\n"
+                        f"Date: {now}\r\n"
+                        f"Message-ID: <{mid}>\r\n"
+                        f"\r\nbody\r\n"
+                    ).encode()
+                    append_client.append(src, raw, flags=[])
+            finally:
+                append_client.logout()
+
+            # Both ids in one call → one OR search resolves both.
+            marked = connector.update_message(
+                ids_local, flagged=True, account=test_account,
+                source_mailbox=src,
+            )
+            assert marked == 2
+
+            verify = IMAPClient(host, port=port, ssl=True, timeout=30)
+            verify.login(email, pw)
+            try:
+                verify.select_folder(src, readonly=True)
+                for mid in ids_local:
+                    uids = verify.search(["HEADER", "Message-ID", f"<{mid}>"])
+                    assert len(uids) == 1
+                    assert b"\\Flagged" in verify.get_flags(uids)[uids[0]]
+            finally:
+                verify.logout()
+        finally:
+            try:
+                connector.delete_mailbox(
+                    account=test_account, name=src, delete_messages=True
+                )
+            except Exception:
+                pass
+
     def test_search_messages_returns_rfc_message_id_via_applescript(
         self,
         connector: AppleMailConnector,
