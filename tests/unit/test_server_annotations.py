@@ -32,6 +32,7 @@ READ_ONLY_TOOLS: set[str] = {
     "search_messages",
     "get_messages",
     "get_thread",
+    "get_attachment_content",
     "get_template",
     "render_template",
 }
@@ -168,9 +169,9 @@ class TestProductionAnnotations:
         assert names == READ_ONLY_TOOLS | MUTATING_TOOLS
 
     def test_classifications_partition_correctly(self) -> None:
-        """No overlap between read-only and mutating sets; counts are 9 + 14."""
+        """No overlap between read-only and mutating sets; counts are 10 + 14."""
         assert READ_ONLY_TOOLS.isdisjoint(MUTATING_TOOLS)
-        assert len(READ_ONLY_TOOLS) == 9
+        assert len(READ_ONLY_TOOLS) == 10
         assert len(MUTATING_TOOLS) == 14
         assert DESTRUCTIVE_TOOLS.isdisjoint(ADDITIVE_TOOLS)
 

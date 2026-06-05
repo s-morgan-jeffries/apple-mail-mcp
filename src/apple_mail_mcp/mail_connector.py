@@ -5,6 +5,7 @@ AppleScript-based connector for Apple Mail.
 import logging
 import re
 import subprocess
+import tempfile
 import time
 import warnings
 from collections.abc import Callable
@@ -29,6 +30,8 @@ from .drafts import _validate_draft_id
 from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailAttachmentIndexError,
+    MailAttachmentTooLargeError,
     MailDraftHtmlUnavailableError,
     MailDraftNotFoundError,
     MailImapMoveUnsupportedError,
@@ -227,6 +230,11 @@ def _build_received_within_hours_short_circuit(
 # at the server layer, via env vars.
 DEFAULT_MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024        # 100 MB per attachment
 DEFAULT_MAX_TOTAL_ATTACHMENT_BYTES = 500 * 1024 * 1024  # 500 MB per call
+
+# Tighter cap for get_attachment_content (#250): the bytes are returned inline
+# in the MCP response (base64 inflates ~33%), so a much smaller ceiling than
+# the disk-save caps. Over-cap callers are pointed at save_attachments.
+DEFAULT_MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB per attachment
 
 
 def _select_attachments_within_caps(
@@ -759,6 +767,7 @@ class AppleMailConnector:
         imap_pool: ImapConnectionPool | None = None,
         max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES,
         max_total_attachment_bytes: int = DEFAULT_MAX_TOTAL_ATTACHMENT_BYTES,
+        max_inline_attachment_bytes: int = DEFAULT_MAX_INLINE_ATTACHMENT_BYTES,
     ) -> None:
         """
         Initialize the Mail connector.
@@ -775,11 +784,15 @@ class AppleMailConnector:
                 ``save_attachments`` (disk-fill DoS protection, #236).
             max_total_attachment_bytes: Aggregate byte cap per
                 ``save_attachments`` call.
+            max_inline_attachment_bytes: Per-attachment byte cap for
+                ``get_attachment_content`` — tighter than the disk-save
+                caps because the bytes are returned inline (#250).
         """
         self.timeout = timeout
         self._imap_pool = imap_pool
         self.max_attachment_bytes = max_attachment_bytes
         self.max_total_attachment_bytes = max_total_attachment_bytes
+        self.max_inline_attachment_bytes = max_inline_attachment_bytes
         # Accounts for which we've already logged a WARNING about IMAP failure.
         # Subsequent failures for the same account are demoted to DEBUG per
         # invariant 5 in docs/research/imap-auth-options-decision.md.
@@ -2342,6 +2355,171 @@ class AppleMailConnector:
         password = self._get_imap_password_with_fallback(account, email)
         imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
         return imap.get_attachments(message_id, mailbox=mailbox)
+
+    def get_attachment_content(
+        self,
+        message_id: str,
+        attachment_index: int,
+        *,
+        account: str | None = None,
+        mailbox: str | None = None,
+    ) -> dict[str, Any]:
+        """Return a single attachment's bytes inline (no caller-facing disk).
+
+        Dispatch mirrors :meth:`get_attachments`: the IMAP path is used when
+        both ``account`` and ``mailbox`` are supplied and the breaker is
+        closed (it fetches the raw message and decodes the part — never
+        touches disk), falling back to AppleScript on any IMAP failure. The
+        AppleScript path can't read attachment bytes directly, so it saves
+        the selected attachment to a private temp dir, reads it, and deletes
+        it (the temp file is internal — no caller-managed file). (#250)
+
+        ``attachment_index`` is 0-based and follows the message's MIME
+        attachment order — the same order ``get_attachments`` /
+        ``get_messages(include_attachments=True)`` report. Pass the same
+        ``account`` / ``mailbox`` you read the message with so the path (and
+        thus ordering) stays consistent.
+
+        Returns ``{"name", "mime_type", "size", "payload": bytes}``; the
+        server layer encodes ``payload`` as text or base64.
+
+        Raises:
+            MailMessageNotFoundError: message not found via either path.
+            MailAttachmentIndexError: ``attachment_index`` out of range.
+            MailAttachmentTooLargeError: attachment exceeds the inline cap.
+        """
+        if (
+            account is not None
+            and mailbox is not None
+            and not self._imap_breaker_open(account)
+        ):
+            try:
+                result = self._imap_get_attachment_content(
+                    account=account,
+                    mailbox=mailbox,
+                    message_id=message_id,
+                    attachment_index=attachment_index,
+                )
+                self._imap_clear_breaker(account)
+                return result
+            except _IMAP_FALLBACK_EXCS as exc:
+                self._log_imap_fallback(account, exc)
+                # fall through to AppleScript
+
+        return self._get_attachment_content_applescript(
+            message_id, attachment_index
+        )
+
+    def _imap_get_attachment_content(
+        self,
+        *,
+        account: str,
+        mailbox: str,
+        message_id: str,
+        attachment_index: int,
+    ) -> dict[str, Any]:
+        """IMAP path for get_attachment_content: fetch the raw message and
+        decode the selected attachment part. Reuses ``fetch_raw_message`` +
+        ``parse_original_message`` (the same machinery the clean
+        reply/forward draft path uses), so no new IMAP byte-fetch code.
+
+        Propagates ``_IMAP_FALLBACK_EXCS`` unchanged for the caller's
+        fallback.
+        """
+        host, port, email = self._resolve_imap_config(account)
+        password = self._get_imap_password_with_fallback(account, email)
+        imap = ImapConnector(host, port, email, password, pool=self._imap_pool)
+        raw = imap.fetch_raw_message(message_id, mailbox)
+        atts = parse_original_message(raw).attachments
+        if not 0 <= attachment_index < len(atts):
+            raise MailAttachmentIndexError(
+                f"attachment_index {attachment_index} out of range: message "
+                f"has {len(atts)} attachment(s)."
+            )
+        filename, maintype, subtype, payload = atts[attachment_index]
+        self._enforce_inline_cap(len(payload), filename)
+        return {
+            "name": filename,
+            "mime_type": f"{maintype}/{subtype}",
+            "size": len(payload),
+            "payload": payload,
+        }
+
+    def _get_attachment_content_applescript(
+        self, message_id: str, attachment_index: int
+    ) -> dict[str, Any]:
+        """AppleScript path: enumerate metadata, validate index + size, then
+        save the one attachment to a temp dir and read it back."""
+        attachments = self._get_attachments_applescript(message_id)
+        if not 0 <= attachment_index < len(attachments):
+            raise MailAttachmentIndexError(
+                f"attachment_index {attachment_index} out of range: message "
+                f"has {len(attachments)} attachment(s)."
+            )
+        meta = attachments[attachment_index]
+        name = str(meta.get("name") or "")
+        mime_type = str(meta.get("mime_type") or "application/octet-stream")
+        # Pre-check the reported size so an oversize attachment is rejected
+        # before we spend an AppleScript save. (A post-read recheck below
+        # catches a Mail-under-reported size.)
+        self._enforce_inline_cap(int(meta.get("size") or 0), name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / (sanitize_filename(name) or "attachment")
+            self._save_one_attachment_applescript(
+                message_id, attachment_index + 1, dest
+            )
+            if not dest.is_file():
+                raise MailMessageNotFoundError(
+                    f"Could not read attachment {attachment_index} of "
+                    f"message {message_id!r}."
+                )
+            payload = dest.read_bytes()
+        self._enforce_inline_cap(len(payload), name)
+        return {
+            "name": name,
+            "mime_type": mime_type,
+            "size": len(payload),
+            "payload": payload,
+        }
+
+    def _save_one_attachment_applescript(
+        self, message_id: str, one_based_index: int, dest_path: Path
+    ) -> None:
+        """Save a single attachment (1-based AppleScript index) to
+        ``dest_path`` via Mail.app's ``save`` command. Factored out so the
+        byte-read path is unit-testable without a real Mail.app save.
+        """
+        message_id_safe = escape_applescript_string(sanitize_input(message_id))
+        dest_safe = escape_applescript_string(str(dest_path))
+        script = _wrap_with_timeout(
+            f"""tell application "Mail"
+            repeat with acc in accounts
+                repeat with mb in mailboxes of acc
+                    try
+                        set msg to first message of mb whose id is "{message_id_safe}"
+                        set theAtts to mail attachments of msg
+                        save (item {one_based_index} of theAtts) in (POSIX file "{dest_safe}")
+                        return "OK"
+                    end try
+                end repeat
+            end repeat
+            error "Message not found"
+        end tell""",
+            timeout=self.timeout,
+        )
+        self._run_applescript(script)
+
+    def _enforce_inline_cap(self, size: int, name: str) -> None:
+        """Raise MailAttachmentTooLargeError when ``size`` exceeds the inline
+        cap, pointing the caller at save_attachments for large files."""
+        if size > self.max_inline_attachment_bytes:
+            raise MailAttachmentTooLargeError(
+                f"Attachment {name!r} is {size} bytes, over the "
+                f"{self.max_inline_attachment_bytes}-byte inline limit for "
+                f"get_attachment_content. Use save_attachments for large "
+                f"files."
+            )
 
     def _get_attachments_applescript(
         self, message_id: str

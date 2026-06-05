@@ -510,3 +510,72 @@ class TestCoerceJsonDict:
         assert coerce_json_dict("not json") == "not json"
         assert get_flag_index("Red") == 0
         assert get_flag_index("oRaNgE") == 1
+
+
+# --- Attachment content encoding (#250) ----------------------------------
+
+import base64 as _base64  # noqa: E402
+
+from apple_mail_mcp.utils import (  # noqa: E402
+    attachment_content_encoding,
+    is_texty_mime,
+)
+
+
+class TestIsTextyMime:
+    @pytest.mark.parametrize(
+        "mime",
+        [
+            "text/plain",
+            "text/html",
+            "TEXT/CSV",
+            "application/json",
+            "application/xml",
+            "application/ld+json",
+            "image/svg+xml",
+        ],
+    )
+    def test_texty(self, mime):
+        assert is_texty_mime(mime) is True
+
+    @pytest.mark.parametrize(
+        "mime",
+        ["application/pdf", "image/png", "application/octet-stream", "", "audio/mpeg"],
+    )
+    def test_not_texty(self, mime):
+        assert is_texty_mime(mime) is False
+
+
+class TestAttachmentContentEncoding:
+    def test_text_mime_utf8_returns_text(self):
+        content, encoding = attachment_content_encoding(
+            b"hello, world\n", "text/plain"
+        )
+        assert encoding == "text"
+        assert content == "hello, world\n"
+
+    def test_json_mime_returns_text(self):
+        content, encoding = attachment_content_encoding(
+            b'{"a": 1}', "application/json"
+        )
+        assert encoding == "text"
+        assert content == '{"a": 1}'
+
+    def test_texty_mime_invalid_utf8_falls_back_to_base64(self):
+        payload = b"\xff\xfe\x00\x01bad utf8"
+        content, encoding = attachment_content_encoding(payload, "text/plain")
+        assert encoding == "base64"
+        assert _base64.b64decode(content) == payload
+
+    def test_binary_mime_returns_base64(self):
+        payload = b"%PDF-1.7\n\x00\x01\x02"
+        content, encoding = attachment_content_encoding(
+            payload, "application/pdf"
+        )
+        assert encoding == "base64"
+        assert _base64.b64decode(content) == payload
+
+    def test_empty_payload_text_mime(self):
+        content, encoding = attachment_content_encoding(b"", "text/plain")
+        assert encoding == "text"
+        assert content == ""

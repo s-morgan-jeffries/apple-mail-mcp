@@ -50,6 +50,21 @@ class MailImapRequiredError(MailError):
     pass
 
 
+class MailAttachmentIndexError(MailError):
+    """The requested attachment index doesn't exist on the message
+    (out of range, or the message has no attachments). (#250)"""
+
+    pass
+
+
+class MailAttachmentTooLargeError(MailError):
+    """The attachment exceeds the inline-content size cap for
+    ``get_attachment_content``; the caller should use ``save_attachments``
+    for large files. (#250)"""
+
+    pass
+
+
 class MailImapMoveUnsupportedError(MailError):
     """The IMAP server advertises neither MOVE (RFC 6851) nor UIDPLUS
     (RFC 4315). No safe scoped move is possible; the orchestrator must

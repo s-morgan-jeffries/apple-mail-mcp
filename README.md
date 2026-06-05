@@ -8,12 +8,12 @@ An MCP server that provides programmatic access to Apple Mail, enabling AI assis
 
 > ⚠️ **Pre-1.0 — expect breaking changes.** The MCP tool surface (tool names, parameters, return shapes) is still evolving as the project matures. Pin to a specific version (for example, `apple-mail-fast-mcp==0.9.1`) and review the [CHANGELOG](CHANGELOG.md) before upgrading.
 
-## Tools (23)
+## Tools (24)
 
-Grouped by lifecycle (9 read-only, 14 mutating):
+Grouped by lifecycle (10 read-only, 14 mutating):
 
 - **Discovery** — `list_accounts`, `list_mailboxes`, `list_rules`, `list_templates`: enumerate what's configured (no external cache — call per account).
-- **Read** — `search_messages`, `get_messages`, `get_thread`, `get_template`, `render_template`: read messages/threads and render templates.
+- **Read** — `search_messages`, `get_messages`, `get_thread`, `get_attachment_content`, `get_template`, `render_template`: read messages/threads, pull an attachment's content inline, and render templates.
 - **Message actions** — `update_message` (read/flag/move in one pass), `delete_messages` (→ Trash), `save_attachments` (to disk, byte-capped).
 - **Drafts** — `create_draft` (new / reply / forward, optionally `send_now`), `update_draft`, `delete_draft`.
 - **Mailbox CRUD** — `create_mailbox`, `update_mailbox` (rename or move), `delete_mailbox`.

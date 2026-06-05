@@ -127,6 +127,7 @@ OPERATION_TIERS: dict[str, str] = {
     "get_messages": "cheap_reads",
     "get_thread": "cheap_reads",
     "save_attachments": "cheap_reads",
+    "get_attachment_content": "cheap_reads",
     "search_messages": "expensive_ops",
     "update_message": "expensive_ops",
     "create_mailbox": "expensive_ops",
