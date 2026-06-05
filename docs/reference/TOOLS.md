@@ -586,6 +586,56 @@ save_attachments(
 
 ---
 
+### get_attachment_content
+
+Read **one** attachment's content inline, without writing it to disk — for "triage" workflows where you want to inspect an attachment before deciding what to do, instead of `save_attachments` → read → clean up. Read-only (`readOnlyHint: true`).
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `message_id` | string | Yes | - | Message id as returned by `search_messages` / `get_messages` (RFC 5322 Message-ID on the IMAP path, Mail's internal id on the AppleScript path). |
+| `attachment_index` | integer | Yes | - | **0-based** index into the message's attachments, in the same order `get_attachments` / `get_messages(include_attachments=True)` report. |
+| `account` | string \| null | No | null | Mail.app account name or UUID. Supply it (with `mailbox`) for the faster IMAP path; pass the same value you read the message with so ordering matches. |
+| `mailbox` | string \| null | No | null | Folder the message lives in (for the IMAP path). |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "content": "<utf-8 text or base64>",
+  "encoding": "text",
+  "name": "report.txt",
+  "mime_type": "text/plain",
+  "size": 1234
+}
+```
+
+- **Encoding:** text-like types (`text/*`, `application/json`, `application/xml`, and `+json`/`+xml` suffixes) are returned as a UTF-8 string with `encoding: "text"`. Everything else — and any text type whose bytes aren't valid UTF-8 — is base64 with `encoding: "base64"`.
+- **No disk:** the IMAP path fetches and decodes the part in memory; the AppleScript fallback saves to a private temp dir, reads, and deletes it (no caller-managed file).
+
+**Size limit:** attachments over ~25 MB are rejected (`error_type: "attachment_too_large"`) — use `save_attachments` for large files. Override with `APPLE_MAIL_MCP_MAX_INLINE_ATTACHMENT_BYTES`.
+
+**Error Codes:**
+
+- `message_not_found`: no message matches `message_id`.
+- `attachment_index_out_of_range`: the message has no attachment at that index.
+- `attachment_too_large`: exceeds the inline cap (use `save_attachments`).
+- `rate_limited`, `unknown`: standard.
+
+**Example:**
+
+```python
+# Peek at the first attachment of a message before routing it
+att = get_attachment_content(message_id="12345", attachment_index=0,
+                             account="Gmail", mailbox="INBOX")
+if att["encoding"] == "text":
+    print(att["content"])      # inspect inline
+```
+
+---
+
 ### create_mailbox
 
 Create a new mailbox/folder.

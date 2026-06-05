@@ -19,6 +19,8 @@ from .drafts import DraftStateStore, SeedRecord
 from .exceptions import (
     MailAccountNotFoundError,
     MailAppleScriptError,
+    MailAttachmentIndexError,
+    MailAttachmentTooLargeError,
     MailDraftError,
     MailDraftHtmlUnavailableError,
     MailDraftInvalidIdError,
@@ -48,7 +50,11 @@ from .security import (
     validate_send_operation,
 )
 from .templates import Template, TemplateStore
-from .utils import coerce_json_dict, coerce_json_list
+from .utils import (
+    attachment_content_encoding,
+    coerce_json_dict,
+    coerce_json_list,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -145,6 +151,7 @@ def _attachment_cap_overrides() -> dict[str, int]:
     for env_name, kwarg in (
         ("APPLE_MAIL_MCP_MAX_ATTACHMENT_BYTES", "max_attachment_bytes"),
         ("APPLE_MAIL_MCP_MAX_TOTAL_ATTACHMENT_BYTES", "max_total_attachment_bytes"),
+        ("APPLE_MAIL_MCP_MAX_INLINE_ATTACHMENT_BYTES", "max_inline_attachment_bytes"),
     ):
         raw = os.getenv(env_name)
         if raw is None:
@@ -1576,6 +1583,103 @@ def save_attachments(
         }
     except Exception as e:
         logger.error(f"Error saving attachments: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "unknown",
+        }
+
+
+@_tool(
+    {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
+)
+def get_attachment_content(
+    message_id: str,
+    attachment_index: int,
+    account: str | None = None,
+    mailbox: str | None = None,
+) -> dict[str, Any]:
+    """Read one attachment's content inline, without writing it to disk.
+
+    For "triage" workflows where you want to inspect an attachment (a text
+    file, JSON, a small PDF) before deciding what to do with it — instead of
+    ``save_attachments`` → read the file → clean up.
+
+    Args:
+        message_id: Message id, as returned by ``search_messages`` /
+            ``get_messages`` (RFC 5322 Message-ID on the IMAP path, Mail's
+            internal id on the AppleScript path).
+        attachment_index: 0-based index into the message's attachments, in
+            the same order ``get_attachments`` / ``get_messages``
+            (``include_attachments=True``) report them.
+        account: Mail.app account name or UUID. Supply it (with ``mailbox``)
+            to use the faster IMAP path; pass the same value you read the
+            message with so the attachment ordering matches.
+        mailbox: Folder the message lives in (for the IMAP path).
+
+    Returns:
+        ``{"success": True, "content": <str>, "encoding": "text"|"base64",
+        "name": <filename>, "mime_type": <type>, "size": <bytes>}``. Text-like
+        types (``text/*``, ``application/json``, ``application/xml``, …) are
+        returned as a UTF-8 string (``encoding="text"``); everything else —
+        and any text type that isn't valid UTF-8 — is base64
+        (``encoding="base64"``).
+
+    Size limit: attachments over ~25 MB are rejected
+    (``error_type: "attachment_too_large"``) — use ``save_attachments`` for
+    large files. Override via ``APPLE_MAIL_MCP_MAX_INLINE_ATTACHMENT_BYTES``.
+    """
+    try:
+        rate_err = check_rate_limit(
+            "get_attachment_content", {"message_id": message_id}
+        )
+        if rate_err:
+            return rate_err
+
+        result = mail.get_attachment_content(
+            message_id,
+            attachment_index,
+            account=account,
+            mailbox=mailbox,
+        )
+        content, encoding = attachment_content_encoding(
+            result["payload"], result["mime_type"]
+        )
+
+        operation_logger.log_operation(
+            "get_attachment_content",
+            {"message_id": message_id, "attachment_index": attachment_index},
+            "success",
+        )
+        return {
+            "success": True,
+            "content": content,
+            "encoding": encoding,
+            "name": result["name"],
+            "mime_type": result["mime_type"],
+            "size": result["size"],
+        }
+
+    except MailAttachmentIndexError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "attachment_index_out_of_range",
+        }
+    except MailAttachmentTooLargeError as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "attachment_too_large",
+        }
+    except MailMessageNotFoundError:
+        return {
+            "success": False,
+            "error": f"Message '{message_id}' not found",
+            "error_type": "message_not_found",
+        }
+    except Exception as e:
+        logger.error(f"Error getting attachment content: {e}")
         return {
             "success": False,
             "error": str(e),

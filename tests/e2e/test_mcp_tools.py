@@ -33,6 +33,8 @@ EXPECTED_TOOLS = {
     "create_draft",
     "update_draft",
     "delete_draft",
+    # Attachments
+    "get_attachment_content",
     # Mutations
     "update_message",
     "save_attachments",

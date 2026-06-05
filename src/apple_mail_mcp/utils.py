@@ -2,6 +2,7 @@
 Utility functions for Apple Mail MCP.
 """
 
+import base64
 import json
 import re
 from typing import Any
@@ -505,3 +506,38 @@ def is_icloud_imap_host(host: str) -> bool:
     ``p42-imap.mail.me.com``) as well as ``imap.mail.me.com``.
     """
     return host.strip().lower().endswith(".mail.me.com")
+
+
+def is_texty_mime(mime_type: str) -> bool:
+    """True for MIME types whose payload is human-readable text and worth
+    returning as a UTF-8 string rather than base64 (#250).
+
+    Covers ``text/*`` plus the common structured-text application types
+    (``application/json``, ``application/xml``, and any ``+json`` / ``+xml``
+    structured-syntax suffix, e.g. ``image/svg+xml``).
+    """
+    m = (mime_type or "").strip().lower()
+    if m.startswith("text/"):
+        return True
+    if m in ("application/json", "application/xml"):
+        return True
+    return m.endswith("+json") or m.endswith("+xml")
+
+
+def attachment_content_encoding(
+    payload: bytes, mime_type: str
+) -> tuple[str, str]:
+    """Encode attachment bytes for inline return (#250).
+
+    Returns ``(content, encoding)``. For texty MIME types
+    (:func:`is_texty_mime`) the payload is returned as a UTF-8 string with
+    ``encoding="text"``; if it isn't valid UTF-8 — or the type isn't texty —
+    it's base64-encoded with ``encoding="base64"``. Fail-safe: anything that
+    can't be decoded as text round-trips losslessly through base64.
+    """
+    if is_texty_mime(mime_type):
+        try:
+            return payload.decode("utf-8"), "text"
+        except UnicodeDecodeError:
+            pass
+    return base64.b64encode(payload).decode("ascii"), "base64"

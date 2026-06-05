@@ -32,6 +32,7 @@ from apple_mail_mcp.server import (
     delete_messages,
     delete_rule,
     delete_template,
+    get_attachment_content,
     get_messages,
     get_template,
     get_thread,
@@ -1901,6 +1902,76 @@ class TestGetThread:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# 8b. get_attachment_content (#250)
+# ---------------------------------------------------------------------------
+
+
+class TestGetAttachmentContent:
+    def test_text_attachment_returns_text_encoding(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_attachment_content.return_value = {
+            "name": "notes.txt", "mime_type": "text/plain",
+            "size": 5, "payload": b"hello",
+        }
+        result = get_attachment_content("1", 0)
+        assert result["success"] is True
+        assert result["encoding"] == "text"
+        assert result["content"] == "hello"
+        assert result["name"] == "notes.txt"
+        assert result["mime_type"] == "text/plain"
+        assert result["size"] == 5
+        mock_logger.log_operation.assert_called_once()
+
+    def test_binary_attachment_returns_base64_encoding(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        import base64
+        payload = b"\x00\x01\x02\xff"
+        mock_mail.get_attachment_content.return_value = {
+            "name": "blob.bin", "mime_type": "application/octet-stream",
+            "size": len(payload), "payload": payload,
+        }
+        result = get_attachment_content("1", 0, account="iCloud", mailbox="INBOX")
+        assert result["success"] is True
+        assert result["encoding"] == "base64"
+        assert base64.b64decode(result["content"]) == payload
+
+    def test_oversize_maps_to_attachment_too_large(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailAttachmentTooLargeError
+        mock_mail.get_attachment_content.side_effect = (
+            MailAttachmentTooLargeError("too big")
+        )
+        result = get_attachment_content("1", 0)
+        assert result["success"] is False
+        assert result["error_type"] == "attachment_too_large"
+
+    def test_bad_index_maps_to_index_out_of_range(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailAttachmentIndexError
+        mock_mail.get_attachment_content.side_effect = (
+            MailAttachmentIndexError("out of range")
+        )
+        result = get_attachment_content("1", 9)
+        assert result["success"] is False
+        assert result["error_type"] == "attachment_index_out_of_range"
+
+    def test_not_found_maps_to_message_not_found(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailMessageNotFoundError
+        mock_mail.get_attachment_content.side_effect = (
+            MailMessageNotFoundError("nope")
+        )
+        result = get_attachment_content("1", 0)
+        assert result["success"] is False
+        assert result["error_type"] == "message_not_found"
 
 
 # ---------------------------------------------------------------------------

@@ -385,6 +385,46 @@ class TestMailIntegration:
         new_files = written - before
         assert all(p.is_relative_to(tmp_path.resolve()) for p in new_files)
 
+    def test_get_attachment_content_round_trip(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """#250: get_attachment_content returns a real attachment's bytes
+        inline (no caller-facing disk). Scans a few INBOX messages for one
+        with an attachment; fetches index 0 and checks the payload size
+        matches the metadata and the content encodes coherently.
+        """
+        import base64 as _b64
+
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=10
+        )
+        target = next(
+            (
+                (m["id"], connector.get_attachments(m["id"]))
+                for m in matches
+                if connector.get_attachments(m["id"])
+            ),
+            None,
+        )
+        if target is None:
+            pytest.skip("no INBOX message with attachments")
+        message_id, meta = target
+
+        result = connector.get_attachment_content(message_id, 0)
+        assert set(result.keys()) >= {"name", "mime_type", "size", "payload"}
+        assert isinstance(result["payload"], bytes)
+        assert result["size"] == len(result["payload"])
+        # Server-layer encode must produce a coherent text/base64 blob.
+        from apple_mail_mcp.utils import attachment_content_encoding
+
+        content, encoding = attachment_content_encoding(
+            result["payload"], result["mime_type"]
+        )
+        if encoding == "base64":
+            assert _b64.b64decode(content) == result["payload"]
+        else:
+            assert content.encode("utf-8") == result["payload"]
+
     def test_get_attachments_via_imap(
         self, connector: AppleMailConnector, test_account: str
     ) -> None:
