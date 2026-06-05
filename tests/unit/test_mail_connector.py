@@ -1199,6 +1199,20 @@ class TestAppleMailConnector:
         assert "iCloud" not in connector._imap_failure_until
         assert connector._imap_breaker_open("iCloud") is False
 
+    def test_breaker_does_not_open_for_message_not_found(
+        self, connector: AppleMailConnector
+    ) -> None:
+        """#350: a reply/forward seed not in the guessed seed_mailbox raises
+        MailMessageNotFoundError — a benign folder-guess miss (AppleScript
+        resolves across all folders), not a credential/network failure. It
+        must NOT open the breaker, or a normal reply-to-filed-mail would
+        poison every IMAP read for the account for 30s."""
+        connector._log_imap_fallback(
+            "iCloud", MailMessageNotFoundError("not in INBOX")
+        )
+        assert "iCloud" not in connector._imap_failure_until
+        assert connector._imap_breaker_open("iCloud") is False
+
     def test_breaker_resets_after_ttl(
         self, connector: AppleMailConnector,
         monkeypatch: pytest.MonkeyPatch,

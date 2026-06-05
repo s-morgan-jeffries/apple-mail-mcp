@@ -294,10 +294,21 @@ class TestEnvVarFallback:
 
     @patch("apple_mail_mcp.keychain.subprocess.run")
     def test_env_var_preserves_internal_whitespace(self, mock_run, monkeypatch):
-        # A non-empty value with internal spaces is returned verbatim (the
-        # value isn't a name we normalize — it's the password).
+        # A non-empty value with internal spaces keeps them (only surrounding
+        # whitespace is stripped). The value is the password, not a name.
         monkeypatch.setenv(
             "APPLE_MAIL_MCP_IMAP_PASSWORD_ICLOUD", "pw with spaces"
         )
         assert get_imap_password("iCloud", "u@i.com") == "pw with spaces"
+        mock_run.assert_not_called()
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_env_var_trailing_newline_stripped(self, mock_run, monkeypatch):
+        # #349: .env files / Docker / `export` commonly append a trailing
+        # newline; it must not be sent as part of the password (mirrors the
+        # Keychain path's rstrip). Surrounding whitespace is stripped.
+        monkeypatch.setenv(
+            "APPLE_MAIL_MCP_IMAP_PASSWORD_ICLOUD", "  secret\n"
+        )
+        assert get_imap_password("iCloud", "u@i.com") == "secret"
         mock_run.assert_not_called()
