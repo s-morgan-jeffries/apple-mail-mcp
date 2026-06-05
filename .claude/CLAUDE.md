@@ -17,7 +17,7 @@ make typecheck             # Mypy strict mode
 make check-all             # All checks (lint, typecheck, test, complexity, version-sync, parity)
 make coverage              # Coverage report
 ./scripts/check_complexity.sh          # Cyclomatic complexity check
-./scripts/check_client_server_parity.sh  # Verify all connector methods are exposed
+./scripts/check_client_server_parity.sh  # Blocking: connector methods must be a tool or allowlisted (docs/guides/CLIENT_SERVER_PARITY.md)
 ./scripts/check_version_sync.sh        # Version consistency across files
 ```
 
