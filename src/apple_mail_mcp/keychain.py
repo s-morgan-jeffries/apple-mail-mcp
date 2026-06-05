@@ -88,7 +88,11 @@ def get_imap_password(mail_app_account: str, email: str) -> str:
                 env_name,
                 mail_app_account,
             )
-            return env_pw
+            # Strip surrounding whitespace — .env files / Docker / `export`
+            # commonly append a trailing newline, and sending it as part of
+            # the password fails LOGIN. Mirrors the Keychain path's rstrip.
+            # (#349)
+            return env_pw.strip()
     service = SERVICE_NAME_PREFIX + mail_app_account
     try:
         result = subprocess.run(

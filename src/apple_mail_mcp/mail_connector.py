@@ -860,6 +860,19 @@ class AppleMailConnector:
             )
             return
 
+        if isinstance(exc, MailMessageNotFoundError):
+            # A reply/forward seed not in the guessed seed_mailbox is a
+            # benign folder-guess miss — AppleScript resolves the seed across
+            # all folders. Opening the breaker would poison every IMAP read
+            # for the account for 30s after a normal reply-to-filed-mail.
+            # (#350)
+            logger.debug(
+                "Seed message not in the guessed mailbox for %s; using "
+                "AppleScript (which resolves across all folders)",
+                account,
+            )
+            return
+
         # Non-benign failure: open the breaker.
         self._imap_failure_until[account] = (
             time.monotonic() + self._IMAP_BREAKER_TTL_S
