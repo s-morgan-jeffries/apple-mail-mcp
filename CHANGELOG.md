@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-06-05
+
+First release under the new name **`apple-mail-fast-mcp`** (#335) — the PyPI distribution, CLI command, and repo were renamed, and publishing now goes through PyPI OIDC trusted publishing. Feature-wise the theme is **richer composition and inspection**: drafts can carry an HTML body, a new tool reads an attachment's content inline without writing to disk, and IMAP credentials can come from an environment variable for uvx/headless/CI contexts. Alongside: a confirmation-prompt fix for current FastMCP, and CI/release hardening so parity drift and dependency advisories can't slip through (or hard-block a release) unnoticed.
+
+> **Renaming note:** install as `apple-mail-fast-mcp` (e.g. `pip install apple-mail-fast-mcp` / `uvx apple-mail-fast-mcp`) and invoke the CLI as `apple-mail-fast-mcp`. The Python import package remains `apple_mail_mcp` for now, and Keychain entries remain under the `apple-mail-mcp.imap.<account>` prefix (a brand migration is tracked in #336/#337).
+
+### Added
+
+**HTML body support for `create_draft` / `update_draft` (#251):** a new optional `body_html` parameter builds a `multipart/alternative` draft (HTML + a plain-text alternative, derived from the HTML when no plain `body` is given) over the clean IMAP-APPEND path. Limited to fresh save-as-draft and requires IMAP credentials; combining it with `send_now` or reply/forward is rejected, and if the IMAP path can't engage the call fails (`html_requires_imap`) rather than silently downgrading to plain text. HTML is caller-trusted (not sanitized).
+
+**`get_attachment_content` tool (#250):** read a single attachment's content inline — UTF-8 text for text-like types (`text/*`, `application/json`, …) or base64 otherwise — without writing to disk, for triage workflows. 0-based `attachment_index` matching `get_attachments` / `get_messages(include_attachments=True)`; ~25 MB inline cap (override via `APPLE_MAIL_MCP_MAX_INLINE_ATTACHMENT_BYTES`), over which it returns `attachment_too_large` and points at `save_attachments`.
+
+**Environment-variable fallback for the IMAP password (#248):** `APPLE_MAIL_MCP_IMAP_PASSWORD_<ACCOUNT>` (account name uppercased, non-alphanumerics → `_`) supplies the IMAP password where the macOS Keychain isn't usable (uvx, Docker/CI, headless). Checked before the Keychain and composes with the name↔UUID dual-form lookup (#243). Env vars are less private than the Keychain — documented as uvx/CI-only.
+
+**Weekly dependency-advisory workflow (#296):** a scheduled CI job (`dependency-audit.yml`) runs `pip-audit` and opens/updates (and auto-closes) a tracking issue when advisories appear, so freshly-disclosed CVEs on unchanged pins are discovered continuously and bumped on their own PRs — not mid-release.
+
+### Changed
+
+**Confirmation prompts pass an explicit `response_type` to `ctx.elicit` (#282):** the destructive-action confirmation gate now uses a boolean `response_type` (clearing FastMCP ≥3.3.1's `FastMCPDeprecationWarning` and the empty-form rendering bug in some clients, e.g. VS Code). Only an explicit affirmative proceeds; decline, cancel, accept-with-false, missing context, and elicit errors all block (fail-closed).
+
+**`update_rule` confirmation is dangerous-action-aware (#280):** updating a rule only elicits confirmation when the change touches conditions/match-logic or introduces a destructive action (delete/forward/move/copy), mirroring `create_rule` (#222) — purely organizational tweaks no longer prompt.
+
+**Clean drafts adopt the sole enabled account + warn on fallback (#321, #270):** with no explicit `from_account`, a single enabled account is adopted so the clean (no iOS cite-blockquote) IMAP-APPEND draft path can engage; save-as-draft calls that fall back to the AppleScript path now surface a warning.
+
+**Release dependency gate split: direct vs transitive (#296):** `check_dependencies.sh` now hard-fails only on advisories in direct deps (`fastmcp`/`imapclient`); transitive advisories are warnings (handled by the scheduled workflow above), so a freshly-disclosed transitive CVE no longer hard-blocks an otherwise-ready release.
+
+**Client/server parity check is now blocking (#277):** `check_client_server_parity.sh` fails CI when a public connector method is neither exposed as a tool nor in an intentionally-internal allowlist (and on stale allowlist entries), instead of always passing.
+
+**Faster bulk IMAP id resolution (#316):** `update_message`'s RFC Message-ID→UID resolution now batches into a chunked `OR` SEARCH instead of per-id lookups (~6× faster bulk moves on the IMAP path).
+
+### Fixed
+
+**Drafts surface promptly after IMAP-APPEND (#269):** the account is synchronized after an IMAP-APPEND draft so it appears in Mail.app's local Drafts pane without waiting for Mail's background poll.
+
+**Stricter name / draft_id validation (#325):** the forbidden-character set is now enforced in the name and `draft_id` validators.
+
+**`check_readme_claims.sh` tool-count under the `@_tool` wrapper (#346):** the doc-claims check counted bare `@mcp.tool()` (always 0 since the `@_tool` wrapper, #217); it now counts the wrapper, and CLAUDE.md's test counts were refreshed.
+
+**Env-var IMAP password whitespace stripped (#349):** the `APPLE_MAIL_MCP_IMAP_PASSWORD_<ACCOUNT>` value is now stripped of surrounding whitespace, so a trailing newline from a `.env` file / Docker / `export` no longer breaks IMAP login (mirrors the Keychain path's behavior).
+
+**Reply/forward draft folder-miss no longer trips the IMAP circuit breaker (#350):** when the seed message isn't in the guessed `seed_mailbox` the call falls back to AppleScript (which resolves across all folders) without opening the 30s breaker, so a normal reply to filed mail no longer degrades subsequent IMAP reads for the account.
+
+### Docs
+
+**Issue-claiming convention for non-collaborators (#327):** corrected the contributing docs for how non-collaborators claim issues.
+
 ## [0.9.1] - 2026-06-03
 
 Patch release. The theme is **IMAP-path correctness and interop robustness**: several contributor-relevant crashes and login edge cases on the IMAP fast path are fixed (concurrent-mutation FETCH, iCloud login resolution, split connect/operation timeouts), tool parameters arriving as stringified JSON from clients like Cowork are now coerced, and reply/forward drafts no longer render with an iOS cite-blockquote wrapper. Alongside the fixes: a new warn-only prompt-injection detector on read responses, an automated doc/artifact drift gate wired into CI and the release flow, and test-suite hardening (Hypothesis property tests on the escape/sanitize boundary, plus a fix for the unit suite leaking to real `osascript`).
