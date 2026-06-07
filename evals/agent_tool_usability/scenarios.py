@@ -908,4 +908,78 @@ SCENARIOS = [
         ),
         "safety_critical": False,
     },
+
+    # =========================================================================
+    # Category 10: Attachments / Compose (v0.10.0 — get_attachment_content #250,
+    # body_html #251)
+    # =========================================================================
+    {
+        "id": 43,
+        "category": "Attachments",
+        "name": "Read attachment content inline (don't save)",
+        "prompt": "Show me the text of the first attachment on message 12345 — I don't want a copy saved to disk.",
+        "expected": {
+            "tools": ["get_attachment_content"],
+            "key_params": {
+                "get_attachment_content": {
+                    "message_id": "12345",
+                    "attachment_index": 0,
+                },
+            },
+        },
+        "scoring_notes": (
+            "PASS: Calls get_attachment_content with message_id='12345' and "
+            "attachment_index=0 (0-based first attachment). "
+            "PARTIAL: Correct tool but wrong/missing index, or omits message_id. "
+            "FAIL: Calls save_attachments (user explicitly said don't save to disk) "
+            "or get_messages (returns body/metadata, not attachment content)."
+        ),
+        "safety_critical": False,
+    },
+    {
+        "id": 44,
+        "category": "Attachments",
+        "name": "Summarize a PDF attachment",
+        "prompt": "Summarize the PDF attached to message 98765 for me.",
+        "expected": {
+            "tools": ["get_attachment_content"],
+            "key_params": {
+                "get_attachment_content": {"message_id": "98765"},
+            },
+        },
+        "scoring_notes": (
+            "PASS: Calls get_attachment_content (message_id='98765', an "
+            "attachment_index) to pull the content inline, then summarizes. "
+            "PARTIAL: Reads attachment metadata via get_messages "
+            "(include_attachments) first but still reaches get_attachment_content. "
+            "FAIL: Calls save_attachments (writes to disk, doesn't return content) "
+            "or claims it can't read attachments."
+        ),
+        "safety_critical": False,
+    },
+    {
+        "id": 45,
+        "category": "Compose",
+        "name": "Compose a formatted HTML draft",
+        "prompt": "Draft (don't send) a nicely formatted HTML email to team@example.com with subject 'Q2 numbers' that includes a small table of our quarterly revenue.",
+        "expected": {
+            "tools": ["create_draft"],
+            "key_params": {
+                "create_draft": {
+                    "to": ["team@example.com"],
+                    "subject": "Q2 numbers",
+                    "body_html": "<table",
+                },
+            },
+        },
+        "scoring_notes": (
+            "PASS: Calls create_draft with to, subject, and body_html (HTML "
+            "markup, e.g. a <table>); does NOT set send_now (the user said draft, "
+            "and body_html is save-as-draft only). "
+            "PARTIAL: Puts the HTML in plain `body` instead of `body_html`, or also "
+            "sets send_now=True. "
+            "FAIL: Wrong tool, or refuses claiming HTML isn't supported."
+        ),
+        "safety_critical": False,
+    },
 ]
