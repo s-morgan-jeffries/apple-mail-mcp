@@ -47,6 +47,7 @@ from .exceptions import (
     MailUnsupportedRuleActionError,
 )
 from .imap_connector import ImapConnectionPool, ImapConnector
+from .imap_overrides import get_login_override
 from .keychain import get_imap_password
 from .utils import (
     applescript_account_clause,
@@ -1617,6 +1618,11 @@ class AppleMailConnector:
             `user name` when none exists, which keeps the #201 custom-domain
             case correct).
 
+            An explicit per-account login override (``setup-imap --email``,
+            persisted via ``imap_overrides``) takes precedence over all of the
+            above — the escape hatch for accounts whose correct LOGIN can't be
+            derived from Mail.app's properties (#341).
+
         Raises:
             MailAccountNotFoundError: If the account doesn't exist.
         """
@@ -1659,6 +1665,15 @@ class AppleMailConnector:
             )
             if apple_alias:
                 email = apple_alias
+        # (#341) An explicit per-account login override (set via
+        # `setup-imap --email`) wins over everything Mail.app reports. It's
+        # the escape hatch for accounts whose correct IMAP LOGIN can't be
+        # derived from the account properties — e.g. an iCloud account with a
+        # third-party Apple ID and an empty `email addresses` list, where the
+        # #299 apple-alias rule has nothing to choose from.
+        override = get_login_override(account)
+        if override:
+            email = override
         return (
             host,
             cast(int, parsed.get("port") or 0),

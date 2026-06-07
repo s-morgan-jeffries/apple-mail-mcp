@@ -19,12 +19,14 @@ from .exceptions import (
     MailKeychainError,
 )
 from .imap_connector import ImapConnector
+from .imap_overrides import delete_login_override, set_login_override
 from .keychain import (
     delete_imap_password,
     get_imap_password,
     set_imap_password,
 )
 from .mail_connector import AppleMailConnector
+from .utils import is_apple_hosted_address, is_icloud_imap_host
 
 
 def _print_available_accounts(accounts: list[dict[str, object]]) -> None:
@@ -40,6 +42,27 @@ def _account_exists(
     accounts: list[dict[str, object]], requested_name: str
 ) -> bool:
     return any(acc.get("name") == requested_name for acc in accounts)
+
+
+def _maybe_print_icloud_login_hint(
+    cli_email: str | None, host: str, email: str
+) -> None:
+    """On an iCloud login failure, if no `--email` was given and the login
+    we tried isn't an Apple-hosted address, this is the classic #341 shape
+    (third-party Apple ID, no @icloud.com alias in Mail.app). Point the user
+    at the override path. No-op otherwise (incl. legitimate #201 custom-domain
+    accounts, whose login succeeds and never reaches here)."""
+    if (
+        not cli_email
+        and is_icloud_imap_host(host)
+        and not is_apple_hosted_address(email)
+    ):
+        print(
+            "  Hint: this looks like an iCloud account whose Apple ID is "
+            "a third-party email. Re-run with `--email <your "
+            "@icloud.com/@me.com address>` to set the correct IMAP login.",
+            file=sys.stderr,
+        )
 
 
 def run_setup_imap(
@@ -111,6 +134,9 @@ def run_setup_imap(
         except MailKeychainError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
+        # Also drop any persisted login override (#341) so a re-setup starts
+        # from Mail.app's derived login rather than a stale override.
+        delete_login_override(account_name)
         print(f"Removed Keychain entry for {account_name!r} ({email}).")
         return 0
 
@@ -136,6 +162,11 @@ def run_setup_imap(
     print(
         f"Stored in Keychain as 'apple-mail-mcp.imap.{account_name}'."
     )
+    # Persist an explicit --email as a login override so runtime resolution
+    # (_resolve_imap_config) uses the same login this setup verifies — without
+    # it, runtime re-derives the login from Mail.app and ignores --email (#341).
+    if cli_email:
+        set_login_override(account_name, email)
 
     print(f"Testing IMAP connection to {host}:{port}...")
     imap = (imap_factory or ImapConnector)(host, port, email, password)
@@ -146,16 +177,19 @@ def run_setup_imap(
     except LoginError as exc:
         # Bad password — roll the entry back so the user can retry without
         # leaving a broken Keychain item that get_imap_password would
-        # happily return.
+        # happily return. Mirror the rollback for any override just written.
         try:
             delete_imap_password(account_name, email)
         except MailKeychainError:
             pass
+        if cli_email:
+            delete_login_override(account_name)
         print(
             f"ERROR: IMAP login was rejected ({exc}). The Keychain entry "
             "has been removed; please re-run with the correct password.",
             file=sys.stderr,
         )
+        _maybe_print_icloud_login_hint(cli_email, host, email)
         return 1
     except (OSError, IMAPClientError) as exc:
         # Network / protocol error. The password may be fine but we can't

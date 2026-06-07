@@ -97,7 +97,7 @@ On first run, macOS will prompt for Automation access. Grant permission in:
    apple-mail-fast-mcp setup-imap --account iCloud
    ```
    Substitute the Mail.app account name exactly — whatever it's labeled in Mail.app (e.g. `iCloud`, `Gmail`, `"Yahoo!"`). The CLI:
-   - looks up the account's primary email from Mail.app (override with `--email`),
+   - looks up the account's primary email from Mail.app (override with `--email`, which is **persisted** so runtime uses the same login — see the iCloud quirk below),
    - prompts via `getpass` so the password never lands in shell history,
    - writes to Keychain at `apple-mail-mcp.imap.<account>` (idempotent — re-running with a new password updates the existing entry),
    - opens an IMAP connection and runs a real LOGIN to confirm the password works. On rejection it rolls back the Keychain entry so you can retry without leaving a broken item behind.
@@ -138,7 +138,7 @@ If IMAP is working, the call returns in ~1 second. If it logs a WARNING about fa
 
 **Known provider quirks.**
 
-- **iCloud:** the IMAP server accepts `@icloud.com` / `@me.com` aliases as LOGIN username, not the Apple ID email. The server (and `setup-imap`) reads `email addresses of account` from Mail.app for that reason.
+- **iCloud:** the IMAP server accepts `@icloud.com` / `@me.com` aliases as LOGIN username, not the Apple ID email. The server (and `setup-imap`) reads `email addresses of account` from Mail.app for that reason. If your iCloud Apple ID is a *third-party* address (e.g. a `@gmail.com` Apple ID) **and** Mail.app reports no `@icloud.com` address for the account, auto-detection can't find the right login — `setup-imap` will fail with a hint to re-run with `--email <your @icloud.com/@me.com address>`. That `--email` value is **persisted** (in `~/.apple_mail_mcp/imap_login_overrides.json`) so runtime resolution uses the same login (#341). It's a general override — use it for any account whose auto-detected IMAP login is wrong.
 - **Yahoo:** app passwords have been progressively deprecated; the option may not be available for all accounts. If Yahoo's account-security page doesn't show the option, IMAP setup isn't possible for that account and AppleScript is the only path.
 - **Gmail:** requires 2-Step Verification enabled. If your Google Workspace admin has disabled app passwords at the tenant level, IMAP setup isn't possible for that account.
 - **Gmail thread retrieval — All Mail visibility tradeoff.** `find_thread_members` (used internally by thread-aware queries) is fastest when `[Gmail]/All Mail` is exposed over IMAP — that path is ~5 round-trips, mailbox-count-independent. Many users hide All Mail (Gmail Settings → Forwarding and POP/IMAP → Folder size limits → "Do not show in IMAP") because it duplicates every message. When hidden, the connector falls back to a per-mailbox X-GM-THRID iteration (still ~6× faster than the universal BFS, but proportional to your label count — ~25s on a 92-label account). Expose All Mail if you want the headline speed; keep it hidden if you prefer the cleaner IMAP folder list.

@@ -977,6 +977,32 @@ class TestAppleMailConnector:
         assert result == ("imap.mail.me.com", 993, "apple-id@example.com")
 
     @patch.object(AppleMailConnector, "_run_applescript")
+    def test_resolve_imap_config_login_override_wins(
+        self,
+        mock_run: MagicMock,
+        connector: AppleMailConnector,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """#341: a persisted login override (setup-imap --email) wins over the
+        Mail.app-derived login — the fix for an iCloud account with a
+        third-party Apple ID and an empty `email addresses` list, where #299's
+        apple-alias rule has nothing to choose from."""
+        from apple_mail_mcp import imap_overrides
+
+        monkeypatch.setenv("APPLE_MAIL_MCP_HOME", str(tmp_path))
+        imap_overrides.set_login_override("iCloud", "s.morgan@icloud.com")
+        # The unresolvable shape: me.com host, gmail user_name, no aliases.
+        mock_run.return_value = (
+            '{"host":"p42-imap.mail.me.com",'
+            '"port":993,'
+            '"user_name":"s.morgan@gmail.com",'
+            '"email_addresses":[]}'
+        )
+        result = connector._resolve_imap_config("iCloud")
+        assert result == ("p42-imap.mail.me.com", 993, "s.morgan@icloud.com")
+
+    @patch.object(AppleMailConnector, "_run_applescript")
     def test_resolve_imap_config_non_icloud_host_not_overridden(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:

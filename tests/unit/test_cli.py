@@ -38,6 +38,13 @@ def _make_accounts() -> list[dict[str, Any]]:
     ]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path, monkeypatch) -> None:
+    """Point APPLE_MAIL_MCP_HOME at a temp dir so setup-imap's login-override
+    writes (#341) never touch the developer's real ~/.apple_mail_mcp."""
+    monkeypatch.setenv("APPLE_MAIL_MCP_HOME", str(tmp_path))
+
+
 @pytest.fixture
 def mock_connector() -> MagicMock:
     """Stand-in for AppleMailConnector — list_accounts + _resolve_imap_config."""
@@ -549,3 +556,133 @@ class TestServerMainDispatch:
 
         with pytest.raises(SystemExit):
             server_mod.main(["setup-imap"])
+
+
+# ---------------------------------------------------------------------------
+# Login override persistence (#341)
+# ---------------------------------------------------------------------------
+
+
+class TestLoginOverride:
+    """setup-imap --email must persist a login override so runtime
+    resolution uses the verified login (#341). Override writes are isolated
+    to a temp APPLE_MAIL_MCP_HOME by the autouse _isolate_home fixture."""
+
+    def test_email_persists_login_override_on_success(
+        self,
+        mock_connector: MagicMock,
+        mock_imap_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from apple_mail_mcp import cli as cli_mod
+        from apple_mail_mcp import imap_overrides
+
+        monkeypatch.setattr(cli_mod, "set_imap_password", lambda a, e, p: None)
+        # iCloud account whose Mail.app login resolves to a gmail address.
+        mock_connector._resolve_imap_config.return_value = (
+            "p42-imap.mail.me.com", 993, "someone@gmail.com",
+        )
+        rc = run_setup_imap(
+            account_name="iCloud",
+            cli_email="someone@icloud.com",
+            uninstall=False,
+            connector_factory=lambda: mock_connector,
+            getpass_fn=lambda prompt: "pw",
+            imap_factory=lambda *a, **k: mock_imap_client,
+        )
+        assert rc == 0
+        assert imap_overrides.get_login_override("iCloud") == "someone@icloud.com"
+
+    def test_no_email_does_not_persist_override(
+        self,
+        mock_connector: MagicMock,
+        mock_imap_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from apple_mail_mcp import cli as cli_mod
+        from apple_mail_mcp import imap_overrides
+
+        monkeypatch.setattr(cli_mod, "set_imap_password", lambda a, e, p: None)
+        rc = run_setup_imap(
+            account_name="iCloud",
+            cli_email=None,
+            uninstall=False,
+            connector_factory=lambda: mock_connector,
+            getpass_fn=lambda prompt: "pw",
+            imap_factory=lambda *a, **k: mock_imap_client,
+        )
+        assert rc == 0
+        assert imap_overrides.get_login_override("iCloud") is None
+
+    def test_uninstall_clears_override(
+        self,
+        mock_connector: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from apple_mail_mcp import cli as cli_mod
+        from apple_mail_mcp import imap_overrides
+
+        imap_overrides.set_login_override("iCloud", "someone@icloud.com")
+        monkeypatch.setattr(cli_mod, "delete_imap_password", lambda a, e: None)
+        rc = run_setup_imap(
+            account_name="iCloud",
+            cli_email=None,
+            uninstall=True,
+            connector_factory=lambda: mock_connector,
+        )
+        assert rc == 0
+        assert imap_overrides.get_login_override("iCloud") is None
+
+    def test_login_error_rolls_back_override(
+        self,
+        mock_connector: MagicMock,
+        mock_imap_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from apple_mail_mcp import cli as cli_mod
+        from apple_mail_mcp import imap_overrides
+
+        monkeypatch.setattr(cli_mod, "set_imap_password", lambda a, e, p: None)
+        monkeypatch.setattr(cli_mod, "delete_imap_password", lambda a, e: None)
+        mock_imap_client.search_messages.side_effect = LoginError("bad")
+        rc = run_setup_imap(
+            account_name="iCloud",
+            cli_email="someone@icloud.com",
+            uninstall=False,
+            connector_factory=lambda: mock_connector,
+            getpass_fn=lambda prompt: "wrong",
+            imap_factory=lambda *a, **k: mock_imap_client,
+        )
+        assert rc == 1
+        assert imap_overrides.get_login_override("iCloud") is None
+
+    def test_icloud_login_failure_hints_at_email_flag(
+        self,
+        mock_connector: MagicMock,
+        mock_imap_client: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The #341 shape: iCloud host, non-Apple login, no --email, login
+        rejected → the error suggests re-running with --email."""
+        from apple_mail_mcp import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "set_imap_password", lambda a, e, p: None)
+        monkeypatch.setattr(cli_mod, "delete_imap_password", lambda a, e: None)
+        mock_connector._resolve_imap_config.return_value = (
+            "p42-imap.mail.me.com", 993, "someone@gmail.com",
+        )
+        mock_imap_client.search_messages.side_effect = LoginError(
+            "AUTHENTICATIONFAILED"
+        )
+        rc = run_setup_imap(
+            account_name="iCloud",
+            cli_email=None,
+            uninstall=False,
+            connector_factory=lambda: mock_connector,
+            getpass_fn=lambda prompt: "pw",
+            imap_factory=lambda *a, **k: mock_imap_client,
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "--email" in err and "icloud.com" in err.lower()
