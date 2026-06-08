@@ -1,0 +1,15 @@
+# Release-artifact waivers (#356) — read by scripts/check_release_artifacts.sh.
+#
+# The release gate fails when a version-stamped derived artifact (the benchmark
+# baseline or the blind-eval snapshot) isn't stamped for the release being cut.
+# If an artifact genuinely can't be refreshed for a release (e.g. a CI/docs-only
+# release with no perf or tool-surface change), record a waiver here instead of
+# refreshing — so the skip is deliberate and tracked, never silent.
+#
+# Format (one per waived artifact):
+#   v<version> <benchmark|eval> #<issue> <reason>
+# Example:
+#   v0.10.2 benchmark #999 CI-only release; no perf-relevant change
+#
+# Entries are per-release; prune old ones freely. See
+# docs/guides/RELEASE_ARTIFACTS.md.
