@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-06-08
+
+A maintenance release. The one user-facing fix lets an iCloud account whose Apple ID is a third-party address (e.g. a Gmail sign-in) resolve its IMAP login. The rest is release-engineering hardening: a gate that makes the Phase 8.5 derived-artifact refresh impossible to skip silently — the gap that shipped a stale eval snapshot at v0.10.0 — and a more robust blind-eval model list that tracks each family's latest model and fails loud on retired ids.
+
+### Added
+
+**Release-artifact freshness gate (#356):** [`scripts/check_release_artifacts.sh`](scripts/check_release_artifacts.sh) fails the release validation when a derived artifact (`tests/benchmarks/baseline.json`, `evals/agent_tool_usability/results/scored_results.md`) isn't stamped for the release being cut — unless an explicit, issue-tracked waiver is recorded in [`release_artifact_waivers.txt`](release_artifact_waivers.txt). The v0.10.0 release silently shipped an eval snapshot stamped `v0.9.0` because Phase 8.5 was skippable without a check; this closes that gap. See [docs/guides/RELEASE_ARTIFACTS.md](docs/guides/RELEASE_ARTIFACTS.md).
+
+### Changed
+
+**Blind-eval model list tracks latest-per-family and fails loud on retired ids (#358):** `make eval-tools` had pinned `mistralai/mistral-large-2411`, which OpenRouter retired — its calls 404'd and produced a silent zero-token row. The model list now uses each family's latest non-dated slug where one exists (`mistralai/mistral-large`, `deepseek/deepseek-chat`), each run records the exact version OpenRouter served (`resolved_model`), and `run_eval` pre-checks model availability against the catalog, exiting before any credits are spent if a requested id is missing.
+
+### Fixed
+
+**iCloud IMAP login resolution for third-party Apple IDs (#341):** `_resolve_imap_config` couldn't determine the login for an iCloud/MobileMe account whose Apple ID is a non-iCloud address (e.g. a Gmail sign-in) and whose AppleScript `email addresses` list is empty — the #299 apple-alias rule had nothing to resolve from, so the connection failed. A persisted per-account login override (`~/.apple_mail_mcp/imap_login_overrides.json`, set via the IMAP setup CLI) is now consulted first, letting these accounts connect.
+
 ## [0.10.0] - 2026-06-05
 
 First release under the new name **`apple-mail-fast-mcp`** (#335) — the PyPI distribution, CLI command, and repo were renamed, and publishing now goes through PyPI OIDC trusted publishing. Feature-wise the theme is **richer composition and inspection**: drafts can carry an HTML body, a new tool reads an attachment's content inline without writing to disk, and IMAP credentials can come from an environment variable for uvx/headless/CI contexts. Alongside: a confirmation-prompt fix for current FastMCP, and CI/release hardening so parity drift and dependency advisories can't slip through (or hard-block a release) unnoticed.

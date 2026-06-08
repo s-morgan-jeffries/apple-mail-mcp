@@ -13,3 +13,6 @@
 #
 # Entries are per-release; prune old ones freely. See
 # docs/guides/RELEASE_ARTIFACTS.md.
+
+v0.10.1 benchmark #354 maintenance release; only runtime change (#341 IMAP login resolution) touches no benchmarked hot path, so numbers would reproduce
+v0.10.1 eval #355 maintenance release; tool surface unchanged (still 24 tools), so blind-eval scores would reproduce
