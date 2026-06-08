@@ -27,6 +27,7 @@ from typing import Any
 
 import pytest
 
+from apple_mail_mcp import __version__
 from apple_mail_mcp.exceptions import MailAppleScriptError
 from apple_mail_mcp.mail_connector import AppleMailConnector
 
@@ -129,22 +130,25 @@ def measure_median(
 # Baseline I/O + assertion
 # ---------------------------------------------------------------------------
 
-def _load_baselines() -> dict[str, float]:
+# baseline.json holds benchmark name -> median seconds (float), plus a
+# `_version` string stamp recording the release the timings were captured for
+# (the release-artifact gate, #356, checks it). Hence dict[str, Any].
+def _load_baselines() -> dict[str, Any]:
     if not BASELINE_PATH.exists():
         return {}
     with BASELINE_PATH.open() as f:
         return json.load(f)
 
 
-def _save_baselines(baselines: dict[str, float]) -> None:
+def _save_baselines(baselines: dict[str, Any]) -> None:
     BASELINE_PATH.write_text(
         json.dumps(baselines, indent=2, sort_keys=True) + "\n"
     )
 
 
 @pytest.fixture(scope="session")
-def baselines() -> dict[str, float]:
-    """Loaded baseline timings, keyed by benchmark name."""
+def baselines() -> dict[str, Any]:
+    """Loaded baseline timings, keyed by benchmark name (plus `_version`)."""
     return _load_baselines()
 
 
@@ -162,7 +166,7 @@ def capture_mode(request: pytest.FixtureRequest) -> bool:
 def assert_within_baseline(
     name: str,
     result: BenchmarkResult,
-    baselines: dict[str, float],
+    baselines: dict[str, Any],
     capture_mode: bool,
     *,
     ratio: float = REGRESSION_RATIO,
@@ -198,10 +202,13 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     # bulk_ops baselines).
     merged = _load_baselines()
     merged.update(_captured)
+    # Stamp the release this baseline was captured for, so the release-artifact
+    # gate (#356) can tell a fresh baseline from a stale one.
+    merged["_version"] = __version__
     _save_baselines(merged)
     print(
-        f"\nbaseline.json updated with {len(_captured)} entries: "
-        f"{sorted(_captured.keys())}"
+        f"\nbaseline.json updated with {len(_captured)} entries "
+        f"(_version={__version__}): {sorted(_captured.keys())}"
     )
 
 

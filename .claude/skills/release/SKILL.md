@@ -58,6 +58,13 @@ release commit so a stale snapshot can't ship:
 3. Re-run the blind agent eval (#219) and refresh its scored snapshot (needs
    `OPENROUTER_API_KEY`); commit.
 
+Steps 2 and 3 are **enforced** by `./scripts/check_release_artifacts.sh` (Phase 9):
+the benchmark baseline and the eval snapshot are version-stamped, and the gate
+fails the release if a stamp is stale. If an artifact genuinely can't be
+refreshed for this release (e.g. a CI/docs-only release), don't skip silently —
+record a waiver line (with a tracking issue) in `release_artifact_waivers.txt`.
+See [docs/guides/RELEASE_ARTIFACTS.md](../../../docs/guides/RELEASE_ARTIFACTS.md). (#356)
+
 ## Phase 9: Validation
 Run ALL checks (stop on failure):
 1. `./scripts/check_version_sync.sh`
@@ -68,6 +75,7 @@ Run ALL checks (stop on failure):
 6. `./scripts/check_dependencies.sh` — hard-fails only on advisories in **direct** deps (`fastmcp`/`imapclient`); transitive advisories are warnings (exit 0), surfaced continuously off the release path by `.github/workflows/dependency-audit.yml` so they don't block a release (#296). A direct-dep advisory still blocks — bump the pin and re-run.
 7. `./scripts/check_applescript_safety.sh`
 8. `./scripts/check_docs.sh` — doc/artifact drift gate (tool-set coverage, removed-name, cross-refs, eval-description sync) (#288)
+9. `./scripts/check_release_artifacts.sh` — fails if the benchmark baseline or eval snapshot isn't version-stamped for this release (Phase 8.5 #2/#3) and isn't waived in `release_artifact_waivers.txt` (#356)
 
 ## Phase 10: Commit, Push, PR
 - Commit: `"release: vX.Y.Z"`

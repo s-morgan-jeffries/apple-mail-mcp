@@ -1,4 +1,5 @@
 {
+  "_version": "0.10.0",
   "imap_repeat_5_calls_no_pool": 8.075,
   "imap_repeat_5_calls_pooled": 5.234,
   "mark_as_read_50_msgs": 1.426,
