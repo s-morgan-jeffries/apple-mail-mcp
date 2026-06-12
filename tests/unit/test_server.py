@@ -1893,6 +1893,27 @@ class TestUpdateMessage:
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
 
+    def test_imap_required_maps_to_imap_required(
+        self, mock_mail: MagicMock
+    ) -> None:
+        # #364: a Gmail move that couldn't be verified (needs IMAP) must fail
+        # loud with an actionable error_type, not the generic "unknown".
+        from apple_mail_mcp.exceptions import MailImapRequiredError
+
+        mock_mail.update_message.side_effect = MailImapRequiredError(
+            "Gmail label moves require IMAP"
+        )
+
+        result = update_message(
+            ["1"],
+            destination_mailbox="Newsletters",
+            account="Gmail",
+            source_mailbox="INBOX",
+        )
+
+        assert result["success"] is False
+        assert result["error_type"] == "imap_required"
+
     def test_unexpected_exception_maps_to_unknown(
         self, mock_mail: MagicMock
     ) -> None:

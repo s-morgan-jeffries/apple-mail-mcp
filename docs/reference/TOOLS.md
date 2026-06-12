@@ -343,7 +343,9 @@ Patch one or more messages: change read state, flag color, and/or move to anothe
 | `destination_mailbox` | string \| null | No | null | Target mailbox name to move to. Requires `account`. |
 | `account` | string \| null | No | null | Account name (required when `destination_mailbox` is set; also unlocks the IMAP narrow-path optimization) |
 | `source_mailbox` | string \| null | No | null | Optional narrow-path hint — narrows the AppleScript scan to one mailbox. Required to unlock the IMAP fast path on move-only patches (#149) — without it, the move runs via AppleScript even when IMAP is configured. |
-| `gmail_mode` | boolean | No | false | Use Gmail-specific copy+delete instead of move (label-based accounts) |
+| `gmail_mode` | boolean | No | false | **Deprecated and ignored (#364).** The move strategy is chosen automatically; this flag does nothing. Slated for removal at v1.0 (#369). |
+
+> **Gmail label moves (#364).** The old `gmail_mode` copy+delete strategy silently routed Gmail INBOX→label moves through `[Gmail]/Trash` (stripping the destination label) and reported success anyway — data loss. It has been removed. Moves now run via IMAP `UID MOVE` when the account has IMAP configured (the reliable Gmail relabel); otherwise via a **verified** AppleScript `set mailbox`. If a move can't be confirmed (the Gmail silent-no-op), `update_message` returns `error_type: "imap_required"` instead of falsely succeeding — configure IMAP with `apple-mail-fast-mcp setup-imap --account <name>` and pass `source_mailbox`.
 
 **Patch semantics:** caller specifies only the fields they want changed. At least one field parameter must be set; otherwise returns `validation_error`.
 
@@ -378,12 +380,12 @@ update_message(message_ids=["12345"], flag_color="red")
 # Clear a flag
 update_message(message_ids=["12345"], flagged=False)
 
-# Move to Archive on a Gmail account
+# Move to Archive on a Gmail account (pass source_mailbox; needs IMAP configured)
 update_message(
     message_ids=["12345"],
     destination_mailbox="Archive",
     account="Gmail",
-    gmail_mode=True,
+    source_mailbox="INBOX",
 )
 
 # Restore from Trash — no special verb required
@@ -415,6 +417,7 @@ update_message(
 - `validation_error`: Too many IDs, no fields set, or missing `account` for move
 - `account_not_found`: `account` does not match a configured Mail.app account
 - `not_found`: `destination_mailbox` not found on the account
+- `imap_required`: A move could not be confirmed via AppleScript (the Gmail silent-no-op) and the account has no IMAP configured (#364). Run `apple-mail-fast-mcp setup-imap --account <name>` and pass `source_mailbox`.
 - `unknown`: Unexpected error occurred
 
 ---

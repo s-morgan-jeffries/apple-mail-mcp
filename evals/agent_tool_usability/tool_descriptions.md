@@ -455,8 +455,8 @@ message to exist in the source folder for STORE before MOVE.
 - `flag_color` (string, optional): Color name (orange, red, yellow, blue, green, purple, gray, none). Implies `flagged=True` unless "none". Validated against the existing flag-color schema.
 - `destination_mailbox` (string, optional): Move messages here (requires `account`).
 - `account` (string, optional): Account name or UUID hosting the destination mailbox. Required when `destination_mailbox` is set; also used with `source_mailbox` for narrow-path optimization.
-- `source_mailbox` (string, optional): Source mailbox name. With `account`, narrows the AppleScript scan to one mailbox (O(N) instead of cross-scan).
-- `gmail_mode` (boolean, optional) (default: False): Use Gmail-specific copy+delete instead of MOVE.
+- `source_mailbox` (string, optional): Source mailbox name. With `account`, narrows the AppleScript scan to one mailbox (O(N) instead of cross-scan). Required for reliable Gmail moves (the move is verified against the source).
+- `gmail_mode` (boolean, optional) (default: False): **Deprecated and ignored (#364).** Previously selected a copy+delete strategy that silently routed Gmail moves through Trash and lost the message. The move strategy is now chosen automatically (IMAP relabel when configured; otherwise a verified AppleScript move). A Gmail label move that can't be confirmed returns `error_type: "imap_required"` — configure IMAP with `apple-mail-fast-mcp setup-imap --account <name>`. Slated for removal at v1.0.
 
 ### update_rule
 

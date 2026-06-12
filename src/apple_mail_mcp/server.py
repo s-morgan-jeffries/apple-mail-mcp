@@ -1345,7 +1345,16 @@ def update_message(
             `source_mailbox` for narrow-path optimization.
         source_mailbox: Source mailbox name. With `account`, narrows the
             AppleScript scan to one mailbox (O(N) instead of cross-scan).
-        gmail_mode: Use Gmail-specific copy+delete instead of MOVE.
+            Required for reliable Gmail moves (the move is verified against
+            the source).
+        gmail_mode: **Deprecated and ignored (#364).** Previously selected a
+            copy+delete strategy that silently routed Gmail moves through
+            Trash and lost the message. The move strategy is now chosen
+            automatically (IMAP relabel when configured; otherwise a verified
+            AppleScript move). A Gmail label move that can't be confirmed
+            returns `error_type: "imap_required"` — configure IMAP with
+            `apple-mail-fast-mcp setup-imap --account <name>`. Slated for
+            removal at v1.0.
 
     Returns:
         Dictionary with `updated` (int count) and `requested` (input count).
@@ -1453,6 +1462,16 @@ def update_message(
             "success": False,
             "error": str(e),
             "error_type": "not_found",
+        }
+    except MailImapRequiredError as e:
+        # #364: a Gmail label move that couldn't be verified needs IMAP.
+        # Surface it loudly so the caller can run setup-imap, rather than
+        # the generic "unknown" that hides an actionable remedy.
+        logger.error(f"Move requires IMAP: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": "imap_required",
         }
     except ValueError as e:
         logger.error(f"Validation error in update_message: {e}")

@@ -634,6 +634,7 @@ def _bulk_repeat_block(
     source_mailbox: str | None,
     actions: list[str],
     counter_var: str,
+    verify_dest_var: str | None = None,
 ) -> str:
     """Emit the AppleScript repeat block for a bulk-mutation operation.
 
@@ -689,6 +690,29 @@ def _bulk_repeat_block(
             f"missing {missing}"
         )
 
+    def _success_tail(indent: str) -> str:
+        """The per-match tail. Normally a bare counter bump; in verify mode
+        (move ops, #364) it confirms the message actually left the source by
+        checking its current mailbox against the destination — counting
+        silent no-ops into ``failCount`` instead of reporting false success.
+        Reading ``mailbox of msg`` after a successful move can error (the
+        source-scoped reference no longer resolves); that's treated as
+        landed, since the message did leave the source."""
+        if verify_dest_var is None:
+            return f"{indent}set {counter_var} to {counter_var} + 1"
+        return (
+            f"{indent}set landed to true\n"
+            f"{indent}try\n"
+            f"{indent}    if (name of mailbox of msg) is not "
+            f"(name of {verify_dest_var}) then set landed to false\n"
+            f"{indent}end try\n"
+            f"{indent}if landed then\n"
+            f"{indent}    set {counter_var} to {counter_var} + 1\n"
+            f"{indent}else\n"
+            f"{indent}    set failCount to failCount + 1\n"
+            f"{indent}end if"
+        )
+
     if account is not None and source_mailbox is not None:
         # Narrow path: single mailbox, single loop. O(N).
         action_indent = " " * 20
@@ -714,7 +738,7 @@ def _bulk_repeat_block(
             f"                end if\n"
             f"                if matched then\n"
             f"{action_lines}\n"
-            f"                    set {counter_var} to {counter_var} + 1\n"
+            f"{_success_tail(' ' * 20)}\n"
             f"                end if\n"
             f"            end repeat"
         )
@@ -742,7 +766,7 @@ def _bulk_repeat_block(
         f"                        end if\n"
         f"                        if matched then\n"
         f"{action_lines}\n"
-        f"                            set {counter_var} to {counter_var} + 1\n"
+        f"{_success_tail(' ' * 28)}\n"
         f"                        end if\n"
         f"                    end repeat\n"
         f"                end repeat\n"
@@ -3398,7 +3422,8 @@ class AppleMailConnector:
             message_ids: List of message IDs to move
             destination_mailbox: Name of destination mailbox
             account: Account name (or UUID) hosting the destination mailbox
-            gmail_mode: Use Gmail-specific handling (copy + delete)
+            gmail_mode: Deprecated and ignored (#364) — moves are always a
+                verified `set mailbox`, never copy+delete.
             source_mailbox: Optional source mailbox name to narrow the
                 AppleScript scan to one mailbox (O(N) instead of O(N × M × K)).
                 When provided, source is assumed to be in the same `account`
@@ -3416,47 +3441,85 @@ class AppleMailConnector:
         if not message_ids:
             return 0
 
+        # gmail_mode is deprecated and ignored (#364): the old copy+delete
+        # path routed Gmail moves through Trash and lost the message. Every
+        # AppleScript move now uses `set mailbox` and verifies the message
+        # actually left the source, failing loud (MailImapRequiredError) on
+        # the Gmail silent-no-op instead of reporting false success.
+        return self._run_verified_move(
+            message_ids,
+            account=account,
+            source_mailbox=source_mailbox,
+            destination_mailbox=destination_mailbox,
+        )
+
+    @staticmethod
+    def _parse_move_counts(result: str) -> tuple[int, int]:
+        """Parse the ``"<moved>,<failed>"`` payload from a verified-move
+        script into ``(moved, failed)``. Tolerates a bare ``"<moved>"`` (no
+        comma) for callers/tests that don't exercise verification."""
+        parts = result.strip().split(",")
+        moved = int(parts[0]) if parts[0].strip().isdigit() else 0
+        failed = (
+            int(parts[1]) if len(parts) > 1 and parts[1].strip().isdigit() else 0
+        )
+        return moved, failed
+
+    def _run_verified_move(
+        self,
+        message_ids: list[str],
+        *,
+        account: str,
+        source_mailbox: str | None,
+        destination_mailbox: str,
+    ) -> int:
+        """Move messages via AppleScript ``set mailbox`` and verify each one
+        left the source (#364). Raises MailImapRequiredError if any message
+        silently stayed put (the Gmail no-op) — the move can only be done
+        reliably over IMAP. Returns the count that verifiably moved."""
         from .utils import sanitize_input
 
         account_clause = applescript_account_clause(account)
-        mailbox_safe = escape_applescript_string(sanitize_input(destination_mailbox))
+        mailbox_safe = escape_applescript_string(
+            sanitize_input(destination_mailbox)
+        )
         id_list = ", ".join(
             f'"{escape_applescript_string(sanitize_input(mid))}"'
             for mid in message_ids
         )
-
-        if gmail_mode:
-            actions = ["duplicate msg to destMailbox", "delete msg"]
-        else:
-            actions = ["set mailbox of msg to destMailbox"]
-
-        # `account` is required by this method (it's where the destination
-        # lives), so source_mailbox is the only "optional" half here. Pass
-        # account through only when the caller explicitly wants the narrow
-        # source-scan path.
         repeat_block = _bulk_repeat_block(
             account=account if source_mailbox is not None else None,
             source_mailbox=source_mailbox,
-            actions=actions,
+            actions=["set mailbox of msg to destMailbox"],
             counter_var="moveCount",
+            verify_dest_var="destMailbox",
         )
-
         script = f"{_MAILBOX_RESOLVER_HANDLERS}\n" + _wrap_with_timeout(
             f"""tell application "Mail"
             set accountRef to {account_clause}
             set destMailbox to my resolveMailbox(accountRef, "{mailbox_safe}")
             set idList to {{{id_list}}}
             set moveCount to 0
+            set failCount to 0
 
 {repeat_block}
 
-            return moveCount
+            return (moveCount as text) & "," & (failCount as text)
         end tell""",
             timeout=self.timeout,
         )
 
-        result = self._run_applescript(script)
-        return int(result) if result.isdigit() else 0
+        moved, failed = self._parse_move_counts(self._run_applescript(script))
+        if failed > 0:
+            src = source_mailbox or "the source mailbox"
+            raise MailImapRequiredError(
+                f"Move to {destination_mailbox!r} could not be confirmed for "
+                f"{failed} message(s) — they never left {src!r}. On Gmail, "
+                f"label moves only apply reliably over IMAP: run "
+                f"`apple-mail-fast-mcp setup-imap --account <name>` for this "
+                f"account and retry. (#364)"
+            )
+        return moved
 
     def flag_message(
         self,
@@ -3568,7 +3631,9 @@ class AppleMailConnector:
                 unlock the IMAP fast path on move-only patches (#149) —
                 without it, the move runs via AppleScript even when
                 IMAP is configured.
-            gmail_mode: Use Gmail-specific copy+delete for the move.
+            gmail_mode: Deprecated and ignored (#364). Moves are always a
+                verified ``set mailbox`` (IMAP relabel when available);
+                copy+delete is gone because it trashed Gmail messages.
 
         IMAP fast path (#149): when the patch is move-only
         (``destination_mailbox`` is the only field set) and
@@ -3620,6 +3685,23 @@ class AppleMailConnector:
         if imap_count is not None:
             return imap_count
 
+        # Pure move (no read/flag) on the AppleScript fallback: route through
+        # the verified mover so a Gmail silent-no-op fails loud instead of
+        # quietly losing the message (#364). gmail_mode is deprecated/ignored.
+        pure_move = (
+            destination_mailbox is not None
+            and read_status is None
+            and flagged is None
+            and flag_color is None
+        )
+        if pure_move:
+            return self._run_verified_move(
+                message_ids,
+                account=cast(str, account),
+                source_mailbox=source_mailbox,
+                destination_mailbox=cast(str, destination_mailbox),
+            )
+
         actions: list[str] = []
 
         if read_status is not None:
@@ -3628,13 +3710,13 @@ class AppleMailConnector:
 
         actions.extend(self._build_flag_actions(flagged, flag_color))
 
-        # Move (always last — IMAP STORE requires source folder).
+        # Move (always last — IMAP STORE requires source folder). gmail_mode
+        # is deprecated/ignored (#364): never copy+delete (it trashes on
+        # Gmail). Combined move+read/flag patches stay on this unverified
+        # path; the move itself is a plain relabel that never routes through
+        # Trash.
         if destination_mailbox is not None:
-            if gmail_mode:
-                actions.append("duplicate msg to destMailbox")
-                actions.append("delete msg")
-            else:
-                actions.append("set mailbox of msg to destMailbox")
+            actions.append("set mailbox of msg to destMailbox")
 
         repeat_block = _bulk_repeat_block(
             account=account if source_mailbox is not None else None,

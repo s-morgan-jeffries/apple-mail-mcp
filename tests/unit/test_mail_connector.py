@@ -4539,10 +4539,12 @@ class TestBulkOpsSourceMailbox:
         assert "repeat with acc in accounts" not in script
 
     @patch.object(AppleMailConnector, "_run_applescript")
-    def test_move_messages_narrow_path_gmail_branch(
+    def test_move_messages_gmail_mode_no_longer_copy_deletes(
         self, mock_run: MagicMock, connector: AppleMailConnector
     ) -> None:
-        mock_run.return_value = "2"
+        # #364: the copy+delete that routed Gmail moves through Trash is gone.
+        # gmail_mode is deprecated/ignored — the move is always `set mailbox`.
+        mock_run.return_value = "2,0"
         connector.move_messages(
             ["abc", "def"],
             destination_mailbox="[Gmail]/All Mail",
@@ -4559,10 +4561,45 @@ class TestBulkOpsSourceMailbox:
             'set destMailbox to my resolveMailbox(accountRef, "[Gmail]/All Mail")'
             in script
         )
-        # Gmail-mode body: duplicate + delete instead of set mailbox
-        assert "duplicate msg to destMailbox" in script
-        assert "delete msg" in script
+        # The data-loss primitives must be gone.
+        assert "set mailbox of msg to destMailbox" in script
+        assert "duplicate msg to destMailbox" not in script
+        assert "delete msg" not in script
         assert "repeat with acc in accounts" not in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_emits_landing_verification(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        # #364: every AppleScript move now verifies the message actually left
+        # the source (Gmail `set mailbox` silently no-ops otherwise).
+        mock_run.return_value = "1,0"
+        connector.move_messages(
+            ["abc"],
+            destination_mailbox="Archive",
+            account="Gmail",
+            source_mailbox="INBOX",
+        )
+        script = mock_run.call_args[0][0]
+        assert "name of mailbox of msg" in script
+        assert "failCount" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_move_messages_unverified_move_raises_imap_required(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        # #364: a message that never left source (silent Gmail no-op) must
+        # fail loud, not report success.
+        from apple_mail_mcp.exceptions import MailImapRequiredError
+
+        mock_run.return_value = "1,1"  # 1 moved, 1 stuck in source
+        with pytest.raises(MailImapRequiredError, match="IMAP"):
+            connector.move_messages(
+                ["abc", "def"],
+                destination_mailbox="Newsletters",
+                account="Gmail",
+                source_mailbox="INBOX",
+            )
 
     @patch.object(AppleMailConnector, "_run_applescript")
     def test_move_messages_no_source_keeps_cross_scan(
@@ -4575,6 +4612,44 @@ class TestBulkOpsSourceMailbox:
         script = mock_run.call_args[0][0]
         assert "repeat with acc in accounts" in script
         assert "repeat with mb in mailboxes" in script
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_message_gmail_move_uses_set_mailbox_not_delete(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        # #364: the AppleScript fallback for a Gmail move (IMAP unavailable)
+        # must not copy+delete. Open the breaker so the IMAP fast path is
+        # skipped and the AppleScript path runs.
+        connector._imap_failure_until["Gmail"] = time.monotonic() + 60
+        mock_run.return_value = "1,0"
+        connector.update_message(
+            ["abc"],
+            destination_mailbox="Newsletters",
+            account="Gmail",
+            source_mailbox="INBOX",
+            gmail_mode=True,
+        )
+        script = mock_run.call_args[0][0]
+        assert "set mailbox of msg to destMailbox" in script
+        assert "duplicate msg to destMailbox" not in script
+        assert "delete msg" not in script
+        assert "name of mailbox of msg" in script  # verification present
+
+    @patch.object(AppleMailConnector, "_run_applescript")
+    def test_update_message_unverified_gmail_move_raises_imap_required(
+        self, mock_run: MagicMock, connector: AppleMailConnector
+    ) -> None:
+        from apple_mail_mcp.exceptions import MailImapRequiredError
+
+        connector._imap_failure_until["Gmail"] = time.monotonic() + 60
+        mock_run.return_value = "0,1"  # message never left source
+        with pytest.raises(MailImapRequiredError, match="IMAP"):
+            connector.update_message(
+                ["abc"],
+                destination_mailbox="Newsletters",
+                account="Gmail",
+                source_mailbox="INBOX",
+            )
 
     # ------ flag_message ------
 

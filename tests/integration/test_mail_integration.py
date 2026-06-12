@@ -1264,6 +1264,102 @@ class TestDraftsLifecycleIntegration:
                 except Exception:
                     pass
 
+    def test_gmail_label_move_lands_in_label_not_trash(
+        self,
+        connector: AppleMailConnector,
+        test_account: str,
+    ) -> None:
+        """#364 acceptance gate: a Gmail label→label move must land the
+        message in the destination label and NOT in [Gmail]/Trash. The old
+        gmail_mode copy+delete trashed it (and stripped the label); this
+        pins that it never happens again. Verified via direct IMAP because
+        Mail.app's local view lags the server.
+
+        Skips on non-Gmail accounts — the bug and its fix are Gmail-specific.
+        """
+        import uuid as _uuid
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+
+        from imapclient import IMAPClient
+
+        from apple_mail_mcp.keychain import get_imap_password
+
+        host, port, email = connector._resolve_imap_config(test_account)
+        if "gmail" not in host.lower():
+            pytest.skip(f"not a Gmail account (host={host})")
+        pw = get_imap_password(test_account, email)
+
+        suffix = _uuid.uuid4().hex[:8]
+        src = f"ZZZ-AMM-GM-SRC-{suffix}"
+        dst = f"ZZZ-AMM-GM-DST-{suffix}"
+        msg_id_local = f"{_uuid.uuid4().hex}@apple-mail-fast-mcp-test.invalid"
+        bracketed = f"<{msg_id_local}>"
+
+        assert connector.create_mailbox(account=test_account, name=src)
+        assert connector.create_mailbox(account=test_account, name=dst)
+
+        try:
+            now = format_datetime(datetime.now(tz=timezone.utc))
+            raw = (
+                f"From: sender@apple-mail-fast-mcp-test.invalid\r\n"
+                f"To: rcpt@apple-mail-fast-mcp-test.invalid\r\n"
+                f"Subject: AMM #364 Gmail label move test\r\n"
+                f"Date: {now}\r\n"
+                f"Message-ID: {bracketed}\r\n"
+                f"\r\n"
+                f"body\r\n"
+            ).encode()
+
+            append_client = IMAPClient(host, port=port, ssl=True, timeout=30)
+            append_client.login(email, pw)
+            try:
+                append_client.append(src, raw)
+            finally:
+                append_client.logout()
+
+            moved = connector.update_message(
+                [msg_id_local],
+                destination_mailbox=dst,
+                account=test_account,
+                source_mailbox=src,
+            )
+            assert moved == 1
+
+            verify = IMAPClient(host, port=port, ssl=True, timeout=30)
+            verify.login(email, pw)
+            try:
+                # Discover Trash via SPECIAL-USE, fall back to the Gmail name.
+                trash = None
+                for flags, _delim, name in verify.list_folders():
+                    if b"\\Trash" in flags:
+                        trash = name
+                        break
+                trash = trash or "[Gmail]/Trash"
+
+                verify.select_folder(src, readonly=True)
+                src_uids = verify.search(["HEADER", "Message-ID", bracketed])
+                verify.select_folder(dst, readonly=True)
+                dst_uids = verify.search(["HEADER", "Message-ID", bracketed])
+                verify.select_folder(trash, readonly=True)
+                trash_uids = verify.search(["HEADER", "Message-ID", bracketed])
+            finally:
+                verify.logout()
+
+            assert src_uids == [], f"still in source label: {src_uids}"
+            assert len(dst_uids) == 1, f"not in destination label: {dst_uids}"
+            assert trash_uids == [], (
+                f"#364 regression — message routed through Trash: {trash_uids}"
+            )
+        finally:
+            for name in (src, dst):
+                try:
+                    connector.delete_mailbox(
+                        account=test_account, name=name, delete_messages=True
+                    )
+                except Exception:
+                    pass
+
     def test_delete_messages_via_imap_round_trip(
         self,
         connector: AppleMailConnector,
