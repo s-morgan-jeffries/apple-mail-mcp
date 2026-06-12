@@ -315,6 +315,144 @@ class TestLimit:
         assert fetch_uids == list(range(1, 11))
 
 
+_BS_PLAIN_TEXT_LEAF = (
+    b"text", b"plain", (b"CHARSET", b"UTF-8"), None, None,
+    b"7bit", 100, 5, None, None, None, None,
+)
+
+
+class TestLimitWithHasAttachmentFilter:
+    """`limit` must bound MATCHING results, not the candidate window.
+
+    The old `uids[-limit:]` pre-truncation made `limit=5,
+    has_attachment=True` mean "whichever of the 5 newest messages happen
+    to have attachments" — observed live as 1/2/6 results for the same
+    mailbox depending on what was in the window, silently missing
+    attachment-bearing messages. The AppleScript path collects matches
+    until limit; the IMAP path must agree.
+    """
+
+    def _setup(self, mock_cls, *, uids, attachment_uids):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.search.return_value = list(uids)
+        full = {
+            uid: {
+                b"ENVELOPE": _fake_envelope(
+                    message_id=f"<msg-{uid}@example.com>".encode(),
+                    subject=f"Subject {uid}".encode(),
+                ),
+                b"FLAGS": (b"\\Seen",),
+                b"BODYSTRUCTURE": (
+                    _BS_REAL_ICLOUD_MIXED_PDF
+                    if uid in attachment_uids
+                    else _BS_PLAIN_TEXT_LEAF
+                ),
+            }
+            for uid in uids
+        }
+        mock_client.fetch.side_effect = lambda chunk, keys: {
+            uid: full[uid] for uid in chunk
+        }
+        return mock_client
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_limit_counts_matches_not_candidates(self, mock_cls):
+        """Attachments only on the two OLDEST messages; limit=2 must still
+        find both (old behavior: scan newest 2, return [])."""
+        self._setup(mock_cls, uids=range(1, 11), attachment_uids={1, 2})
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(has_attachment=True, limit=2)
+        assert [r["subject"] for r in result] == ["Subject 1", "Subject 2"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_limit_returns_newest_matches_when_more_exist(self, mock_cls):
+        """More matches than limit → keep the newest `limit` matches,
+        returned oldest-first like every other search result."""
+        self._setup(
+            mock_cls, uids=range(1, 11), attachment_uids={2, 5, 8, 9}
+        )
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(has_attachment=True, limit=2)
+        assert [r["subject"] for r in result] == ["Subject 8", "Subject 9"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_filter_scan_short_circuits_in_chunks(self, mock_cls):
+        """250 candidates, the newest 5 all match, limit=5 → only the
+        newest chunk is fetched; older chunks are never paid for."""
+        client = self._setup(
+            mock_cls,
+            uids=range(1, 251),
+            attachment_uids={246, 247, 248, 249, 250},
+        )
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(has_attachment=True, limit=5)
+        assert len(result) == 5
+        assert client.fetch.call_count == 1
+        fetched_uids = client.fetch.call_args[0][0]
+        assert len(fetched_uids) <= 100  # bounded chunk, not all 250
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_matches_collected_across_multiple_chunks(self, mock_cls):
+        """Matches deep in the mailbox force the walk through ALL chunks:
+        250 candidates, matches at uids 10 and 120 only, limit=2 → three
+        chunked FETCHes that partition 1..250, both matches found,
+        returned oldest-first."""
+        client = self._setup(
+            mock_cls, uids=range(1, 251), attachment_uids={10, 120}
+        )
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(has_attachment=True, limit=2)
+        assert [r["subject"] for r in result] == ["Subject 10", "Subject 120"]
+        assert client.fetch.call_count == 3
+        fetched_uids = sorted(
+            uid
+            for call in client.fetch.call_args_list
+            for uid in call[0][0]
+        )
+        assert fetched_uids == list(range(1, 251))  # complete, no overlap
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_has_attachment_false_symmetric(self, mock_cls):
+        """has_attachment=False with limit collects non-attachment
+        matches across the whole candidate set."""
+        self._setup(
+            mock_cls, uids=range(1, 11), attachment_uids=set(range(3, 11))
+        )
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(has_attachment=False, limit=2)
+        assert [r["subject"] for r in result] == ["Subject 1", "Subject 2"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_uid_expunged_between_search_and_fetch_is_skipped(self, mock_cls):
+        """A UID the server omits from the FETCH response (expunged by
+        another session, RFC 3501 / #314) is skipped within the chunked
+        walk, not a KeyError aborting the whole search."""
+        client = self._setup(
+            mock_cls, uids=range(1, 11), attachment_uids={3, 7}
+        )
+        inner = client.fetch.side_effect
+        client.fetch.side_effect = lambda chunk, keys: {
+            uid: entry
+            for uid, entry in inner(chunk, keys).items()
+            if uid != 7
+        }
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(has_attachment=True, limit=5)
+        assert [r["subject"] for r in result] == ["Subject 3"]
+
+    @patch("apple_mail_mcp.imap_connector.IMAPClient")
+    def test_no_limit_with_filter_fetches_all_once(self, mock_cls):
+        """Filter without limit keeps the single-FETCH fast path."""
+        client = self._setup(
+            mock_cls, uids=range(1, 11), attachment_uids={3, 7}
+        )
+        conn = ImapConnector("h", 993, "u@e.com", "pw")
+        result = conn.search_messages(has_attachment=True)
+        assert [r["subject"] for r in result] == ["Subject 3", "Subject 7"]
+        assert client.fetch.call_count == 1
+
+
 # BODYSTRUCTURE shapes below match what IMAPClient returns: either a flat
 # leaf tuple (type, subtype, params, id, desc, encoding, size, [type-specific], [disposition])
 # or a multipart tuple ((child1,), (child2,), ..., subtype).
