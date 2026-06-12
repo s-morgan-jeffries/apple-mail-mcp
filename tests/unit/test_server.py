@@ -10,6 +10,7 @@ operation_logger calls.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -1425,6 +1426,53 @@ class TestGetMessages:
         }
         result = get_messages(["1"])
         assert "prompt_injection" not in result["messages"][0]
+
+    def test_oversized_body_is_truncated_and_flagged(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        # #365: an unbounded body produces a JSON-RPC frame the stdio client
+        # rejects, taking the whole server down. The body must be truncated
+        # and flagged, never returned at full size.
+        from apple_mail_mcp.utils import DEFAULT_MAX_BODY_BYTES
+
+        full_len = DEFAULT_MAX_BODY_BYTES + 100_000
+        mock_mail.get_message.return_value = {
+            "id": "1", "subject": "Big", "content": "x" * full_len,
+        }
+        result = get_messages(["1"])
+        msg = result["messages"][0]
+        assert result["success"] is True
+        assert msg["content_truncated"] is True
+        assert msg["content_original_bytes"] == full_len
+        assert len(msg["content"].encode("utf-8")) <= DEFAULT_MAX_BODY_BYTES
+        # The response must serialize cleanly — the failure mode of #365.
+        json.dumps(result).encode("utf-8")
+
+    def test_unserializable_body_is_scrubbed_not_crash(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        # #365: a lone surrogate / control chars would raise UnicodeEncodeError
+        # on the stdout write — outside the tool's try/except — and kill the
+        # server. They must be scrubbed before the response leaves the tool.
+        mock_mail.get_message.return_value = {
+            "id": "1", "subject": "Bad",
+            "content": "before\ud800after\x00\x07tail",
+        }
+        result = get_messages(["1"])
+        msg = result["messages"][0]
+        assert result["success"] is True
+        json.dumps(result).encode("utf-8")  # would raise pre-fix
+        assert "\ud800" not in msg["content"]
+        assert "\x00" not in msg["content"]
+
+    def test_small_clean_body_has_no_truncation_fields(
+        self, mock_mail: MagicMock, mock_logger: MagicMock
+    ) -> None:
+        mock_mail.get_message.return_value = {"id": "1", "content": "hi there"}
+        msg = get_messages(["1"])["messages"][0]
+        assert msg["content"] == "hi there"
+        assert "content_truncated" not in msg
+        assert "content_original_bytes" not in msg
 
     def test_opt_out_env_disables_annotation(
         self, mock_mail: MagicMock, mock_logger: MagicMock,

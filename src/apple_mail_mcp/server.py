@@ -51,9 +51,11 @@ from .security import (
 )
 from .templates import Template, TemplateStore
 from .utils import (
+    DEFAULT_MAX_BODY_BYTES,
     attachment_content_encoding,
     coerce_json_dict,
     coerce_json_list,
+    make_body_safe,
 )
 
 # Configure logging
@@ -824,7 +826,54 @@ def _resolve_id_list_to_messages(
             except MailMessageNotFoundError:
                 # Partial-results: missing ids drop out silently.
                 continue
-    return _annotate_injection(out)
+    return _annotate_injection(_bound_message_bodies(out))
+
+
+def _max_body_bytes() -> int:
+    """Resolve the get_messages body cap (#365) at use time, honoring
+    APPLE_MAIL_MCP_MAX_BODY_BYTES (mirrors the attachment-cap override
+    pattern). Invalid / non-positive values fall back to
+    DEFAULT_MAX_BODY_BYTES."""
+    import os
+
+    raw = os.getenv("APPLE_MAIL_MCP_MAX_BODY_BYTES")
+    if raw is None:
+        return DEFAULT_MAX_BODY_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-integer APPLE_MAIL_MCP_MAX_BODY_BYTES=%r", raw
+        )
+        return DEFAULT_MAX_BODY_BYTES
+    if value <= 0:
+        logger.warning(
+            "Ignoring non-positive APPLE_MAIL_MCP_MAX_BODY_BYTES=%r", raw
+        )
+        return DEFAULT_MAX_BODY_BYTES
+    return value
+
+
+def _bound_message_bodies(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Scrub and size-bound each message body before it leaves get_messages
+    (#365). An unbounded or non-UTF8-encodable body otherwise crashes the
+    whole stdio server — outside the tool's try/except — via an oversized /
+    invalid JSON-RPC frame. Adds ``content_truncated`` and
+    ``content_original_bytes`` when a body is truncated. Mutates and returns
+    the list."""
+    max_bytes = _max_body_bytes()
+    for msg in messages:
+        body = msg.get("content")
+        if not isinstance(body, str) or not body:
+            continue
+        safe, truncated, original_bytes = make_body_safe(body, max_bytes)
+        msg["content"] = safe
+        if truncated:
+            msg["content_truncated"] = True
+            msg["content_original_bytes"] = original_bytes
+    return messages
 
 
 def _apply_search_filters(
@@ -1190,7 +1239,12 @@ def get_messages(
             for typical id counts.
 
     Returns:
-        Dictionary containing the list of messages and count.
+        Dictionary containing the list of messages and count. Each message
+        body is bounded to 1 MB of UTF-8 text (override via
+        ``APPLE_MAIL_MCP_MAX_BODY_BYTES``) and scrubbed of transport-hostile
+        characters so a large or malformed body can't crash the server
+        (#365). When a body is truncated, the message carries
+        ``content_truncated: true`` and ``content_original_bytes: <int>``.
 
     Security (#225): a message may carry a ``prompt_injection`` field
     (``{"risk_level": "high"|"medium", "matches": [...]}``) when its body

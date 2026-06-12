@@ -261,6 +261,40 @@ class TestMailIntegration:
         assert isinstance(result["flagged"], bool)
         assert isinstance(result["content"], str)
 
+    def test_get_messages_body_is_bounded_and_serializable(
+        self, connector: AppleMailConnector, test_account: str
+    ) -> None:
+        """#365: a real full-body fetch through the server tool must always
+        return a JSON-serializable, size-bounded response. The original bug
+        crashed the whole stdio server on bodies that this asserts are safe.
+
+        Goes through the server-layer ``get_messages`` (not the bare
+        connector) because the scrub/bound chokepoint lives there.
+        """
+        import json as _json
+
+        from apple_mail_mcp.server import get_messages
+        from apple_mail_mcp.utils import DEFAULT_MAX_BODY_BYTES
+
+        matches = connector.search_messages(
+            account=test_account, mailbox="INBOX", limit=3
+        )
+        if not matches:
+            pytest.skip("test inbox has no messages")
+
+        ids = [m["id"] for m in matches]
+        result = get_messages(ids, account=test_account, mailbox="INBOX")
+
+        assert result["success"] is True
+        # The exact operation that crashed the server pre-fix.
+        _json.dumps(result).encode("utf-8")
+        for msg in result["messages"]:
+            body = msg.get("content", "")
+            assert isinstance(body, str)
+            assert len(body.encode("utf-8")) <= DEFAULT_MAX_BODY_BYTES
+            if msg.get("content_truncated"):
+                assert msg["content_original_bytes"] > DEFAULT_MAX_BODY_BYTES
+
     def test_get_message_via_imap(
         self, connector: AppleMailConnector, test_account: str
     ) -> None:

@@ -11,6 +11,17 @@ _UUID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
 )
 
+# Cap for a single message body returned inline by get_messages (#365).
+# Bodies are returned as part of a possibly multi-message JSON-RPC response;
+# an unbounded body can produce an oversized frame the stdio client rejects,
+# which takes the whole server down. Overridable via the server layer
+# (APPLE_MAIL_MCP_MAX_BODY_BYTES), mirroring the attachment byte caps.
+DEFAULT_MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB per message body
+
+# C0 control characters minus tab (09), newline (0a), carriage return (0d) —
+# the rest corrupt the JSON-RPC stream and carry no body content.
+_C0_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
 
 def is_account_uuid(value: str) -> bool:
     """True iff the string matches the standard UUID format Mail.app emits.
@@ -147,6 +158,45 @@ def sanitize_input(value: Any) -> str:
         s = s[:max_length]
 
     return s
+
+
+def make_body_safe(content: str, max_bytes: int) -> tuple[str, bool, int]:
+    """Make a message body safe to return over the stdio MCP transport (#365).
+
+    A single message body that is either huge or not UTF-8-encodable can take
+    the whole server down: the oversized/invalid JSON-RPC frame is rejected by
+    the client (pipe closes, server process exits) or raises UnicodeEncodeError
+    on the stdout write — both *outside* the tool's ``try/except`` boundary.
+    This bounds and scrubs the body so neither can happen.
+
+    Scrub: coerce to encodable UTF-8 (lone surrogates / un-encodable codepoints
+    become ``?``) and drop C0 control characters except tab, newline, and
+    carriage return. Bound: if the scrubbed body exceeds ``max_bytes`` UTF-8
+    bytes, truncate on a character boundary.
+
+    Args:
+        content: Raw message body text.
+        max_bytes: Maximum UTF-8 byte length to return.
+
+    Returns:
+        ``(safe_content, truncated, original_bytes)`` where ``original_bytes``
+        is the UTF-8 byte length of the scrubbed body *before* any truncation.
+    """
+    if not content:
+        return "", False, 0
+    # Coerce to encodable UTF-8 first — a lone surrogate would otherwise raise
+    # UnicodeEncodeError when the response is written to stdout.
+    scrubbed = content.encode("utf-8", "replace").decode("utf-8")
+    # Drop control chars that corrupt the JSON-RPC stream, keeping the
+    # whitespace that carries real body structure.
+    scrubbed = _C0_CONTROL_RE.sub("", scrubbed)
+    encoded = scrubbed.encode("utf-8")
+    original_bytes = len(encoded)
+    if original_bytes <= max_bytes:
+        return scrubbed, False, original_bytes
+    # Truncate on a character boundary: slice bytes, then drop any partial
+    # trailing multibyte sequence via errors="ignore".
+    return encoded[:max_bytes].decode("utf-8", "ignore"), True, original_bytes
 
 
 def sanitize_filename(filename: str) -> str:

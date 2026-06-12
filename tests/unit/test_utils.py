@@ -6,6 +6,7 @@ import pytest
 
 from apple_mail_mcp.exceptions import MailAppleScriptError
 from apple_mail_mcp.utils import (
+    DEFAULT_MAX_BODY_BYTES,
     applescript_account_clause,
     coerce_json_dict,
     coerce_json_list,
@@ -16,6 +17,7 @@ from apple_mail_mcp.utils import (
     is_apple_hosted_address,
     is_gmail_system_label,
     is_icloud_imap_host,
+    make_body_safe,
     normalize_subject,
     parse_applescript_json,
     parse_applescript_list,
@@ -579,3 +581,66 @@ class TestAttachmentContentEncoding:
         content, encoding = attachment_content_encoding(b"", "text/plain")
         assert encoding == "text"
         assert content == ""
+
+
+class TestMakeBodySafe:
+    """Tests for make_body_safe (#365): message bodies must be bounded and
+    serialization-safe before they leave get_messages, or a single oversized
+    or non-UTF8-encodable body crashes the whole stdio MCP server."""
+
+    def test_small_clean_content_unchanged(self):
+        safe, truncated, original = make_body_safe(
+            "hello world", DEFAULT_MAX_BODY_BYTES
+        )
+        assert safe == "hello world"
+        assert truncated is False
+        assert original == len(b"hello world")
+
+    def test_empty_content(self):
+        assert make_body_safe("", DEFAULT_MAX_BODY_BYTES) == ("", False, 0)
+
+    def test_preserves_tab_newline_carriage_return(self):
+        safe, truncated, _ = make_body_safe("a\tb\nc\rd", DEFAULT_MAX_BODY_BYTES)
+        assert safe == "a\tb\nc\rd"
+        assert truncated is False
+
+    def test_strips_nul_and_c0_control_chars(self):
+        safe, _, _ = make_body_safe(
+            "a\x00b\x07c\x1fd", DEFAULT_MAX_BODY_BYTES
+        )
+        assert safe == "abcd"
+
+    def test_scrubs_lone_surrogate_to_be_serializable(self):
+        # A lone surrogate is the classic cause of UnicodeEncodeError on the
+        # stdout write — the failure that escapes the tool's try/except.
+        safe, _, _ = make_body_safe("hi\ud800there", DEFAULT_MAX_BODY_BYTES)
+        safe.encode("utf-8")  # must not raise
+        assert "\ud800" not in safe
+
+    def test_truncates_oversized_content_and_reports_original(self):
+        big = "x" * (DEFAULT_MAX_BODY_BYTES + 5000)
+        safe, truncated, original = make_body_safe(big, DEFAULT_MAX_BODY_BYTES)
+        assert truncated is True
+        assert original == DEFAULT_MAX_BODY_BYTES + 5000
+        assert len(safe.encode("utf-8")) <= DEFAULT_MAX_BODY_BYTES
+
+    def test_truncation_does_not_split_multibyte_char(self):
+        # "😀" is 4 UTF-8 bytes; a 10-byte cap must yield 2 whole emoji
+        # (8 bytes), never a broken trailing byte sequence.
+        safe, truncated, _ = make_body_safe("😀" * 100, 10)
+        assert truncated is True
+        safe.encode("utf-8")  # valid
+        assert "�" not in safe  # no replacement char from a broken split
+        assert len(safe.encode("utf-8")) <= 10
+
+    def test_output_always_json_serializable(self):
+        pathological = [
+            "plain",
+            "a\x00b\x1fc",
+            "x" * (DEFAULT_MAX_BODY_BYTES + 100),
+            "surrogate\ud800tail",
+        ]
+        for content in pathological:
+            safe, _, _ = make_body_safe(content, DEFAULT_MAX_BODY_BYTES)
+            # The assertion that the original bug would have failed.
+            json.dumps({"content": safe}).encode("utf-8")
