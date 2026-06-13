@@ -1,16 +1,16 @@
 {
-  "_version": "0.10.0",
-  "imap_repeat_5_calls_no_pool": 8.075,
-  "imap_repeat_5_calls_pooled": 5.234,
-  "mark_as_read_50_msgs": 1.426,
-  "move_messages_50_msgs": 3.698,
+  "_version": "0.10.2",
+  "imap_repeat_5_calls_no_pool": 9.424,
+  "imap_repeat_5_calls_pooled": 5.756,
+  "mark_as_read_50_msgs": 0.698,
+  "move_messages_50_msgs": 5.309,
   "move_messages_50_msgs_gmail": 2.94,
   "save_attachments_one_file": 0.432,
-  "search_messages_no_filter": 1.647,
+  "search_messages_no_filter": 2.117,
   "search_messages_no_filter_gmail": 1.537,
-  "search_messages_with_sender_filter": 1.474,
+  "search_messages_with_sender_filter": 1.66,
   "search_messages_with_sender_filter_gmail": 1.371,
-  "search_messages_with_zero_matches": 1.435,
+  "search_messages_with_zero_matches": 1.688,
   "search_messages_with_zero_matches_gmail": 1.355,
-  "update_message_move_50_msgs_imap": 4.42
+  "update_message_move_50_msgs_imap": 20.546
 }

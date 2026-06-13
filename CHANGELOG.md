@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-06-13
+
+A bug-fix patch release for four reliability and data-integrity issues surfaced from real Claude Desktop usage on Gmail and iCloud: a full-body read that could crash the whole server, a Gmail label move that silently trashed the message, an IMAP search that silently dropped matching results, and an attachment save that hung for minutes on Gmail. No new tools (still 24).
+
+### Added
+
+**`save_attachments` IMAP fast path (#371):** `save_attachments` gains optional `account` + `mailbox` parameters. When supplied, the message is fetched once over IMAP and its attachment bytes are written straight to disk — avoiding the O(accounts × mailboxes) AppleScript cross-scan whose unindexed `whose message id` lookup (~20s/mailbox) ran for minutes and timed out on Gmail's many labels. Mirrors `get_attachment_content`'s fast path; without the parameters the AppleScript fallback is unchanged.
+
+**Truncation signal on `get_messages` (#365):** a bounded body carries `content_truncated: true` and `content_original_bytes: <int>` so callers can tell when a body was clipped.
+
+### Changed
+
+**`get_messages` bounds and scrubs message bodies (#365):** each `content` is now capped at 1 MB of UTF-8 text (override via `APPLE_MAIL_MCP_MAX_BODY_BYTES`) and stripped of transport-hostile characters before it leaves the tool, so a single large or non-UTF8-encodable body can't blow the JSON-RPC frame.
+
+### Deprecated
+
+**`gmail_mode` on `update_message` (#364):** the parameter is now accepted but ignored — the move strategy is chosen automatically (IMAP relabel when configured, otherwise a verified AppleScript move). Removal is tracked for v1.0 in #369.
+
+### Fixed
+
+**`get_messages` full-body fetch could crash the entire server (#365):** retrieving full bodies on iCloud returned `-32000: Connection closed` and took the whole stdio server down (every tool unavailable until relaunch). An unbounded, un-scrubbed body produced a JSON-RPC frame the client rejected — outside the tool's `try/except`. Bodies are now bounded and scrubbed at the single resolve chokepoint (covers the IMAP, AppleScript, and `SELECTED` paths).
+
+**Gmail INBOX→label move silently trashed the message (#364):** `update_message` with `gmail_mode=true` ran an AppleScript copy+delete; on Gmail `delete` always routes to Trash and Trash strips all other labels, so the destination label was lost and the message landed in `[Gmail]/Trash` only — while the tool still reported success. Moves now use a relabel (`set mailbox`) and verify the message left the source; an unconfirmed move fails loud with `error_type: "imap_required"` instead of losing mail.
+
+**IMAP `search_messages` `limit` bounded the candidate window, not the matches (#366, #368):** with `has_attachment` set, `limit` was applied before the post-FETCH filter, so a limited search silently missed attachment-bearing messages (observed live: 2 results at `limit=5` vs 6 at `limit=20` on the same mailbox). The IMAP path now walks candidates newest-first in bounded chunks and short-circuits once `limit` *matching* rows are found. (Contributed by @jason21wc.)
+
+**`save_attachments` hung and timed out on Gmail (#371):** see the IMAP fast path under Added — the cross-scan that caused the hang is now bypassed when `account`+`mailbox` are supplied.
+
 ## [0.10.1] - 2026-06-08
 
 A maintenance release. The one user-facing fix lets an iCloud account whose Apple ID is a third-party address (e.g. a Gmail sign-in) resolve its IMAP login. The rest is release-engineering hardening: a gate that makes the Phase 8.5 derived-artifact refresh impossible to skip silently — the gap that shipped a stale eval snapshot at v0.10.0 — and a more robust blind-eval model list that tracks each family's latest model and fails loud on retired ids.
