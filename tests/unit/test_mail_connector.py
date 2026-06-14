@@ -7290,9 +7290,14 @@ class TestKeychainDualFormLookup:
         )
         assert result == "ENV-PW"
         # Only the UUID form shelled out to `security`; the name form was
-        # satisfied by the env var without a Keychain call.
-        assert len(run_calls) == 1
-        assert "apple-mail-mcp.imap.04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16" in run_calls[0]
+        # satisfied by the env var without a Keychain call. The UUID form
+        # probes both prefixes (new, then legacy on the NotFound miss — #337).
+        assert len(run_calls) == 2
+        services = [cmd[cmd.index("-s") + 1] for cmd in run_calls]
+        assert services == [
+            "apple-mail-fast-mcp.imap.04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16",
+            "apple-mail-mcp.imap.04E9E040-D5C2-4B6B-8FFA-5AAF3DCCAB16",
+        ]
 
 
 # =============================================================================

@@ -160,7 +160,7 @@ def run_setup_imap(
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(
-        f"Stored in Keychain as 'apple-mail-mcp.imap.{account_name}'."
+        f"Stored in Keychain as 'apple-mail-fast-mcp.imap.{account_name}'."
     )
     # Persist an explicit --email as a login override so runtime resolution
     # (_resolve_imap_config) uses the same login this setup verifies — without

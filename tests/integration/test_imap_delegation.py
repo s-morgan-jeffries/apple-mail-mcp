@@ -5,10 +5,13 @@ entry keyed to the Apple ID email (what Mail.app returns for `user name`),
 not an @icloud.com alias::
 
     security add-generic-password \\
-        -s "apple-mail-mcp.imap.iCloud" \\
+        -s "apple-mail-fast-mcp.imap.iCloud" \\
         -a "<apple-id-email>" \\
         -w "<APP_PASSWORD>" \\
         -T "" -U
+
+(Pre-rename ``apple-mail-mcp.imap.`` entries still resolve via the #337
+read-through fallback, so an existing entry works without re-creation.)
 
 Run:
 
@@ -34,13 +37,17 @@ def _test_mode_enabled() -> bool:
 
 
 def _keychain_entry_exists(account_name: str, email: str) -> bool:
-    service = f"apple-mail-mcp.imap.{account_name}"
-    result = subprocess.run(
-        ["security", "find-generic-password", "-s", service, "-a", email],
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0
+    # Mirror the runtime read-through fallback (#337): an entry under either
+    # the new or the legacy prefix means IMAP is set up for this account.
+    for prefix in ("apple-mail-fast-mcp.imap.", "apple-mail-mcp.imap."):
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", prefix + account_name, "-a", email],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+    return False
 
 
 @pytest.fixture
@@ -64,7 +71,7 @@ class TestIMAPDelegation:
         if not _keychain_entry_exists(ICLOUD_ACCOUNT_NAME, email):
             pytest.skip(
                 f"No Keychain entry under "
-                f"apple-mail-mcp.imap.{ICLOUD_ACCOUNT_NAME} for {email}. "
+                f"apple-mail-fast-mcp.imap.{ICLOUD_ACCOUNT_NAME} for {email}. "
                 f"See the test file's module docstring for setup."
             )
 
@@ -156,7 +163,7 @@ class TestIMAPDelegation:
         if not _keychain_entry_exists(ICLOUD_ACCOUNT_NAME, email):
             pytest.skip(
                 f"No Keychain entry under "
-                f"apple-mail-mcp.imap.{ICLOUD_ACCOUNT_NAME} for {email}."
+                f"apple-mail-fast-mcp.imap.{ICLOUD_ACCOUNT_NAME} for {email}."
             )
 
         # Find any iCloud message to use as anchor.

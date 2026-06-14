@@ -3,9 +3,12 @@
 Guarded by ``MAIL_TEST_MODE=true``. Requires a Keychain entry:
 
     security add-generic-password \\
-        -s "apple-mail-mcp.imap.iCloud" \\
+        -s "apple-mail-fast-mcp.imap.iCloud" \\
         -a "s.morgan.jeffries@icloud.com" \\
         -w "<APP_PASSWORD>" -T "" -U
+
+(Pre-rename ``apple-mail-mcp.imap.`` entries still resolve via the #337
+read-through fallback.)
 
 Run:
 

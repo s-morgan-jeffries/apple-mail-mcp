@@ -10,6 +10,7 @@ from apple_mail_mcp.exceptions import (
     MailKeychainError,
 )
 from apple_mail_mcp.keychain import (
+    _LEGACY_SERVICE_NAME_PREFIX,
     IMAP_PASSWORD_ENV_PREFIX,
     SERVICE_NAME_PREFIX,
     _env_var_name,
@@ -41,8 +42,12 @@ def _clear_imap_password_env(monkeypatch):
 
 
 class TestServiceNamePrefix:
-    def test_prefix_matches_decision_doc(self):
-        assert SERVICE_NAME_PREFIX == "apple-mail-mcp.imap."
+    def test_prefix_uses_new_brand(self):
+        assert SERVICE_NAME_PREFIX == "apple-mail-fast-mcp.imap."
+
+    def test_legacy_prefix_is_old_brand(self):
+        # Read-through fallback target for pre-#335 entries. Drop at 1.0.0.
+        assert _LEGACY_SERVICE_NAME_PREFIX == "apple-mail-mcp.imap."
 
 
 class TestHappyPath:
@@ -62,7 +67,7 @@ class TestHappyPath:
             "find-generic-password",
             "-w",
             "-s",
-            "apple-mail-mcp.imap.iCloud",
+            "apple-mail-fast-mcp.imap.iCloud",
             "-a",
             "user@icloud.com",
         ]
@@ -125,6 +130,66 @@ class TestOtherFailure:
             get_imap_password("iCloud", "u@i.com")
 
 
+def _service_of(call) -> str:
+    """Extract the service string (value after '-s') from a security call."""
+    cmd = call[0][0]
+    return cmd[cmd.index("-s") + 1]
+
+
+class TestReadThroughFallback:
+    """#337: get_imap_password prefers the new prefix, falls back to the old
+    one on a NotFound miss so pre-#335 entries keep resolving."""
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_new_prefix_hit_does_not_touch_legacy(self, mock_run):
+        mock_run.return_value = _mock_security(0, stdout="newpw\n")
+        assert get_imap_password("iCloud", "u@i.com") == "newpw"
+        mock_run.assert_called_once()
+        assert _service_of(mock_run.call_args) == "apple-mail-fast-mcp.imap.iCloud"
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_new_miss_falls_back_to_legacy_prefix(self, mock_run):
+        mock_run.side_effect = [
+            _mock_security(44, stderr="not found"),
+            _mock_security(0, stdout="legacypw\n"),
+        ]
+        assert get_imap_password("iCloud", "u@i.com") == "legacypw"
+        assert mock_run.call_count == 2
+        services = [_service_of(c) for c in mock_run.call_args_list]
+        assert services == [
+            "apple-mail-fast-mcp.imap.iCloud",
+            "apple-mail-mcp.imap.iCloud",
+        ]
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_both_miss_raises_entry_not_found(self, mock_run):
+        mock_run.side_effect = [
+            _mock_security(44, stderr="not found"),
+            _mock_security(44, stderr="not found"),
+        ]
+        with pytest.raises(MailKeychainEntryNotFoundError):
+            get_imap_password("iCloud", "u@i.com")
+        assert mock_run.call_count == 2
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_access_denied_does_not_fall_back(self, mock_run):
+        # AccessDenied is an explicit macOS signal — surface it, don't mask
+        # it by probing the legacy prefix.
+        mock_run.return_value = _mock_security(
+            128, stderr="User interaction is not allowed."
+        )
+        with pytest.raises(MailKeychainAccessDeniedError):
+            get_imap_password("iCloud", "u@i.com")
+        mock_run.assert_called_once()
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_generic_error_does_not_fall_back(self, mock_run):
+        mock_run.return_value = _mock_security(2, stderr="some other failure")
+        with pytest.raises(MailKeychainError):
+            get_imap_password("iCloud", "u@i.com")
+        mock_run.assert_called_once()
+
+
 class TestSetImapPassword:
     @patch("apple_mail_mcp.keychain.subprocess.run")
     def test_writes_via_security_with_update_flag(self, mock_run):
@@ -136,7 +201,7 @@ class TestSetImapPassword:
             "security",
             "add-generic-password",
             "-s",
-            "apple-mail-mcp.imap.iCloud",
+            "apple-mail-fast-mcp.imap.iCloud",
             "-a",
             "user@icloud.com",
             "-w",
@@ -185,7 +250,7 @@ class TestDeleteImapPassword:
             "security",
             "delete-generic-password",
             "-s",
-            "apple-mail-mcp.imap.iCloud",
+            "apple-mail-fast-mcp.imap.iCloud",
             "-a",
             "user@icloud.com",
         ]
@@ -217,6 +282,52 @@ class TestDeleteImapPassword:
         with pytest.raises(MailKeychainError) as exc_info:
             delete_imap_password("iCloud", "u@i.com")
         assert type(exc_info.value) is MailKeychainError
+
+
+class TestDeleteThroughFallback:
+    """#337: delete_imap_password tries the new prefix, then the old on a
+    NotFound miss, so a legacy user's setup-imap delete can still remove
+    their real (old-prefix) entry."""
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_new_prefix_hit_does_not_touch_legacy(self, mock_run):
+        mock_run.return_value = _mock_security(0)
+        delete_imap_password("iCloud", "u@i.com")
+        mock_run.assert_called_once()
+        assert _service_of(mock_run.call_args) == "apple-mail-fast-mcp.imap.iCloud"
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_new_miss_falls_back_to_legacy_prefix(self, mock_run):
+        mock_run.side_effect = [
+            _mock_security(44, stderr="not found"),
+            _mock_security(0),
+        ]
+        delete_imap_password("iCloud", "u@i.com")
+        assert mock_run.call_count == 2
+        services = [_service_of(c) for c in mock_run.call_args_list]
+        assert services == [
+            "apple-mail-fast-mcp.imap.iCloud",
+            "apple-mail-mcp.imap.iCloud",
+        ]
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_both_miss_raises_entry_not_found(self, mock_run):
+        mock_run.side_effect = [
+            _mock_security(44, stderr="not found"),
+            _mock_security(44, stderr="not found"),
+        ]
+        with pytest.raises(MailKeychainEntryNotFoundError):
+            delete_imap_password("iCloud", "u@i.com")
+        assert mock_run.call_count == 2
+
+    @patch("apple_mail_mcp.keychain.subprocess.run")
+    def test_access_denied_does_not_fall_back(self, mock_run):
+        mock_run.return_value = _mock_security(
+            128, stderr="User interaction is not allowed."
+        )
+        with pytest.raises(MailKeychainAccessDeniedError):
+            delete_imap_password("iCloud", "u@i.com")
+        mock_run.assert_called_once()
 
 
 class TestEnvVarName:

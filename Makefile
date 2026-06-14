@@ -83,7 +83,7 @@ eval-descriptions:
 	uv run python evals/agent_tool_usability/generate_descriptions.py
 
 # Run the blind agent tool-usability eval against the open-weight OpenRouter
-# models (needs an OPENROUTER_API_KEY env var or the apple-mail-mcp-evals /
+# models (needs an OPENROUTER_API_KEY env var or the apple-mail-fast-mcp-evals /
 # openrouter Keychain entry; costs money). The Claude column is produced
 # separately via a Claude Code subagent. See evals/agent_tool_usability/. (#219)
 #

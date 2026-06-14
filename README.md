@@ -99,7 +99,7 @@ On first run, macOS will prompt for Automation access. Grant permission in:
    Substitute the Mail.app account name exactly — whatever it's labeled in Mail.app (e.g. `iCloud`, `Gmail`, `"Yahoo!"`). The CLI:
    - looks up the account's primary email from Mail.app (override with `--email`, which is **persisted** so runtime uses the same login — see the iCloud quirk below),
    - prompts via `getpass` so the password never lands in shell history,
-   - writes to Keychain at `apple-mail-mcp.imap.<account>` (idempotent — re-running with a new password updates the existing entry),
+   - writes to Keychain at `apple-mail-fast-mcp.imap.<account>` (idempotent — re-running with a new password updates the existing entry; pre-rename `apple-mail-mcp.imap.` entries still resolve via a read-through fallback removed at 1.0.0),
    - opens an IMAP connection and runs a real LOGIN to confirm the password works. On rejection it rolls back the Keychain entry so you can retry without leaving a broken item behind.
 
 3. If you see a one-time "security wants to use the 'login' keychain" prompt on the next IMAP-backed call, click **Always Allow**.

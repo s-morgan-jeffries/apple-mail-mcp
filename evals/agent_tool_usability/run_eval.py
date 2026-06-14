@@ -18,7 +18,7 @@ Usage:
     python run_eval.py --model meta-llama/llama-3.3-70b-instruct --scenarios 1,2,3
 
 Requires OPENROUTER_API_KEY in macOS Keychain or environment variable.
-Store in Keychain: security add-generic-password -a "openrouter" -s "apple-mail-mcp-evals" -w "KEY"
+Store in Keychain: security add-generic-password -a "openrouter" -s "apple-mail-fast-mcp-evals" -w "KEY"
 """
 
 import argparse
@@ -62,8 +62,24 @@ TOOL_NAMES = [
     "reply_to_message", "forward_message",
 ]
 
-KEYCHAIN_SERVICE = "apple-mail-mcp-evals"
+KEYCHAIN_SERVICE = "apple-mail-fast-mcp-evals"
+# Read-through fallback for keys stored before the #335/#337 rebrand. Drop at 1.0.0.
+_LEGACY_KEYCHAIN_SERVICE = "apple-mail-mcp-evals"
 KEYCHAIN_ACCOUNT = "openrouter"
+
+
+def _keychain_lookup(service: str) -> str:
+    """Return the stored key for a service, or "" if absent/unavailable."""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", service, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # Not on macOS or security command unavailable
+    return ""
 
 
 def get_api_key() -> str:
@@ -71,27 +87,22 @@ def get_api_key() -> str:
 
     Lookup order:
         1. OPENROUTER_API_KEY environment variable
-        2. macOS Keychain (service: apple-mail-mcp-evals, account: openrouter)
+        2. macOS Keychain (service: apple-mail-fast-mcp-evals, account: openrouter;
+           falls back to the old apple-mail-mcp-evals service — #337)
         3. .env file at project root (deprecated — prints warning)
 
     To store your key in Keychain:
-        security add-generic-password -a "openrouter" -s "apple-mail-mcp-evals" -w "YOUR_KEY"
+        security add-generic-password -a "openrouter" -s "apple-mail-fast-mcp-evals" -w "YOUR_KEY"
     """
     # 1. Environment variable
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         return api_key
 
-    # 2. macOS Keychain
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass  # Not on macOS or security command unavailable
+    # 2. macOS Keychain — prefer the new service, fall back to the legacy one.
+    api_key = _keychain_lookup(KEYCHAIN_SERVICE) or _keychain_lookup(_LEGACY_KEYCHAIN_SERVICE)
+    if api_key:
+        return api_key
 
     # 3. .env file (deprecated fallback)
     env_path = SCRIPT_DIR.parent.parent / ".env"
@@ -407,7 +418,7 @@ def main():
     if not api_key:
         print("Error: OPENROUTER_API_KEY not found.")
         print("Store it in macOS Keychain:")
-        print('  security add-generic-password -a "openrouter" -s "apple-mail-mcp-evals" -w "YOUR_KEY"')
+        print('  security add-generic-password -a "openrouter" -s "apple-mail-fast-mcp-evals" -w "YOUR_KEY"')
         print("Or set OPENROUTER_API_KEY as an environment variable.")
         sys.exit(1)
 

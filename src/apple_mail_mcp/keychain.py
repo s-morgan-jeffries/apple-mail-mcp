@@ -1,11 +1,18 @@
 """macOS Keychain password storage / retrieval for IMAP credentials.
 
 Entries live under service name
-``apple-mail-mcp.imap.<mail_app_account_name>`` keyed by the account's
+``apple-mail-fast-mcp.imap.<mail_app_account_name>`` keyed by the account's
 email. The ``apple-mail-fast-mcp setup-imap`` CLI is the supported way to
 write entries; this module also exposes set/delete helpers that the
 CLI uses, plus the read helper used by the IMAP fallback path at
 runtime.
+
+Read-through fallback (#337): the brand was renamed in #335. Reads and
+deletes prefer the new ``apple-mail-fast-mcp.imap.`` prefix and fall back to
+the pre-rename ``apple-mail-mcp.imap.`` prefix on a NotFound miss, so existing
+entries keep working with zero user action. Writes go to the new prefix only.
+The fallback is dropped at 1.0.0 (documented breaking change — re-run
+``setup-imap``).
 
 See ``docs/research/imap-auth-options-decision.md`` for the chosen
 auth path and the service-name convention, and
@@ -19,6 +26,7 @@ import logging
 import os
 import re
 import subprocess
+from typing import NoReturn
 
 from apple_mail_mcp.exceptions import (
     MailKeychainAccessDeniedError,
@@ -28,7 +36,11 @@ from apple_mail_mcp.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-SERVICE_NAME_PREFIX = "apple-mail-mcp.imap."
+SERVICE_NAME_PREFIX = "apple-mail-fast-mcp.imap."
+
+# Read/delete fallback for entries written before the #335 rebrand.
+# Drop at 1.0.0 (the breaking-change follow-up to #337).
+_LEGACY_SERVICE_NAME_PREFIX = "apple-mail-mcp.imap."
 
 # Env-var fallback for the IMAP password (#248). Convention:
 # APPLE_MAIL_MCP_IMAP_PASSWORD_<SUFFIX>, where <SUFFIX> is the account name
@@ -56,6 +68,91 @@ def _env_var_name(mail_app_account: str) -> str | None:
     if not suffix:
         return None
     return IMAP_PASSWORD_ENV_PREFIX + suffix
+
+
+def _run_security(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Invoke ``security`` capturing output; map a missing binary to
+    ``MailKeychainError`` (the only failure not signalled via exit code)."""
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise MailKeychainError(f"`security` binary not found: {exc}") from exc
+
+
+def _raise_security_failure(
+    result: subprocess.CompletedProcess[str],
+    service: str,
+    email: str,
+    action: str,
+) -> NoReturn:
+    """Map a non-zero ``security`` exit to the right exception. NotFound is
+    handled by callers (it drives the legacy-prefix fallback); this raises
+    AccessDenied vs. a generic Keychain error for everything else."""
+    stderr = result.stderr or ""
+    if result.returncode == _EXIT_INTERACTION_NOT_ALLOWED or any(
+        marker in stderr for marker in _ACCESS_DENIED_MARKERS
+    ):
+        raise MailKeychainAccessDeniedError(
+            f"Keychain access denied for service={service!r}, account={email!r}: "
+            f"{stderr.strip()}"
+        )
+    raise MailKeychainError(
+        f"security {action} failed (exit {result.returncode}): "
+        f"{stderr.strip()}"
+    )
+
+
+def _find_password(service: str, email: str) -> str:
+    """Read one Keychain entry for an exact service name. Raises
+    ``MailKeychainEntryNotFoundError`` on a miss (lets the caller fall back to
+    the legacy prefix), or AccessDenied / generic errors via
+    ``_raise_security_failure``."""
+    result = _run_security(
+        [
+            "security",
+            "find-generic-password",
+            "-w",
+            "-s",
+            service,
+            "-a",
+            email,
+        ]
+    )
+    if result.returncode == 0:
+        return result.stdout.rstrip("\n")
+    if result.returncode == _EXIT_ITEM_NOT_FOUND:
+        raise MailKeychainEntryNotFoundError(
+            f"No Keychain entry for service={service!r}, account={email!r}."
+        )
+    _raise_security_failure(result, service, email, "find-generic-password")
+
+
+def _delete_password(service: str, email: str) -> None:
+    """Delete one Keychain entry for an exact service name. Raises
+    ``MailKeychainEntryNotFoundError`` on a miss (lets the caller fall back to
+    the legacy prefix), or AccessDenied / generic errors."""
+    result = _run_security(
+        [
+            "security",
+            "delete-generic-password",
+            "-s",
+            service,
+            "-a",
+            email,
+        ]
+    )
+    if result.returncode == 0:
+        return
+    if result.returncode == _EXIT_ITEM_NOT_FOUND:
+        raise MailKeychainEntryNotFoundError(
+            f"No Keychain entry for service={service!r}, account={email!r}."
+        )
+    _raise_security_failure(result, service, email, "delete-generic-password")
 
 
 def get_imap_password(mail_app_account: str, email: str) -> str:
@@ -93,47 +190,15 @@ def get_imap_password(mail_app_account: str, email: str) -> str:
             # the password fails LOGIN. Mirrors the Keychain path's rstrip.
             # (#349)
             return env_pw.strip()
-    service = SERVICE_NAME_PREFIX + mail_app_account
+    # Read-through fallback (#337): prefer the new prefix, retry the legacy one
+    # only on a NotFound miss. AccessDenied / generic errors propagate from the
+    # first attempt — they're explicit macOS signals, not "wrong prefix".
     try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-w",
-                "-s",
-                service,
-                "-a",
-                email,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+        return _find_password(SERVICE_NAME_PREFIX + mail_app_account, email)
+    except MailKeychainEntryNotFoundError:
+        return _find_password(
+            _LEGACY_SERVICE_NAME_PREFIX + mail_app_account, email
         )
-    except FileNotFoundError as exc:
-        raise MailKeychainError(f"`security` binary not found: {exc}") from exc
-
-    if result.returncode == 0:
-        return result.stdout.rstrip("\n")
-
-    stderr = result.stderr or ""
-
-    if result.returncode == _EXIT_ITEM_NOT_FOUND:
-        raise MailKeychainEntryNotFoundError(
-            f"No Keychain entry for service={service!r}, account={email!r}."
-        )
-
-    if result.returncode == _EXIT_INTERACTION_NOT_ALLOWED or any(
-        marker in stderr for marker in _ACCESS_DENIED_MARKERS
-    ):
-        raise MailKeychainAccessDeniedError(
-            f"Keychain access denied for service={service!r}, account={email!r}: "
-            f"{stderr.strip()}"
-        )
-
-    raise MailKeychainError(
-        f"security find-generic-password failed (exit {result.returncode}): "
-        f"{stderr.strip()}"
-    )
 
 
 def set_imap_password(
@@ -156,43 +221,24 @@ def set_imap_password(
         MailKeychainAccessDeniedError: ACL or user denial.
         MailKeychainError: Any other ``security(1)`` failure.
     """
+    # Writes go to the new prefix only (#337); no legacy fallback on writes.
     service = SERVICE_NAME_PREFIX + mail_app_account
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "add-generic-password",
-                "-s",
-                service,
-                "-a",
-                email,
-                "-w",
-                password,
-                "-U",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise MailKeychainError(f"`security` binary not found: {exc}") from exc
-
+    result = _run_security(
+        [
+            "security",
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            email,
+            "-w",
+            password,
+            "-U",
+        ]
+    )
     if result.returncode == 0:
         return
-
-    stderr = result.stderr or ""
-    if result.returncode == _EXIT_INTERACTION_NOT_ALLOWED or any(
-        marker in stderr for marker in _ACCESS_DENIED_MARKERS
-    ):
-        raise MailKeychainAccessDeniedError(
-            f"Keychain access denied for service={service!r}, account={email!r}: "
-            f"{stderr.strip()}"
-        )
-
-    raise MailKeychainError(
-        f"security add-generic-password failed (exit {result.returncode}): "
-        f"{stderr.strip()}"
-    )
+    _raise_security_failure(result, service, email, "add-generic-password")
 
 
 def delete_imap_password(mail_app_account: str, email: str) -> None:
@@ -207,41 +253,9 @@ def delete_imap_password(mail_app_account: str, email: str) -> None:
         MailKeychainAccessDeniedError: ACL or user denial.
         MailKeychainError: Any other ``security(1)`` failure.
     """
-    service = SERVICE_NAME_PREFIX + mail_app_account
+    # Delete-through fallback (#337): try the new prefix, then the legacy one
+    # on a NotFound miss, so a pre-rename entry can still be removed.
     try:
-        result = subprocess.run(
-            [
-                "security",
-                "delete-generic-password",
-                "-s",
-                service,
-                "-a",
-                email,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise MailKeychainError(f"`security` binary not found: {exc}") from exc
-
-    if result.returncode == 0:
-        return
-
-    stderr = result.stderr or ""
-    if result.returncode == _EXIT_ITEM_NOT_FOUND:
-        raise MailKeychainEntryNotFoundError(
-            f"No Keychain entry for service={service!r}, account={email!r}."
-        )
-    if result.returncode == _EXIT_INTERACTION_NOT_ALLOWED or any(
-        marker in stderr for marker in _ACCESS_DENIED_MARKERS
-    ):
-        raise MailKeychainAccessDeniedError(
-            f"Keychain access denied for service={service!r}, account={email!r}: "
-            f"{stderr.strip()}"
-        )
-
-    raise MailKeychainError(
-        f"security delete-generic-password failed (exit {result.returncode}): "
-        f"{stderr.strip()}"
-    )
+        _delete_password(SERVICE_NAME_PREFIX + mail_app_account, email)
+    except MailKeychainEntryNotFoundError:
+        _delete_password(_LEGACY_SERVICE_NAME_PREFIX + mail_app_account, email)

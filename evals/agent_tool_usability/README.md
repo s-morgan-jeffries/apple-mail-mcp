@@ -35,8 +35,11 @@ pip install openai
 Store your OpenRouter key in the macOS Keychain:
 
 ```bash
-security add-generic-password -a "openrouter" -s "apple-mail-mcp-evals" -w "YOUR_KEY"
+security add-generic-password -a "openrouter" -s "apple-mail-fast-mcp-evals" -w "YOUR_KEY"
 ```
+
+(Keys stored under the old `apple-mail-mcp-evals` service still resolve via a
+read-through fallback, removed at 1.0.0.)
 
 Then run:
 
